@@ -22,7 +22,11 @@ if [ -z "$container" ]; then
     echo "No running Jellyfin Docker container was found." >&2
     exit 1
 fi
-docker exec "$container" rm -rf /config/plugins/Kaevo
+timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+if docker exec "$container" test -d /config/plugins/Kaevo; then
+    docker exec "$container" mv /config/plugins/Kaevo "/config/plugins/Kaevo.backup-$timestamp"
+    echo "Backed up the previous plugin as Kaevo.backup-$timestamp."
+fi
 docker cp "$tmp_dir/Kaevo" "$container:/config/plugins/Kaevo"
 docker restart "$container" >/dev/null
 echo "Installed Kaevo and restarted Jellyfin container $container."'

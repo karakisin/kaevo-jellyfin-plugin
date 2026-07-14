@@ -4,10 +4,18 @@
     "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
     "imageUrl": "https://raw.githubusercontent.com/karakisin/kaevo-jellyfin-plugin/main/assets/Kaevo.Plugin.Icon.png",
     "name": "Kaevo",
-    "description": "Provides local, read-only Jellyfin metadata endpoints for Kaevo without cloud relay, streaming URLs, image binaries, or provider secrets.",
+    "description": "Connects Jellyfin to Kaevo Cloud through an outbound-only, least-privilege connector with local playback processing.",
     "owner": "Kaevo",
-    "overview": "Local read-only metadata access for Kaevo",
+    "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
+      {
+        "version": "0.2.0.0",
+        "changelog": "Adds the plugin-only Kaevo Cloud connector, remote metadata and artwork, guarded Jellyfin writes, playback preparation, and an outbound secure playback relay.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.0/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "1e8c83978268686d6102262168959b32",
+        "timestamp": "2026-07-14T10:17:21Z"
+      },
       {
         "version": "0.1.2.0",
         "changelog": "Fixes Jellyfin 10.11 snapshot item querying and restores the Kaevo settings page with a configurable snapshot limit.",
