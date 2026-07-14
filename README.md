@@ -1,6 +1,6 @@
 # Kaevo Jellyfin Plugin
 
-Kaevo 0.1.1 is a small, local, read-only metadata plugin for Jellyfin 10.11.x.
+Kaevo 0.1.2 is a small, local, read-only metadata plugin for Jellyfin 10.11.x.
 It exposes status, library counts, and a bounded home-screen snapshot. It does
 not connect to Kaevo Cloud, AWS, or any relay service.
 

@@ -9,6 +9,14 @@
     "overview": "Local read-only metadata access for Kaevo",
     "versions": [
       {
+        "version": "0.1.2.0",
+        "changelog": "Fixes Jellyfin 10.11 snapshot item querying and restores the Kaevo settings page with a configurable snapshot limit.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.1.2/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "b30e5b4ad072f9ac4175b9324c7529bc",
+        "timestamp": "2026-07-14T08:45:48Z"
+      },
+      {
         "version": "0.1.1.0",
         "changelog": "Fixes main snapshot compatibility with Jellyfin 10.11 while preserving bounded read-only metadata and image tags.",
         "targetAbi": "10.11.0.0",

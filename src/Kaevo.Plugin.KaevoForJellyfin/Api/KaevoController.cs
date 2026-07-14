@@ -32,7 +32,7 @@ public sealed class KaevoController : ControllerBase
     [HttpGet("status")]
     public ActionResult<KaevoStatusResponse> GetStatus()
     {
-        return Ok(new KaevoStatusResponse("ok", "Kaevo", "0.1.1", false));
+        return Ok(new KaevoStatusResponse("ok", "Kaevo", "0.1.2", false));
     }
 
     [HttpGet("media-scan")]
@@ -132,7 +132,23 @@ public sealed class KaevoController : ControllerBase
 
     private IReadOnlyList<KaevoItemMetadata> QueryMetadata(InternalItemsQuery query)
     {
-        return _libraryManager.GetItemList(query)
+        // Jellyfin 10.11 changed GetItemList's return contract from List<BaseItem>
+        // to IReadOnlyList<BaseItem>. Resolve the runtime method so this net8.0
+        // compatibility build does not bind to the obsolete return signature.
+        var method = _libraryManager.GetType()
+            .GetMethods()
+            .FirstOrDefault(candidate =>
+                candidate.Name == "GetItemList"
+                && candidate.GetParameters().Length == 1
+                && candidate.GetParameters()[0].ParameterType.IsInstanceOfType(query));
+
+        if (method?.Invoke(_libraryManager, new object[] { query }) is not IEnumerable items)
+        {
+            return Array.Empty<KaevoItemMetadata>();
+        }
+
+        return items.Cast<object>()
+            .OfType<BaseItem>()
             .Select(ToMetadata)
             .ToArray();
     }

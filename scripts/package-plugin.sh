@@ -25,7 +25,7 @@ fi
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Fixes main snapshot compatibility with Jellyfin 10.11 while preserving bounded read-only metadata and image tags.",
+  "changelog": "Fixes Jellyfin 10.11 snapshot item querying and restores the Kaevo settings page with a configurable snapshot limit.",
   "description": "Provides local, read-only Jellyfin metadata endpoints for Kaevo without cloud relay, streaming URLs, image binaries, or provider secrets.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -33,7 +33,7 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.1.1.0"
+  "version": "0.1.2.0"
 }
 EOF
 

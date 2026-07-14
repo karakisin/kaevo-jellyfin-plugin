@@ -5,14 +5,56 @@
     <title>Kaevo</title>
 </head>
 <body>
-    <div class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button">
+    <div id="KaevoConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button">
         <div data-role="content">
             <div class="content-primary">
-                <h2>Kaevo</h2>
-                <p>Kaevo provides local, read-only Jellyfin metadata endpoints.</p>
-                <p>Cloud relay is disabled in version 0.1.1.</p>
+                <form id="KaevoConfigForm">
+                    <h2>Kaevo</h2>
+                    <p>Kaevo provides local, read-only Jellyfin metadata endpoints.</p>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="SnapshotItemLimit">Snapshot items per section</label>
+                        <input id="SnapshotItemLimit" name="SnapshotItemLimit" type="number" is="emby-input" min="1" max="100" />
+                        <div class="fieldDescription">Limits movies, shows, collections, and Continue Watching returned by the main snapshot endpoint.</div>
+                    </div>
+                    <div class="fieldDescription">Cloud relay is disabled in version 0.1.2.</div>
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
             </div>
         </div>
+        <script type="text/javascript">
+            var KaevoConfig = {
+                pluginUniqueId: '80c77b84-7f2d-4b52-84c7-7dfe68cd95ae'
+            };
+
+            document.querySelector('#KaevoConfigPage')
+                .addEventListener('pageshow', function() {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function(config) {
+                        document.querySelector('#SnapshotItemLimit').value = config.SnapshotItemLimit || 50;
+                        Dashboard.hideLoadingMsg();
+                    });
+                });
+
+            document.querySelector('#KaevoConfigForm')
+                .addEventListener('submit', function(event) {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function(config) {
+                        var value = parseInt(document.querySelector('#SnapshotItemLimit').value, 10);
+                        config.SnapshotItemLimit = Math.max(1, Math.min(100, value || 50));
+                        config.CloudRelayEnabled = false;
+                        ApiClient.updatePluginConfiguration(KaevoConfig.pluginUniqueId, config).then(function(result) {
+                            Dashboard.processPluginConfigurationUpdateResult(result);
+                        });
+                    });
+
+                    event.preventDefault();
+                    return false;
+                });
+        </script>
     </div>
 </body>
 </html>
