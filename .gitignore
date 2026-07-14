@@ -1,0 +1,6 @@
+artifacts/build/
+artifacts/package/
+artifacts/repository/
+src/**/bin/
+src/**/obj/
+.DS_Store

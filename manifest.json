@@ -1,0 +1,20 @@
+[
+  {
+    "category": "General",
+    "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
+    "name": "Kaevo",
+    "description": "Provides local, read-only Jellyfin metadata endpoints for Kaevo without cloud relay, streaming URLs, image binaries, or provider secrets.",
+    "owner": "Kaevo",
+    "overview": "Local read-only metadata access for Kaevo",
+    "versions": [
+      {
+        "version": "0.1.0.0",
+        "changelog": "Initial Kaevo release with local read-only status, media counts, and bounded main snapshot endpoints.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.1.0/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "6d1ec88bf98e676c41e7fd67e677d432",
+        "timestamp": "2026-07-14T08:05:38Z"
+      }
+    ]
+  }
+]
