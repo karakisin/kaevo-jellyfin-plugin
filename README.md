@@ -1,57 +1,88 @@
 # Kaevo Jellyfin Plugin
 
-Kaevo 0.1.2 is a small, local, read-only metadata plugin for Jellyfin 10.11.x.
-It exposes status, library counts, and a bounded home-screen snapshot. It does
-not connect to Kaevo Cloud, AWS, or any relay service.
+Kaevo 0.2.0 is the only home-side component required by Kaevo Cloud. The plugin
+runs inside Jellyfin 10.11.x and maintains outbound-only authenticated
+connections to the Kaevo control plane and playback relay. There is no separate
+Kaevo Home Server service.
+
+## Architecture
+
+```text
+Kaevo iOS → Kaevo Cloud/relay ← outbound Kaevo Jellyfin Plugin → Jellyfin/FFmpeg
+```
+
+- Jellyfin, FFmpeg, and the home server perform direct play, live remux, and
+  live transcoding.
+- Kaevo Cloud carries bounded metadata, artwork, commands, and encrypted
+  transport traffic. It does not receive provider credentials or filesystem
+  paths and does not transcode media.
+- Jellyfin is not exposed with router port forwarding.
+- The plugin locally revalidates every command and playback request.
+
+## Capabilities and safeguards
+
+- Bounded metadata and artwork retrieval.
+- Favorite/unfavorite and played/unplayed writes, disabled by default.
+- Device-, profile-, connector-, item-, media-source-, session-, mode-, and
+  bitrate-bound playback grants.
+- Strict Jellyfin playback route and query allowlists.
+- Outbound WebSocket relay with 256 KiB chunks and HLS URL rewriting.
+- Bounded read-only media scan.
+- One-item optimizer planning, disabled by default.
+- Real-media optimizer execution is unconditionally disabled in 0.2.0.
+- Connector credentials are stored locally with owner-only file permissions.
 
 ## Install from the Jellyfin Catalog
 
-Add the Kaevo repository in **Dashboard → Plugins → Repositories**:
+Add this repository in **Dashboard → Plugins → Repositories**:
 
 ```text
 https://raw.githubusercontent.com/karakisin/kaevo-jellyfin-plugin/main/manifest.json
 ```
 
-Then open **Catalog**, search for **Kaevo**, select it, and press **Install**.
-Restart Jellyfin when prompted. The catalog repository is third-party and must
-be added once before Kaevo appears in search.
+Open **Catalog**, search for **Kaevo**, install it, and restart Jellyfin.
 
-## Compatibility
+## Compatibility and build
 
-- Plugin target framework: `net8.0`
-- Intended server: Jellyfin `10.11.x`
-- Build environment: Docker image `mcr.microsoft.com/dotnet/sdk:8.0`
-- API compile contract: Jellyfin `10.10.7` (the final Jellyfin API line that
-  targets .NET 8). Jellyfin 10.11 itself targets .NET 9, whose runtime can load
-  this `net8.0` plugin. Test against the exact installed 10.11 server release.
-
-## Build and package on the Mac
+- Plugin target: `net8.0`
+- Jellyfin target: `10.11.x`
+- Docker SDK: `mcr.microsoft.com/dotnet/sdk:8.0`
+- No host `dotnet` installation is required.
 
 ```bash
 cd "/Users/jeffersonsumagang/Developer/StageDoorNative/Kaevo Jellyfin Plugin"
+scripts/test-plugin-docker.sh
 scripts/build-plugin-docker.sh
 scripts/package-plugin.sh
 ```
 
-No host installation of `dotnet` is used or required.
+## Configuration
 
-Build output is written to `artifacts/build/`. The installable directory and
-archive are written to `artifacts/package/Kaevo/` and
-`artifacts/package/Kaevo.Plugin.KaevoForJellyfin.zip`.
+The Jellyfin application must receive its API key as a secret environment
+variable. Never put it in source control or the plugin configuration page.
 
-## Endpoints
+```text
+KAEVO_JELLYFIN_API_KEY=<Jellyfin API key scoped to this server>
+```
+
+In **Dashboard → Plugins → Kaevo** configure the HTTPS Cloud URL, WSS relay
+URL, Kaevo profile ID, connector ID, one-time pairing code, loopback Jellyfin
+URL, and Jellyfin user ID. Enable writes and playback only after the connector
+shows online.
+
+## Local diagnostic endpoints
 
 - `GET /kaevo/status`
+- `GET /kaevo/cloud/status`
 - `GET /kaevo/media-scan`
 - `GET /kaevo/main-snapshot`
 
-The snapshot caps each item section at 50 by default (hard maximum 100). It
-contains metadata, item IDs, and image cache tags only. It never returns image
-binaries, stream URLs, provider credentials, or provider IDs.
+These endpoints never return connector tokens, pairing codes, playback grants,
+Jellyfin API keys, or local media paths.
 
 See [docs/JELLYFIN_PLUGIN_INSTALL_TEST.md](docs/JELLYFIN_PLUGIN_INSTALL_TEST.md)
-for installation and test commands.
+for installation, pairing, validation, and rollback.
 
 ## License
 
-Kaevo Jellyfin Plugin is licensed under GPL-3.0. See [LICENSE](LICENSE).
+GPL-3.0. See [LICENSE](LICENSE).

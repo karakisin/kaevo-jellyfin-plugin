@@ -5,6 +5,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Mvc;
 using Kaevo.Plugin.KaevoForJellyfin.Models;
+using Kaevo.Plugin.KaevoForJellyfin.Services;
 
 namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 
@@ -18,21 +19,46 @@ public sealed class KaevoController : ControllerBase
     private readonly ILibraryManager _libraryManager;
     private readonly IUserManager _userManager;
     private readonly IImageProcessor _imageProcessor;
+    private readonly KaevoCloudState _cloudState;
 
     public KaevoController(
         ILibraryManager libraryManager,
         IUserManager userManager,
-        IImageProcessor imageProcessor)
+        IImageProcessor imageProcessor,
+        KaevoCloudState cloudState)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
         _imageProcessor = imageProcessor;
+        _cloudState = cloudState;
     }
 
     [HttpGet("status")]
     public ActionResult<KaevoStatusResponse> GetStatus()
     {
-        return Ok(new KaevoStatusResponse("ok", "Kaevo", "0.1.2", false));
+        var configuration = KaevoPlugin.Instance?.Configuration ?? new Configuration.PluginConfiguration();
+        var cloud = _cloudState.Snapshot();
+        return Ok(new KaevoStatusResponse(
+            "ok",
+            "Kaevo",
+            "0.2.0",
+            configuration.CloudConnectorEnabled,
+            cloud.Status,
+            cloud.LastHeartbeatUtc,
+            configuration.RemoteMetadataEnabled,
+            configuration.RemoteWritesEnabled,
+            configuration.RemotePlaybackEnabled,
+            configuration.OptimizerExecutionEnabled));
+    }
+
+    [HttpGet("cloud/status")]
+    public ActionResult<KaevoCloudPairingStatus> GetCloudStatus()
+    {
+        var cloud = _cloudState.Snapshot();
+        return Ok(new KaevoCloudPairingStatus(
+            cloud.Status,
+            cloud.LastHeartbeatUtc,
+            cloud.LastError));
     }
 
     [HttpGet("media-scan")]

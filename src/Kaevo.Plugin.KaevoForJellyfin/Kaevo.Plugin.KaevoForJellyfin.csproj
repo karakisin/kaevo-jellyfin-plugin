@@ -4,13 +4,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>12</LangVersion>
-    <Version>0.1.2</Version>
-    <AssemblyVersion>0.1.2.0</AssemblyVersion>
-    <FileVersion>0.1.2.0</FileVersion>
+    <Version>0.2.0</Version>
+    <AssemblyVersion>0.2.0.0</AssemblyVersion>
+    <FileVersion>0.2.0.0</FileVersion>
     <RootNamespace>Kaevo.Plugin.KaevoForJellyfin</RootNamespace>
     <AssemblyName>Kaevo.Plugin.KaevoForJellyfin</AssemblyName>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin/**;obj/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <!-- Jellyfin 10.11 runs on .NET 9. The 10.10.7 contract is used here so the
@@ -23,5 +24,9 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <EmbeddedResource Include="Configuration/configPage.html" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Kaevo.Plugin.KaevoForJellyfin.Tests" />
   </ItemGroup>
 </Project>

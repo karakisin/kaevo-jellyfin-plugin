@@ -1,69 +1,99 @@
-# Jellyfin Plugin Install and Test
+# Kaevo 0.2.0 Install, Pair, and Test
 
-Run all build commands on the Mac from:
+## 1. Validate and package on the Mac
 
 ```bash
 cd "/Users/jeffersonsumagang/Developer/StageDoorNative/Kaevo Jellyfin Plugin"
-```
-
-## Validate, build, and package
-
-```bash
 bash -n scripts/build-plugin-docker.sh
 bash -n scripts/package-plugin.sh
 bash -n scripts/install-plugin-to-truenas.sh
+bash -n scripts/test-plugin-docker.sh
+scripts/test-plugin-docker.sh
 scripts/build-plugin-docker.sh
 scripts/package-plugin.sh
 ```
 
-## Install to TrueNAS
+## 2. Install
 
-### Jellyfin Catalog installation
-
-In Jellyfin, open **Dashboard → Plugins → Repositories**, add a repository named
-`Kaevo`, and use this URL:
+Catalog URL:
 
 ```text
 https://raw.githubusercontent.com/karakisin/kaevo-jellyfin-plugin/main/manifest.json
 ```
 
-Save it, open **Catalog**, search for `Kaevo`, press **Install**, and restart
-Jellyfin when prompted.
-
-### Direct installation fallback
-
-The installer streams the packaged `Kaevo` directory over SSH, discovers the
-running Docker container whose name or image contains `jellyfin`, copies the
-plugin to `/config/plugins/Kaevo`, and restarts that container.
+Direct-install fallback:
 
 ```bash
 scripts/install-plugin-to-truenas.sh root@192.168.68.203
 ```
 
-If the TrueNAS SSH account is not `root`, pass the correct SSH destination. It
-must have permission to run Docker commands. This script assumes the current
-TrueNAS Apps Docker runtime and a Jellyfin `/config` mount.
+Restart Jellyfin and confirm **Kaevo 0.2.0** appears under Plugins.
 
-After the restart, confirm that **Kaevo 0.1.2** appears in Jellyfin Dashboard →
-Plugins. Check the Jellyfin log if the plugin is not listed.
+## 3. Add the local Jellyfin secret
 
-## Test
+Create a dedicated Jellyfin API key. Add it to the Jellyfin TrueNAS application
+as a secret environment variable, then restart Jellyfin:
 
-```bash
-curl --fail-with-body --silent --show-error \
-  http://192.168.68.203:30013/kaevo/status | jq
-
-curl --fail-with-body --silent --show-error \
-  http://192.168.68.203:30013/kaevo/media-scan | jq
-
-curl --fail-with-body --silent --show-error \
-  http://192.168.68.203:30013/kaevo/main-snapshot | jq
+```text
+KAEVO_JELLYFIN_API_KEY=<secret value>
 ```
 
-If Jellyfin requires authentication for plugin controller routes, add:
+The plugin accepts only a loopback local Jellyfin URL. The key is injected only
+into local requests and is never sent to Cloud or the playback relay.
+
+## 4. Pair
+
+Create a connector pairing code from Kaevo Cloud/iOS. In Jellyfin open
+**Dashboard → Plugins → Kaevo** and enter:
+
+- Cloud API URL (`https://...`)
+- Relay WebSocket URL (`wss://...`)
+- Kaevo profile ID
+- Connector ID
+- One-time pairing code
+- Local Jellyfin URL (`http://127.0.0.1:8096` by default)
+- Jellyfin user ID
+
+Enable the connector and metadata, save, and wait for `/kaevo/cloud/status` to
+report `online`. The pairing code is cleared after exchange.
+
+## 5. Verify local endpoints
 
 ```bash
--H "X-Emby-Token: YOUR_JELLYFIN_API_KEY"
+curl -fsS http://192.168.68.203:30013/kaevo/status | jq
+curl -fsS http://192.168.68.203:30013/kaevo/cloud/status | jq
+curl -fsS http://192.168.68.203:30013/kaevo/media-scan | jq
+curl -fsS http://192.168.68.203:30013/kaevo/main-snapshot | jq
 ```
 
-Do not put an API key in the plugin configuration or source tree.
+Expected: version `0.2.0`, connector `online`, recent heartbeat, bounded counts,
+and no secrets or filesystem paths.
+
+## 6. Enable capabilities progressively
+
+1. Metadata and artwork.
+2. Remote playback.
+3. Reversible writes.
+4. Optimizer planning.
+
+Verify iOS on cellular after each step. Favorite/unfavorite is the recommended
+first write test because it is reversible. Do not enable or test real-media
+optimizer execution in 0.2.0.
+
+## 7. Playback verification
+
+From the Kaevo iOS app on cellular, start one known test item. Confirm:
+
+- Jellyfin Dashboard shows the playback session.
+- Jellyfin/FFmpeg performs direct play, remux, or transcode locally.
+- Seeking works.
+- The iOS URL points to the Kaevo relay, not the LAN address.
+- Jellyfin, connector, and relay logs contain no API key or grant URL.
+
+## 8. Rollback
+
+Disable **Kaevo Cloud connector** in plugin settings and restart Jellyfin. This
+stops all outbound activity while retaining the local diagnostic endpoints.
+For complete removal, uninstall Kaevo from Jellyfin and delete its plugin data
+directory after making a backup. Revoking the connector in Cloud invalidates
+the stored connector token.

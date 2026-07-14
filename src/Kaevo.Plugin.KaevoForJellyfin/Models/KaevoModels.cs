@@ -4,7 +4,18 @@ public sealed record KaevoStatusResponse(
     string Status,
     string Plugin,
     string Version,
-    bool CloudRelay);
+    bool CloudRelay,
+    string CloudConnectorStatus,
+    DateTimeOffset? LastCloudHeartbeatUtc,
+    bool RemoteMetadata,
+    bool RemoteWrites,
+    bool RemotePlayback,
+    bool OptimizerExecution);
+
+public sealed record KaevoCloudPairingStatus(
+    string State,
+    DateTimeOffset? LastHeartbeatUtc,
+    string? LastError);
 
 public sealed record KaevoMediaScanResponse(
     int Libraries,

@@ -25,15 +25,15 @@ fi
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Fixes Jellyfin 10.11 snapshot item querying and restores the Kaevo settings page with a configurable snapshot limit.",
-  "description": "Provides local, read-only Jellyfin metadata endpoints for Kaevo without cloud relay, streaming URLs, image binaries, or provider secrets.",
+  "changelog": "Adds the plugin-only Kaevo Cloud connector, remote metadata and artwork, guarded Jellyfin writes, playback preparation, and an outbound secure playback relay.",
+  "description": "Connects Jellyfin to Kaevo Cloud through an outbound-only, least-privilege connector with local playback processing.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
-  "overview": "Local read-only metadata access for Kaevo",
+  "overview": "Secure Kaevo Cloud access for Jellyfin",
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.1.2.0"
+  "version": "0.2.0.0"
 }
 EOF
 
