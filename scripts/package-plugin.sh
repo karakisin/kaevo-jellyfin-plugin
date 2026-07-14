@@ -25,15 +25,15 @@ fi
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Adds the plugin-only Kaevo Cloud connector, remote metadata and artwork, guarded Jellyfin writes, playback preparation, and an outbound secure playback relay.",
-  "description": "Connects Jellyfin to Kaevo Cloud through an outbound-only, least-privilege connector with local playback processing.",
+  "changelog": "Adds one-tap, administrator-authorized Cloud activation from the Kaevo app while keeping remote playback, mutations, and optimizer execution disabled.",
+  "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
   "overview": "Secure Kaevo Cloud access for Jellyfin",
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.0.0"
+  "version": "0.2.1.0"
 }
 EOF
 

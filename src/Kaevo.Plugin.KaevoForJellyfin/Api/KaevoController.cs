@@ -3,6 +3,7 @@ using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Kaevo.Plugin.KaevoForJellyfin.Models;
 using Kaevo.Plugin.KaevoForJellyfin.Services;
@@ -20,17 +21,20 @@ public sealed class KaevoController : ControllerBase
     private readonly IUserManager _userManager;
     private readonly IImageProcessor _imageProcessor;
     private readonly KaevoCloudState _cloudState;
+    private readonly KaevoSecretStore _secretStore;
 
     public KaevoController(
         ILibraryManager libraryManager,
         IUserManager userManager,
         IImageProcessor imageProcessor,
-        KaevoCloudState cloudState)
+        KaevoCloudState cloudState,
+        KaevoSecretStore secretStore)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
         _imageProcessor = imageProcessor;
         _cloudState = cloudState;
+        _secretStore = secretStore;
     }
 
     [HttpGet("status")]
@@ -41,7 +45,7 @@ public sealed class KaevoController : ControllerBase
         return Ok(new KaevoStatusResponse(
             "ok",
             "Kaevo",
-            "0.2.0",
+            "0.2.1",
             configuration.CloudConnectorEnabled,
             cloud.Status,
             cloud.LastHeartbeatUtc,
@@ -59,6 +63,54 @@ public sealed class KaevoController : ControllerBase
             cloud.Status,
             cloud.LastHeartbeatUtc,
             cloud.LastError));
+    }
+
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("cloud/activate")]
+    public async Task<ActionResult<KaevoCloudActivationResponse>> ActivateCloud(
+        [FromBody] KaevoCloudActivationRequest request,
+        CancellationToken cancellationToken)
+    {
+        KaevoValidatedCloudActivation activation;
+        try
+        {
+            activation = KaevoCloudActivationValidator.Validate(request);
+        }
+        catch (ArgumentException exception)
+        {
+            return BadRequest(new KaevoCloudActivationResponse("invalid", exception.Message));
+        }
+
+        // Persist the Jellyfin credential only in the plugin's owner-only secret
+        // file. It is never copied into plugin configuration, logs, or responses.
+        await _secretStore.WriteAsync(
+            new KaevoConnectorSecrets(string.Empty, string.Empty, activation.JellyfinAccessToken),
+            cancellationToken).ConfigureAwait(false);
+
+        var configuration = KaevoPlugin.Instance?.Configuration;
+        if (configuration is null)
+        {
+            return StatusCode(503, new KaevoCloudActivationResponse("unavailable", "pluginUnavailable"));
+        }
+
+        configuration.CloudBaseUrl = activation.CloudBaseUrl;
+        configuration.ProfileId = activation.ProfileId;
+        configuration.ConnectorId = activation.ConnectorId;
+        configuration.PairingCode = activation.PairingCode;
+        configuration.LocalJellyfinBaseUrl = "http://127.0.0.1:8096";
+        configuration.JellyfinUserId = activation.JellyfinUserId;
+        configuration.CloudConnectorEnabled = true;
+        configuration.RemoteMetadataEnabled = true;
+        configuration.RemoteArtworkEnabled = true;
+        configuration.RemoteWritesEnabled = false;
+        configuration.RemotePlaybackEnabled = false;
+        configuration.OptimizerExecutionEnabled = false;
+        KaevoPlugin.Instance?.SaveConfiguration();
+        _cloudState.Set("connecting");
+
+        return Accepted(new KaevoCloudActivationResponse(
+            "connecting",
+            "Remote access is being prepared."));
     }
 
     [HttpGet("media-scan")]

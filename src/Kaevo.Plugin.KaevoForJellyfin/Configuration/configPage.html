@@ -5,67 +5,26 @@
     <title>Kaevo</title>
 </head>
 <body>
-    <div id="KaevoConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+    <div id="KaevoConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button">
         <div data-role="content">
             <div class="content-primary">
                 <form id="KaevoConfigForm">
                     <h2>Kaevo</h2>
-                    <p>Kaevo connects this Jellyfin server to Kaevo Cloud through an outbound-only authenticated connection.</p>
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="SnapshotItemLimit">Snapshot items per section</label>
-                        <input id="SnapshotItemLimit" name="SnapshotItemLimit" type="number" is="emby-input" min="1" max="100" />
-                        <div class="fieldDescription">Limits movies, shows, collections, and Continue Watching returned by the main snapshot endpoint.</div>
-                    </div>
-                    <h3>Kaevo Cloud</h3>
-                    <div class="fieldDescription">Connector status: <strong id="CloudConnectorStatus">Checking…</strong></div>
-                    <div class="checkboxContainer checkboxContainer-withDescription">
-                        <label><input id="CloudConnectorEnabled" type="checkbox" is="emby-checkbox" /><span>Enable Kaevo Cloud connector</span></label>
-                        <div class="fieldDescription">The connection is outbound only. Jellyfin is never exposed through router port forwarding.</div>
-                    </div>
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="CloudBaseUrl">Cloud API URL</label>
-                        <input id="CloudBaseUrl" type="url" is="emby-input" placeholder="https://api.example.com" />
-                    </div>
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="RelayWebSocketUrl">Playback relay WebSocket URL</label>
-                        <input id="RelayWebSocketUrl" type="url" is="emby-input" placeholder="wss://relay.example.com" />
-                    </div>
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="ProfileId">Kaevo profile ID</label>
-                        <input id="ProfileId" type="text" is="emby-input" autocomplete="off" />
-                    </div>
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="ConnectorId">Connector ID</label>
-                        <input id="ConnectorId" type="text" is="emby-input" autocomplete="off" />
-                    </div>
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="PairingCode">One-time pairing code</label>
-                        <input id="PairingCode" type="password" is="emby-input" autocomplete="new-password" />
-                        <div class="fieldDescription">The plugin exchanges and clears this short-lived code. Connector secrets are stored in the plugin data directory with owner-only permissions.</div>
-                    </div>
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="LocalJellyfinBaseUrl">Local Jellyfin URL</label>
-                        <input id="LocalJellyfinBaseUrl" type="url" is="emby-input" value="http://127.0.0.1:8096" />
-                        <div class="fieldDescription">For safety, only a loopback address is accepted.</div>
-                    </div>
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="JellyfinUserId">Jellyfin user ID</label>
-                        <input id="JellyfinUserId" type="text" is="emby-input" autocomplete="off" />
-                    </div>
-                    <div class="fieldDescription">Set KAEVO_JELLYFIN_API_KEY as a secret environment variable on the Jellyfin application. It is never entered into this page or sent to Kaevo Cloud.</div>
+                    <p>Kaevo securely connects this Jellyfin server to the Kaevo app.</p>
 
-                    <h3>Remote capabilities</h3>
-                    <div class="checkboxContainer checkboxContainer-withDescription"><label><input id="RemoteMetadataEnabled" type="checkbox" is="emby-checkbox" /><span>Metadata</span></label></div>
-                    <div class="checkboxContainer checkboxContainer-withDescription"><label><input id="RemoteArtworkEnabled" type="checkbox" is="emby-checkbox" /><span>Artwork</span></label></div>
-                    <div class="checkboxContainer checkboxContainer-withDescription"><label><input id="RemoteWritesEnabled" type="checkbox" is="emby-checkbox" /><span>Reversible Jellyfin writes</span></label><div class="fieldDescription">Allows played/unplayed and favorite/unfavorite only.</div></div>
-                    <div class="checkboxContainer checkboxContainer-withDescription"><label><input id="RemotePlaybackEnabled" type="checkbox" is="emby-checkbox" /><span>Remote playback relay</span></label><div class="fieldDescription">Jellyfin performs direct play, remux, and transcoding locally.</div></div>
-                    <div class="checkboxContainer checkboxContainer-withDescription"><label><input id="MediaScanEnabled" type="checkbox" is="emby-checkbox" /><span>Bounded media scan</span></label></div>
-                    <div class="checkboxContainer checkboxContainer-withDescription"><label><input id="OptimizerPlanningEnabled" type="checkbox" is="emby-checkbox" /><span>Optimizer planning</span></label><div class="fieldDescription">Planning is read-only. Real-media optimizer execution remains disabled in this release.</div></div>
-                    <div>
-                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
-                            <span>Save</span>
-                        </button>
+                    <h3>Remote Access</h3>
+                    <div class="fieldDescription">Status: <strong id="CloudConnectorStatus">Checking…</strong></div>
+                    <p id="CloudSetupMessage">Open the Kaevo app to start Remote Access. No server addresses, codes, or credentials are entered here.</p>
+
+                    <h3>Library Snapshot</h3>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="SnapshotItemLimit">Items per section</label>
+                        <input id="SnapshotItemLimit" name="SnapshotItemLimit" type="number" is="emby-input" min="1" max="100" />
+                        <div class="fieldDescription">Limits the number of movies, shows, collections, and Continue Watching items Kaevo reads at once.</div>
                     </div>
+                    <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                        <span>Save</span>
+                    </button>
                 </form>
             </div>
         </div>
@@ -74,53 +33,37 @@
                 pluginUniqueId: '80c77b84-7f2d-4b52-84c7-7dfe68cd95ae'
             };
 
-            document.querySelector('#KaevoConfigPage')
-                .addEventListener('pageshow', function() {
-                    Dashboard.showLoadingMsg();
-                    ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function(config) {
-                        document.querySelector('#SnapshotItemLimit').value = config.SnapshotItemLimit || 50;
-                        ['CloudConnectorEnabled','RemoteMetadataEnabled','RemoteArtworkEnabled','RemoteWritesEnabled','RemotePlaybackEnabled','MediaScanEnabled','OptimizerPlanningEnabled'].forEach(function(id) {
-                            document.querySelector('#' + id).checked = !!config[id];
-                        });
-                        ['CloudBaseUrl','RelayWebSocketUrl','ProfileId','ConnectorId','LocalJellyfinBaseUrl','JellyfinUserId'].forEach(function(id) {
-                            document.querySelector('#' + id).value = config[id] || '';
-                        });
-                        document.querySelector('#PairingCode').value = '';
-                        ApiClient.getJSON(ApiClient.getUrl('kaevo/cloud/status')).then(function(status) {
-                            var text = status.state || 'unknown';
-                            if (status.lastHeartbeatUtc) text += ' · last heartbeat ' + new Date(status.lastHeartbeatUtc).toLocaleString();
-                            if (status.lastError) text += ' · ' + status.lastError;
-                            document.querySelector('#CloudConnectorStatus').textContent = text;
-                        }).catch(function() {
-                            document.querySelector('#CloudConnectorStatus').textContent = 'unavailable';
-                        });
-                        Dashboard.hideLoadingMsg();
-                    });
+            document.querySelector('#KaevoConfigPage').addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
+                    document.querySelector('#SnapshotItemLimit').value = config.SnapshotItemLimit || 50;
+                    return ApiClient.getJSON(ApiClient.getUrl('kaevo/cloud/status'));
+                }).then(function (status) {
+                    var ready = status.State === 'online' || status.state === 'online';
+                    document.querySelector('#CloudConnectorStatus').textContent = ready ? 'Remote Access Ready' : 'Not Connected';
+                    document.querySelector('#CloudSetupMessage').textContent = ready
+                        ? 'Remote Access is managed securely by the Kaevo app.'
+                        : 'Open the Kaevo app to start Remote Access. No server addresses, codes, or credentials are entered here.';
+                }).catch(function () {
+                    document.querySelector('#CloudConnectorStatus').textContent = 'Not Connected';
+                }).finally(function () {
+                    Dashboard.hideLoadingMsg();
                 });
+            });
 
-            document.querySelector('#KaevoConfigForm')
-                .addEventListener('submit', function(event) {
-                    Dashboard.showLoadingMsg();
-                    ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function(config) {
-                        var value = parseInt(document.querySelector('#SnapshotItemLimit').value, 10);
-                        config.SnapshotItemLimit = Math.max(1, Math.min(100, value || 50));
-                        ['CloudConnectorEnabled','RemoteMetadataEnabled','RemoteArtworkEnabled','RemoteWritesEnabled','RemotePlaybackEnabled','MediaScanEnabled','OptimizerPlanningEnabled'].forEach(function(id) {
-                            config[id] = document.querySelector('#' + id).checked;
-                        });
-                        ['CloudBaseUrl','RelayWebSocketUrl','ProfileId','ConnectorId','LocalJellyfinBaseUrl','JellyfinUserId'].forEach(function(id) {
-                            config[id] = document.querySelector('#' + id).value.trim();
-                        });
-                        var pairingCode = document.querySelector('#PairingCode').value.trim();
-                        if (pairingCode) config.PairingCode = pairingCode;
-                        config.OptimizerExecutionEnabled = false;
-                        ApiClient.updatePluginConfiguration(KaevoConfig.pluginUniqueId, config).then(function(result) {
-                            Dashboard.processPluginConfigurationUpdateResult(result);
-                        });
-                    });
-
-                    event.preventDefault();
-                    return false;
+            document.querySelector('#KaevoConfigForm').addEventListener('submit', function (event) {
+                event.preventDefault();
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
+                    var value = parseInt(document.querySelector('#SnapshotItemLimit').value, 10);
+                    config.SnapshotItemLimit = Math.max(1, Math.min(100, value || 50));
+                    config.OptimizerExecutionEnabled = false;
+                    return ApiClient.updatePluginConfiguration(KaevoConfig.pluginUniqueId, config);
+                }).then(function (result) {
+                    Dashboard.processPluginConfigurationUpdateResult(result);
                 });
+                return false;
+            });
         </script>
     </div>
 </body>

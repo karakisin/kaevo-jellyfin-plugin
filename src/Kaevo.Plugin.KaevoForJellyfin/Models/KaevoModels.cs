@@ -17,6 +17,18 @@ public sealed record KaevoCloudPairingStatus(
     DateTimeOffset? LastHeartbeatUtc,
     string? LastError);
 
+public sealed record KaevoCloudActivationRequest(
+    string CloudBaseUrl,
+    string ProfileId,
+    string ConnectorId,
+    string PairingCode,
+    string JellyfinUserId,
+    string JellyfinAccessToken);
+
+public sealed record KaevoCloudActivationResponse(
+    string State,
+    string Message);
+
 public sealed record KaevoMediaScanResponse(
     int Libraries,
     int Movies,

@@ -1,38 +1,33 @@
 # Kaevo Jellyfin Plugin
 
-Kaevo 0.2.0 is the only home-side component required by Kaevo Cloud. The plugin
-runs inside Jellyfin 10.11.x and maintains outbound-only authenticated
-connections to the Kaevo control plane and playback relay. There is no separate
-Kaevo Home Server service.
+The Kaevo Jellyfin Plugin is the local foundation for Kaevo. It runs inside the
+user's existing Jellyfin server and gives the Kaevo app bounded, read-only
+metadata access without requiring a separate Kaevo server installation.
 
-## Architecture
+## Current scope
 
-```text
-Kaevo iOS → Kaevo Cloud/relay ← outbound Kaevo Jellyfin Plugin → Jellyfin/FFmpeg
-```
+- Jellyfin: `10.11.x`
+- .NET target: `net8.0`
+- Foundation baseline: `0.1.0`
+- Current repository build: `0.2.1`
+- Supported phase: local metadata plus app-guided Cloud activation
 
-- Jellyfin, FFmpeg, and the home server perform direct play, live remux, and
-  live transcoding.
-- Kaevo Cloud carries bounded metadata, artwork, commands, and encrypted
-  transport traffic. It does not receive provider credentials or filesystem
-  paths and does not transcode media.
-- Jellyfin is not exposed with router port forwarding.
-- The plugin locally revalidates every command and playback request.
+Current endpoints:
 
-## Capabilities and safeguards
+- `GET /kaevo/status`
+- `GET /kaevo/media-scan`
+- `GET /kaevo/main-snapshot`
+- `POST /kaevo/cloud/activate` (authenticated Jellyfin administrator only)
 
-- Bounded metadata and artwork retrieval.
-- Favorite/unfavorite and played/unplayed writes, disabled by default.
-- Device-, profile-, connector-, item-, media-source-, session-, mode-, and
-  bitrate-bound playback grants.
-- Strict Jellyfin playback route and query allowlists.
-- Outbound WebSocket relay with 256 KiB chunks and HLS URL rewriting.
-- Bounded read-only media scan.
-- One-item optimizer planning, disabled by default.
-- Real-media optimizer execution is unconditionally disabled in 0.2.0.
-- Connector credentials are stored locally with owner-only file permissions.
+The snapshot may contain libraries, movies, shows, collections, Continue
+Watching items, item IDs, and image tags. It does not return image binaries,
+stream URLs, provider secrets, or local credentials.
 
-## Install from the Jellyfin Catalog
+The Kaevo app can activate the plugin without asking the user for a Cloud URL,
+pairing code, or TrueNAS environment credential. Remote playback, remote
+mutations, and optimizer execution remain disabled in this release.
+
+## Install from the Jellyfin catalog
 
 Add this repository in **Dashboard → Plugins → Repositories**:
 
@@ -40,48 +35,33 @@ Add this repository in **Dashboard → Plugins → Repositories**:
 https://raw.githubusercontent.com/karakisin/kaevo-jellyfin-plugin/main/manifest.json
 ```
 
-Open **Catalog**, search for **Kaevo**, install it, and restart Jellyfin.
+Open **Catalog**, find **Kaevo**, install it, and restart Jellyfin.
 
-## Compatibility and build
+## Build on the Mac
 
-- Plugin target: `net8.0`
-- Jellyfin target: `10.11.x`
-- Docker SDK: `mcr.microsoft.com/dotnet/sdk:8.0`
-- No host `dotnet` installation is required.
+The Mac has Docker and does not require host `dotnet`. The build script uses the
+.NET 8 SDK container.
 
 ```bash
 cd "/Users/jeffersonsumagang/Developer/StageDoorNative/Kaevo Jellyfin Plugin"
-scripts/test-plugin-docker.sh
+bash -n scripts/build-plugin-docker.sh
+bash -n scripts/package-plugin.sh
+bash -n scripts/install-plugin-to-truenas.sh
 scripts/build-plugin-docker.sh
 scripts/package-plugin.sh
 ```
 
-## Configuration
+Artifacts:
 
-The Jellyfin application must receive its API key as a secret environment
-variable. Never put it in source control or the plugin configuration page.
+- `artifacts/build/Kaevo.Plugin.KaevoForJellyfin.dll`
+- `artifacts/package/Kaevo/`
+- `artifacts/package/Kaevo.Plugin.KaevoForJellyfin.zip`
 
-```text
-KAEVO_JELLYFIN_API_KEY=<Jellyfin API key scoped to this server>
-```
-
-In **Dashboard → Plugins → Kaevo** configure the HTTPS Cloud URL, WSS relay
-URL, Kaevo profile ID, connector ID, one-time pairing code, loopback Jellyfin
-URL, and Jellyfin user ID. Enable writes and playback only after the connector
-shows online.
-
-## Local diagnostic endpoints
-
-- `GET /kaevo/status`
-- `GET /kaevo/cloud/status`
-- `GET /kaevo/media-scan`
-- `GET /kaevo/main-snapshot`
-
-These endpoints never return connector tokens, pairing codes, playback grants,
-Jellyfin API keys, or local media paths.
+TrueNAS cannot access the Mac's `/Users/...` path. Build and package on the Mac,
+then copy or install the finished artifact to Jellyfin.
 
 See [docs/JELLYFIN_PLUGIN_INSTALL_TEST.md](docs/JELLYFIN_PLUGIN_INSTALL_TEST.md)
-for installation, pairing, validation, and rollback.
+for installation and validation.
 
 ## License
 
