@@ -8,6 +8,7 @@ META_PATH="$PROJECT_ROOT/artifacts/package/Kaevo/meta.json"
 REPOSITORY_DIR="$PROJECT_ROOT/artifacts/repository"
 MANIFEST_PATH="$REPOSITORY_DIR/manifest.json"
 SOURCE_URL="${1:-${KAEVO_PLUGIN_SOURCE_URL:-}}"
+IMAGE_URL="${2:-${KAEVO_PLUGIN_IMAGE_URL:-https://raw.githubusercontent.com/karakisin/kaevo-jellyfin-plugin/main/assets/Kaevo.Plugin.Icon.png}}"
 
 if [[ -z "$SOURCE_URL" ]]; then
     echo "Usage: $0 https://example.com/Kaevo.Plugin.KaevoForJellyfin.zip" >&2
@@ -16,6 +17,11 @@ fi
 
 if [[ "$SOURCE_URL" != https://* ]]; then
     echo "The plugin source URL must use HTTPS." >&2
+    exit 1
+fi
+
+if [[ "$IMAGE_URL" != https://* ]]; then
+    echo "The plugin image URL must use HTTPS." >&2
     exit 1
 fi
 
@@ -49,10 +55,12 @@ cp "$ZIP_PATH" "$REPOSITORY_DIR/"
 jq -n \
     --slurpfile meta "$META_PATH" \
     --arg sourceUrl "$SOURCE_URL" \
+    --arg imageUrl "$IMAGE_URL" \
     --arg checksum "$CHECKSUM" \
     '[{
       category: $meta[0].category,
       guid: $meta[0].guid,
+      imageUrl: $imageUrl,
       name: $meta[0].name,
       description: $meta[0].description,
       owner: $meta[0].owner,
@@ -70,6 +78,7 @@ jq -n \
 jq -e '
   length == 1 and
   .[0].guid == "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae" and
+  (.[0].imageUrl | startswith("https://")) and
   .[0].versions[0].targetAbi == "10.11.0.0" and
   (.[0].versions[0].checksum | test("^[0-9a-f]{32}$")) and
   (.[0].versions[0].sourceUrl | startswith("https://"))

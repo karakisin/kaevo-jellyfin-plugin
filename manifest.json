@@ -2,6 +2,7 @@
   {
     "category": "General",
     "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
+    "imageUrl": "https://raw.githubusercontent.com/karakisin/kaevo-jellyfin-plugin/main/assets/Kaevo.Plugin.Icon.png",
     "name": "Kaevo",
     "description": "Provides local, read-only Jellyfin metadata endpoints for Kaevo without cloud relay, streaming URLs, image binaries, or provider secrets.",
     "owner": "Kaevo",
