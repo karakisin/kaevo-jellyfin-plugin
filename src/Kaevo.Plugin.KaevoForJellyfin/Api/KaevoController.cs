@@ -1,10 +1,8 @@
-using Jellyfin.Data.Entities;
+using System.Collections;
 using Jellyfin.Data.Enums;
-using MediaBrowser.Controller.Dto;
+using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
-using MediaBrowser.Model.Dto;
-using MediaBrowser.Model.Entities;
 using Microsoft.AspNetCore.Mvc;
 using Kaevo.Plugin.KaevoForJellyfin.Models;
 
@@ -19,22 +17,22 @@ public sealed class KaevoController : ControllerBase
     private const int MaximumItemLimit = 100;
     private readonly ILibraryManager _libraryManager;
     private readonly IUserManager _userManager;
-    private readonly IDtoService _dtoService;
+    private readonly IImageProcessor _imageProcessor;
 
     public KaevoController(
         ILibraryManager libraryManager,
         IUserManager userManager,
-        IDtoService dtoService)
+        IImageProcessor imageProcessor)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
-        _dtoService = dtoService;
+        _imageProcessor = imageProcessor;
     }
 
     [HttpGet("status")]
     public ActionResult<KaevoStatusResponse> GetStatus()
     {
-        return Ok(new KaevoStatusResponse("ok", "Kaevo", "0.1.0", false));
+        return Ok(new KaevoStatusResponse("ok", "Kaevo", "0.1.1", false));
     }
 
     [HttpGet("media-scan")]
@@ -55,7 +53,6 @@ public sealed class KaevoController : ControllerBase
             1,
             MaximumItemLimit);
 
-        var user = _userManager.Users.FirstOrDefault();
         var libraries = _libraryManager.GetVirtualFolders()
             .Select(folder => new KaevoLibraryMetadata(
                 folder.ItemId.ToString(),
@@ -67,10 +64,10 @@ public sealed class KaevoController : ControllerBase
             DateTimeOffset.UtcNow,
             limit,
             libraries,
-            QueryMetadata(BaseItemKind.Movie, limit, null),
-            QueryMetadata(BaseItemKind.Series, limit, null),
-            QueryMetadata(BaseItemKind.BoxSet, limit, null),
-            user is null ? Array.Empty<KaevoItemMetadata>() : QueryContinueWatching(user, limit));
+            QueryMetadata(BaseItemKind.Movie, limit),
+            QueryMetadata(BaseItemKind.Series, limit),
+            QueryMetadata(BaseItemKind.BoxSet, limit),
+            QueryContinueWatching(limit));
 
         return Ok(response);
     }
@@ -84,46 +81,69 @@ public sealed class KaevoController : ControllerBase
         });
     }
 
-    private IReadOnlyList<KaevoItemMetadata> QueryMetadata(BaseItemKind kind, int limit, User? user)
+    private IReadOnlyList<KaevoItemMetadata> QueryMetadata(BaseItemKind kind, int limit)
     {
-        return QueryMetadata(new InternalItemsQuery(user)
+        return QueryMetadata(new InternalItemsQuery
         {
             Recursive = true,
             Limit = limit,
             IncludeItemTypes = new[] { kind }
-        }, user);
+        });
     }
 
-    private IReadOnlyList<KaevoItemMetadata> QueryContinueWatching(User user, int limit)
+    private IReadOnlyList<KaevoItemMetadata> QueryContinueWatching(int limit)
     {
-        return QueryMetadata(new InternalItemsQuery(user)
+        try
         {
-            Recursive = true,
-            Limit = limit,
-            IsResumable = true,
-            IncludeItemTypes = new[] { BaseItemKind.Movie, BaseItemKind.Episode }
-        }, user);
+            // Jellyfin moved User between assemblies in 10.11. Resolve the active
+            // runtime type without binding this net8.0 plugin to the old type.
+            var users = _userManager.GetType().GetProperty("Users")?.GetValue(_userManager) as IEnumerable;
+            var user = users?.Cast<object>().FirstOrDefault();
+            if (user is null)
+            {
+                return Array.Empty<KaevoItemMetadata>();
+            }
+
+            var constructor = typeof(InternalItemsQuery).GetConstructors()
+                .FirstOrDefault(candidate =>
+                {
+                    var parameters = candidate.GetParameters();
+                    return parameters.Length == 1 && parameters[0].ParameterType.IsInstanceOfType(user);
+                });
+
+            if (constructor?.Invoke(new[] { user }) is not InternalItemsQuery query)
+            {
+                return Array.Empty<KaevoItemMetadata>();
+            }
+
+            query.Recursive = true;
+            query.Limit = limit;
+            query.IsResumable = true;
+            query.IncludeItemTypes = new[] { BaseItemKind.Movie, BaseItemKind.Episode };
+            return QueryMetadata(query);
+        }
+        catch (Exception)
+        {
+            // Continue Watching is optional. A Jellyfin API change must not make
+            // the rest of the bounded snapshot unavailable.
+            return Array.Empty<KaevoItemMetadata>();
+        }
     }
 
-    private IReadOnlyList<KaevoItemMetadata> QueryMetadata(InternalItemsQuery query, User? user)
+    private IReadOnlyList<KaevoItemMetadata> QueryMetadata(InternalItemsQuery query)
     {
-        var dtoOptions = new DtoOptions
-        {
-            EnableImages = true,
-            ImageTypeLimit = 1
-        };
-
         return _libraryManager.GetItemList(query)
-            .Select(item => ToMetadata(item, dtoOptions, user))
+            .Select(ToMetadata)
             .ToArray();
     }
 
-    private KaevoItemMetadata ToMetadata(BaseItem item, DtoOptions dtoOptions, User? user)
+    private KaevoItemMetadata ToMetadata(BaseItem item)
     {
-        BaseItemDto dto = _dtoService.GetBaseItemDto(item, dtoOptions, user, item);
-        var imageTags = dto.ImageTags?.ToDictionary(
-            pair => pair.Key.ToString(),
-            pair => pair.Value) ?? new Dictionary<string, string>();
+        var imageTags = item.ImageInfos
+            .GroupBy(image => image.Type)
+            .ToDictionary(
+                group => group.Key.ToString(),
+                group => _imageProcessor.GetImageCacheTag(item, group.First()));
 
         return new KaevoItemMetadata(
             item.Id.ToString("N"),

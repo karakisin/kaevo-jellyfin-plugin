@@ -44,7 +44,7 @@ If the TrueNAS SSH account is not `root`, pass the correct SSH destination. It
 must have permission to run Docker commands. This script assumes the current
 TrueNAS Apps Docker runtime and a Jellyfin `/config` mount.
 
-After the restart, confirm that **Kaevo 0.1.0** appears in Jellyfin Dashboard →
+After the restart, confirm that **Kaevo 0.1.1** appears in Jellyfin Dashboard →
 Plugins. Check the Jellyfin log if the plugin is not listed.
 
 ## Test

@@ -7,6 +7,7 @@ ZIP_PATH="$PROJECT_ROOT/artifacts/package/Kaevo.Plugin.KaevoForJellyfin.zip"
 META_PATH="$PROJECT_ROOT/artifacts/package/Kaevo/meta.json"
 REPOSITORY_DIR="$PROJECT_ROOT/artifacts/repository"
 MANIFEST_PATH="$REPOSITORY_DIR/manifest.json"
+PUBLISHED_MANIFEST_PATH="$PROJECT_ROOT/manifest.json"
 SOURCE_URL="${1:-${KAEVO_PLUGIN_SOURCE_URL:-}}"
 IMAGE_URL="${2:-${KAEVO_PLUGIN_IMAGE_URL:-https://raw.githubusercontent.com/karakisin/kaevo-jellyfin-plugin/main/assets/Kaevo.Plugin.Icon.png}}"
 
@@ -54,6 +55,7 @@ cp "$ZIP_PATH" "$REPOSITORY_DIR/"
 
 jq -n \
     --slurpfile meta "$META_PATH" \
+    --slurpfile published "$PUBLISHED_MANIFEST_PATH" \
     --arg sourceUrl "$SOURCE_URL" \
     --arg imageUrl "$IMAGE_URL" \
     --arg checksum "$CHECKSUM" \
@@ -65,14 +67,14 @@ jq -n \
       description: $meta[0].description,
       owner: $meta[0].owner,
       overview: $meta[0].overview,
-      versions: [{
+      versions: ([{
         version: $meta[0].version,
         changelog: $meta[0].changelog,
         targetAbi: $meta[0].targetAbi,
         sourceUrl: $sourceUrl,
         checksum: $checksum,
         timestamp: $meta[0].timestamp
-      }]
+      }] + (($published[0][0].versions // []) | map(select(.version != $meta[0].version))))
     }]' > "$MANIFEST_PATH"
 
 jq -e '
