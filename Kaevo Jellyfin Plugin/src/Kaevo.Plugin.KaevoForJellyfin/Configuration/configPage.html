@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Kaevo</title>
+</head>
+<body>
+    <div id="KaevoConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button">
+        <div data-role="content">
+            <div class="content-primary">
+                <form id="KaevoConfigForm">
+                    <h2>Kaevo</h2>
+                    <p>Kaevo securely connects this Jellyfin server to the Kaevo app.</p>
+
+                    <h3>Remote Access</h3>
+                    <div class="fieldDescription">Status: <strong id="CloudConnectorStatus">Checking…</strong></div>
+                    <p id="CloudSetupMessage">Open the Kaevo app to start Remote Access. No server addresses, codes, or credentials are entered here.</p>
+
+                    <h3>Library Snapshot</h3>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="SnapshotItemLimit">Items per section</label>
+                        <input id="SnapshotItemLimit" name="SnapshotItemLimit" type="number" is="emby-input" min="1" max="100" />
+                        <div class="fieldDescription">Limits the number of movies, shows, collections, and Continue Watching items Kaevo reads at once.</div>
+                    </div>
+                    <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                        <span>Save</span>
+                    </button>
+                </form>
+            </div>
+        </div>
+        <script type="text/javascript">
+            var KaevoConfig = {
+                pluginUniqueId: '80c77b84-7f2d-4b52-84c7-7dfe68cd95ae'
+            };
+
+            document.querySelector('#KaevoConfigPage').addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
+                    document.querySelector('#SnapshotItemLimit').value = config.SnapshotItemLimit || 50;
+                    return ApiClient.getJSON(ApiClient.getUrl('kaevo/cloud/status'));
+                }).then(function (status) {
+                    var ready = status.State === 'online' || status.state === 'online';
+                    document.querySelector('#CloudConnectorStatus').textContent = ready ? 'Remote Access Ready' : 'Not Connected';
+                    document.querySelector('#CloudSetupMessage').textContent = ready
+                        ? 'Remote Access is managed securely by the Kaevo app.'
+                        : 'Open the Kaevo app to start Remote Access. No server addresses, codes, or credentials are entered here.';
+                }).catch(function () {
+                    document.querySelector('#CloudConnectorStatus').textContent = 'Not Connected';
+                }).finally(function () {
+                    Dashboard.hideLoadingMsg();
+                });
+            });
+
+            document.querySelector('#KaevoConfigForm').addEventListener('submit', function (event) {
+                event.preventDefault();
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
+                    var value = parseInt(document.querySelector('#SnapshotItemLimit').value, 10);
+                    config.SnapshotItemLimit = Math.max(1, Math.min(100, value || 50));
+                    config.OptimizerExecutionEnabled = false;
+                    return ApiClient.updatePluginConfiguration(KaevoConfig.pluginUniqueId, config);
+                }).then(function (result) {
+                    Dashboard.processPluginConfigurationUpdateResult(result);
+                });
+                return false;
+            });
+        </script>
+    </div>
+</body>
+</html>

@@ -1,0 +1,110 @@
+{
+    "profile_id": "profile_123",
+    "generated_at": "2026-07-07T11:19:02.788780+00:00",
+    "settings_exists": true,
+    "entitlements_exists": true,
+    "rows": [
+        {
+            "row_id": "continue_watching",
+            "title": "Continue Watching",
+            "type": "continue_watching",
+            "reason": "Items with recent playback activity",
+            "items": [
+                {
+                    "item_id": "movie_789",
+                    "title": "movie_789",
+                    "source": "jellyfin",
+                    "device_type": "tvos",
+                    "reason": "Recently played",
+                    "last_event_type": "play_started",
+                    "last_event_at": "2026-07-07T10:39:31.561014+00:00",
+                    "metadata": {
+                        "position_seconds": 0
+                    }
+                }
+            ],
+            "rank": 10,
+            "source": "kaevo_cloud"
+        },
+        {
+            "row_id": "recent_activity",
+            "title": "Because Of Your Recent Activity",
+            "type": "recent_activity",
+            "reason": "Items you recently viewed or played",
+            "items": [
+                {
+                    "item_id": "movie_789",
+                    "title": "movie_789",
+                    "source": "jellyfin",
+                    "device_type": "tvos",
+                    "reason": "Based on recent activity",
+                    "last_event_type": "play_started",
+                    "last_event_at": "2026-07-07T10:39:31.561014+00:00",
+                    "metadata": {
+                        "position_seconds": 0
+                    }
+                },
+                {
+                    "item_id": "movie_456",
+                    "title": "movie_456",
+                    "source": "jellyfin",
+                    "device_type": "tvos",
+                    "reason": "Based on recent activity",
+                    "last_event_type": "view_details",
+                    "last_event_at": "2026-07-07T10:32:35.992280+00:00",
+                    "metadata": {
+                        "screen": "details"
+                    }
+                }
+            ],
+            "rank": 20,
+            "source": "kaevo_cloud"
+        },
+        {
+            "row_id": "recent_searches",
+            "title": "Recent Searches",
+            "type": "recent_searches",
+            "reason": "Searches captured from your devices",
+            "items": [
+                {
+                    "item_id": "search:dexter",
+                    "title": "dexter",
+                    "source": "kaevo",
+                    "device_type": "ios",
+                    "reason": "Recent search",
+                    "last_event_type": "searched",
+                    "last_event_at": "2026-07-07T10:39:31.561041+00:00",
+                    "metadata": {
+                        "query": "dexter"
+                    }
+                }
+            ],
+            "rank": 30,
+            "source": "kaevo_cloud"
+        },
+        {
+            "row_id": "cloud_status",
+            "title": "Kaevo Cloud",
+            "type": "cloud_status",
+            "reason": "Current cloud and provider status",
+            "items": [
+                {
+                    "item_id": "kaevo_cloud_status",
+                    "title": "Plan: individual",
+                    "source": "kaevo_cloud",
+                    "device_type": "",
+                    "reason": "Cloud entitlement status",
+                    "metadata": {
+                        "cloud_enabled": true,
+                        "subscription_state": "active",
+                        "discovery_provider": "seerr",
+                        "request_provider": "seerr",
+                        "download_recovery_mode": "notify_only"
+                    }
+                }
+            ],
+            "rank": 90,
+            "source": "kaevo_cloud"
+        }
+    ]
+}

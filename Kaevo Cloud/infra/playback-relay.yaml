@@ -1,0 +1,456 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Kaevo playback relay beta - one bounded ECS Fargate task behind CloudFront.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PublicSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+  CloudFrontOriginPrefixListId:
+    Type: String
+  ContainerImage:
+    Type: String
+  PlaybackGrantSigningKey:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+
+Resources:
+  RelayCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: kaevo-playback-relay-beta
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  RelayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /kaevo/playback-relay
+      RetentionInDays: 7
+
+  RelaySigningSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: kaevo/playback-relay/signing-key
+      Description: Shared playback grant validation key for the Kaevo relay beta.
+      SecretString: !Ref PlaybackGrantSigningKey
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadRelaySigningSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref RelaySigningSecret
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CloudFront-only access to Kaevo relay origin
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontOriginPrefixListId
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Kaevo relay task accepts traffic only from its load balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8200
+          ToPort: 8200
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  RelayLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: kaevo-playback-relay-beta
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets: !Ref PublicSubnets
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '4000'
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
+        - Key: deletion_protection.enabled
+          Value: 'false'
+
+  RelayTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Port: 8200
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+
+  RelayListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref RelayLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref RelayTargetGroup
+
+  RelayTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: kaevo-playback-relay-beta
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: relay
+          Image: !Ref ContainerImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8200
+              Protocol: tcp
+          Secrets:
+            - Name: PLAYBACK_GRANT_SIGNING_KEY
+              ValueFrom: !Ref RelaySigningSecret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref RelayLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: relay
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8200/health', timeout=3)" || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 20
+
+  RelayService:
+    Type: AWS::ECS::Service
+    DependsOn: RelayListener
+    Properties:
+      ServiceName: kaevo-playback-relay-beta
+      Cluster: !Ref RelayCluster
+      TaskDefinition: !Ref RelayTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      HealthCheckGracePeriodSeconds: 60
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref TaskSecurityGroup
+          Subnets: !Ref PublicSubnets
+      LoadBalancers:
+        - ContainerName: relay
+          ContainerPort: 8200
+          TargetGroupArn: !Ref RelayTargetGroup
+
+  NoCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: kaevo-playback-relay-no-cache
+        Comment: Playback grants and media responses must never be cached.
+        DefaultTTL: 0
+        MaxTTL: 0
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingBrotli: false
+          EnableAcceptEncodingGzip: false
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  RelayOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: kaevo-playback-relay-all-viewer-except-host
+        Comment: Forward authorization, range, and WebSocket negotiation headers.
+        CookiesConfig:
+          CookieBehavior: none
+        HeadersConfig:
+          HeaderBehavior: allExcept
+          Headers:
+            - Host
+        QueryStringsConfig:
+          QueryStringBehavior: all
+
+  RelayDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: Kaevo playback relay beta
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: relay-alb
+            DomainName: !GetAtt RelayLoadBalancer.DNSName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
+        DefaultCacheBehavior:
+          TargetOriginId: relay-alb
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: false
+          CachePolicyId: !Ref NoCachePolicy
+          OriginRequestPolicyId: !Ref RelayOriginRequestPolicy
+
+  RelayAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: kaevo-playback-relay-alerts
+
+  UsageMonitorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: PublishRelayUsage
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+
+  UsageMonitorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: kaevo-playback-relay-usage-monitor
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: index.handler
+      Role: !GetAtt UsageMonitorRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          DISTRIBUTION_ID: !Ref RelayDistribution
+      Code:
+        ZipFile: |
+          import datetime
+          import os
+          import boto3
+
+          source = boto3.client("cloudwatch", region_name="us-east-1")
+          destination = boto3.client("cloudwatch")
+
+          def handler(event, context):
+              now = datetime.datetime.now(datetime.timezone.utc)
+              month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+              dimensions = [
+                  {"Name": "DistributionId", "Value": os.environ["DISTRIBUTION_ID"]},
+                  {"Name": "Region", "Value": "Global"},
+              ]
+              monthly = source.get_metric_statistics(
+                  Namespace="AWS/CloudFront",
+                  MetricName="BytesDownloaded",
+                  Dimensions=dimensions,
+                  StartTime=month_start,
+                  EndTime=now,
+                  Period=3600,
+                  Statistics=["Sum"],
+              )
+              recent = source.get_metric_statistics(
+                  Namespace="AWS/CloudFront",
+                  MetricName="5xxErrorRate",
+                  Dimensions=dimensions,
+                  StartTime=now - datetime.timedelta(minutes=15),
+                  EndTime=now,
+                  Period=300,
+                  Statistics=["Average"],
+              )
+              monthly_bytes = sum(point.get("Sum", 0) for point in monthly.get("Datapoints", []))
+              recent_5xx = max((point.get("Average", 0) for point in recent.get("Datapoints", [])), default=0)
+              destination.put_metric_data(
+                  Namespace="Kaevo/Playback",
+                  MetricData=[
+                      {"MetricName": "MonthlyCloudFrontBytes", "Value": monthly_bytes, "Unit": "Bytes"},
+                      {"MetricName": "Recent5xxErrorRate", "Value": recent_5xx, "Unit": "Percent"},
+                  ],
+              )
+              return {"monthly_bytes": int(monthly_bytes), "recent_5xx": recent_5xx}
+
+  UsageMonitorSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Refresh Kaevo relay month-to-date bandwidth and health metrics.
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt UsageMonitorFunction.Arn
+          Id: RelayUsageMonitor
+
+  UsageMonitorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref UsageMonitorFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt UsageMonitorSchedule.Arn
+
+  Bandwidth70Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Kaevo-CloudFront-Bandwidth-70Percent
+      AlarmDescription: Kaevo relay month-to-date transfer reached 70 percent of 1 TB.
+      Namespace: Kaevo/Playback
+      MetricName: MonthlyCloudFrontBytes
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 700000000000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RelayAlertTopic
+
+  Bandwidth85Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Kaevo-CloudFront-Bandwidth-85Percent
+      AlarmDescription: Kaevo relay month-to-date transfer reached 85 percent of 1 TB.
+      Namespace: Kaevo/Playback
+      MetricName: MonthlyCloudFrontBytes
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 850000000000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RelayAlertTopic
+
+  Bandwidth95Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Kaevo-CloudFront-Bandwidth-95Percent
+      AlarmDescription: Kaevo relay month-to-date transfer reached 95 percent of 1 TB.
+      Namespace: Kaevo/Playback
+      MetricName: MonthlyCloudFrontBytes
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 950000000000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RelayAlertTopic
+
+  Relay5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Kaevo-Playback-Relay-5xx
+      AlarmDescription: Kaevo playback relay viewer errors exceeded five percent.
+      Namespace: Kaevo/Playback
+      MetricName: Recent5xxErrorRate
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RelayAlertTopic
+
+Outputs:
+  RelayPublicUrl:
+    Value: !Sub https://${RelayDistribution.DomainName}
+  RelayWebSocketUrl:
+    Value: !Sub wss://${RelayDistribution.DomainName}
+  DistributionId:
+    Value: !Ref RelayDistribution
+  ClusterName:
+    Value: !Ref RelayCluster
+  ServiceName:
+    Value: !GetAtt RelayService.Name
+  AlertTopicArn:
+    Value: !Ref RelayAlertTopic

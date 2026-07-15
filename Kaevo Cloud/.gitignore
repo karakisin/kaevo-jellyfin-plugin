@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# AWS SAM
+.aws-sam/
+samconfig.toml
+
+# Environment/secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Auth test output
+.auth-test.json
+
+# Local provider secrets
+config/providers.env.local
+docs/provider-tests/*.json
+
+# Kaevo Home Connector local state
+config/home-connector.env.local

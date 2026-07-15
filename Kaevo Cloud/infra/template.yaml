@@ -1,0 +1,559 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Kaevo Cloud dev backend
+
+Parameters:
+  DevApiKey:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Temporary dev API key for write/test routes
+
+  PlaybackGrantSigningKey:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    Description: HMAC signing key used for grants bound to paired Kaevo Jellyfin Plugin connectors
+
+  PlaybackRelayPublicUrl:
+    Type: String
+    Default: ""
+    Description: Public HTTPS origin of the separate long-lived Kaevo playback relay
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 10
+    MemorySize: 128
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        KAEVO_ENV: dev
+        DEV_API_KEY: !Ref DevApiKey
+        PROFILE_EVENTS_TABLE: !Ref KaevoProfileEventsTable
+        PROFILE_SETTINGS_TABLE: !Ref KaevoProfileSettingsTable
+        DEVICES_TABLE: !Ref KaevoDevicesTable
+        ENTITLEMENTS_TABLE: !Ref KaevoEntitlementsTable
+        HOME_CONNECTORS_TABLE: !Ref KaevoHomeConnectorsTable
+        REMOTE_REQUESTS_TABLE: !Ref KaevoRemoteRequestsTable
+        REMOTE_PAYLOADS_BUCKET: !Ref KaevoRemotePayloadsBucket
+        APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
+        PLAYBACK_GRANT_SIGNING_KEY: !Ref PlaybackGrantSigningKey
+        PLAYBACK_RELAY_PUBLIC_URL: !Ref PlaybackRelayPublicUrl
+
+Resources:
+  KaevoCloudHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: dev
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 80
+        ThrottlingRateLimit: 40
+      RouteSettings:
+        "POST /v1/trials/start":
+          ThrottlingBurstLimit: 5
+          ThrottlingRateLimit: 1
+        "POST /v1/trials/activate":
+          ThrottlingBurstLimit: 20
+          ThrottlingRateLimit: 5
+        "POST /v1/app-sessions/refresh":
+          ThrottlingBurstLimit: 10
+          ThrottlingRateLimit: 2
+
+  KaevoProfileEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: kaevo-cloud-dev-profile-events
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: profile_id
+          AttributeType: S
+        - AttributeName: event_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: profile_id
+          KeyType: HASH
+        - AttributeName: event_key
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
+  KaevoProfileSettingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: kaevo-cloud-dev-profile-settings
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: profile_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: profile_id
+          KeyType: HASH
+
+  KaevoDevicesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: kaevo-cloud-dev-devices
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: device_id
+          AttributeType: S
+        - AttributeName: profile_id
+          AttributeType: S
+        - AttributeName: updated_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: device_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: profile_id-updated_at-index
+          KeySchema:
+            - AttributeName: profile_id
+              KeyType: HASH
+            - AttributeName: updated_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  KaevoEntitlementsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: kaevo-cloud-dev-entitlements
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: profile_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: profile_id
+          KeyType: HASH
+
+  KaevoAppSessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: kaevo-cloud-dev-app-sessions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: token_hash
+          AttributeType: S
+      KeySchema:
+        - AttributeName: token_hash
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
+  KaevoHomeConnectorsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: kaevo-cloud-dev-home-connectors
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: connector_id
+          AttributeType: S
+        - AttributeName: profile_id
+          AttributeType: S
+        - AttributeName: updated_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: connector_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: profile_id-updated_at-index
+          KeySchema:
+            - AttributeName: profile_id
+              KeyType: HASH
+            - AttributeName: updated_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  KaevoRemoteRequestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: kaevo-cloud-dev-remote-requests
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: request_id
+          AttributeType: S
+        - AttributeName: connector_id
+          AttributeType: S
+        - AttributeName: status_created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: request_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      GlobalSecondaryIndexes:
+        - IndexName: connector_id-status_created_at-index
+          KeySchema:
+            - AttributeName: connector_id
+              KeyType: HASH
+            - AttributeName: status_created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  KaevoRemotePayloadsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireRemotePayloads
+            Status: Enabled
+            ExpirationInDays: 1
+
+  KaevoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: kaevo-cloud-dev-users
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      MfaConfiguration: "OFF"
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+
+  KaevoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: kaevo-cloud-dev-ios-tvos
+      UserPoolId: !Ref KaevoUserPool
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  KaevoCloudApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: kaevo-cloud-dev-api
+      CodeUri: ../api/src/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoProfileEventsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoProfileSettingsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoDevicesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoEntitlementsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoHomeConnectorsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoRemoteRequestsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoAppSessionsTable
+        - S3CrudPolicy:
+            BucketName: !Ref KaevoRemotePayloadsBucket
+      Events:
+        Root:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /
+            Method: GET
+
+        Health:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /health
+            Method: GET
+
+        CaptureEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/events
+            Method: POST
+
+        CaptureEventsBatch:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/events/batch
+            Method: POST
+
+        RecentEvents:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/events/recent
+            Method: GET
+
+        GetEntitlements:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/entitlements
+            Method: GET
+
+        PutEntitlements:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/entitlements
+            Method: PUT
+
+        RegisterDevice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/devices/register
+            Method: POST
+
+        ListDevices:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/devices
+            Method: GET
+
+        GetProfileSettings:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/profiles/{profileId}/settings
+            Method: GET
+
+        PutProfileSettings:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/profiles/{profileId}/settings
+            Method: PUT
+
+        PersonalizedHome:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home/personalized
+            Method: GET
+
+        ProviderSettings:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/provider-settings
+            Method: GET
+
+        PutProviderSettings:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/provider-settings
+            Method: PUT
+
+        StartCloudTrial:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/trials/start
+            Method: POST
+
+        ActivateCloudTrial:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/trials/activate
+            Method: POST
+
+        RefreshAppSession:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/app-sessions/refresh
+            Method: POST
+
+        AppSessionStatus:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/app-sessions/status
+            Method: GET
+
+        RevokeAppSession:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/app-sessions/revoke
+            Method: POST
+
+        StartHomeConnectorPairing:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/pairing/start
+            Method: POST
+
+        ExchangeHomeConnectorPairing:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/pairing/exchange
+            Method: POST
+
+        RegisterHomeConnector:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/register
+            Method: POST
+
+        HeartbeatHomeConnector:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/{connectorId}/heartbeat
+            Method: POST
+
+        RevokeHomeConnector:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/{connectorId}/revoke
+            Method: POST
+
+        CreateConnectorRelayTicket:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/{connectorId}/relay-ticket
+            Method: POST
+
+        HomeConnectorStatus:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/status
+            Method: GET
+
+        RemoteRoutes:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/remote-routes
+            Method: GET
+
+        RemoteRequestCreate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/remote-requests
+            Method: POST
+
+        RemoteCommandCreate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/remote-commands
+            Method: POST
+
+        RemoteRequestClaim:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/remote-requests/claim
+            Method: POST
+
+        CreatePlaybackGrant:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/playback/grants
+            Method: POST
+
+        RemoteRequestGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/remote-requests/{requestId}
+            Method: GET
+
+        RemoteRequestComplete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/remote-requests/{requestId}/complete
+            Method: POST
+
+        RemoteRequestFail:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/remote-requests/{requestId}/fail
+            Method: POST
+
+        RemoteImageProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/remote-images/{provider}/{itemId}/{imageType}
+            Method: GET
+
+Outputs:
+  ApiUrl:
+    Description: Kaevo Cloud dev API URL
+    Value: !Sub "https://${KaevoCloudHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/dev"
+
+  ProfileEventsTableName:
+    Description: Kaevo profile events table
+    Value: !Ref KaevoProfileEventsTable
+
+  AppSessionsTableName:
+    Description: Kaevo app session and trial activation table
+    Value: !Ref KaevoAppSessionsTable
+
+  ProfileSettingsTableName:
+    Description: Kaevo profile settings table
+    Value: !Ref KaevoProfileSettingsTable
+
+  DevicesTableName:
+    Description: Kaevo devices table
+    Value: !Ref KaevoDevicesTable
+
+  EntitlementsTableName:
+    Description: Kaevo entitlements table
+    Value: !Ref KaevoEntitlementsTable
+
+  HomeConnectorsTableName:
+    Description: Kaevo home connectors table
+    Value: !Ref KaevoHomeConnectorsTable
+
+  RemoteRequestsTableName:
+    Description: Kaevo remote metadata request table
+    Value: !Ref KaevoRemoteRequestsTable
+
+  CognitoUserPoolId:
+    Description: Kaevo Cognito user pool ID
+    Value: !Ref KaevoUserPool
+
+  CognitoUserPoolClientId:
+    Description: Kaevo Cognito user pool app client ID
+    Value: !Ref KaevoUserPoolClient
+
+  CognitoIssuer:
+    Description: Kaevo Cognito JWT issuer
+    Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}"
