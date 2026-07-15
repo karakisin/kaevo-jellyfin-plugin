@@ -25,7 +25,7 @@ fi
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Prevents abandoned player requests from blocking the playback channel and reports relay health independently from Cloud status.",
+  "changelog": "Keeps healthy playback connected while Cloud metadata and heartbeat operations retry independently.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -33,7 +33,7 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.5.0"
+  "version": "0.2.6.0"
 }
 EOF
 

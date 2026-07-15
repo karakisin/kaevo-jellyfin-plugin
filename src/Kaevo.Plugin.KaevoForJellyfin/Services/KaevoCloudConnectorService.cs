@@ -71,7 +71,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 _state.Set("connecting");
                 await RegisterAsync(configuration, secrets, stoppingToken).ConfigureAwait(false);
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                var control = RunControlLoopAsync(configuration, secrets, linked.Token);
+                var control = RunControlSupervisorAsync(configuration, secrets, linked.Token);
                 var relay = configuration.RemotePlaybackEnabled
                     ? RunRelaySupervisorAsync(configuration, secrets, linked.Token)
                     : Task.Delay(Timeout.Infinite, linked.Token);
@@ -79,8 +79,6 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 {
                     _state.SetRelay("disabled");
                 }
-                await Task.WhenAny(control, relay).ConfigureAwait(false);
-                linked.Cancel();
                 await Task.WhenAll(IgnoreCancellation(control), IgnoreCancellation(relay)).ConfigureAwait(false);
                 delay = TimeSpan.FromSeconds(1);
             }
@@ -94,6 +92,42 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 _state.Set("error", category);
                 _logger.LogWarning("Kaevo Cloud connector paused: {Category}", category);
                 await Task.Delay(delay, stoppingToken).ConfigureAwait(false);
+                delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
+            }
+        }
+    }
+
+    private async Task RunControlSupervisorAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        CancellationToken cancellationToken)
+    {
+        var delay = TimeSpan.FromSeconds(1);
+        var registered = true;
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                if (!registered)
+                {
+                    await RegisterAsync(configuration, secrets, cancellationToken).ConfigureAwait(false);
+                    registered = true;
+                }
+
+                await RunControlLoopAsync(configuration, secrets, cancellationToken).ConfigureAwait(false);
+                delay = TimeSpan.FromSeconds(1);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                var category = SanitizeError(exception);
+                registered = false;
+                _state.Set("connecting", category);
+                _logger.LogWarning("Kaevo Cloud control reconnecting: {Category}", category);
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                 delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
             }
         }
@@ -155,7 +189,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 connector_name = "Kaevo Jellyfin Plugin",
                 host_type = "jellyfin_plugin",
-                app_version = "0.2.5",
+                app_version = "0.2.6",
                 capabilities = new[]
                 {
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
@@ -164,8 +198,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 },
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.5", null),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.5", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.6", null),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.6", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -218,9 +252,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.5", null),
-                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.5", configuration.OptimizerPlanningEnabled ? null : "disabled"),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.5", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.6", null),
+                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.6", configuration.OptimizerPlanningEnabled ? null : "disabled"),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.6", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -577,7 +611,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         await Task.WhenAll(viewsTask, moviesTask, showsTask, collectionsTask, resumeTask).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
-            version = "0.2.5",
+            version = "0.2.6",
             generated_at = DateTimeOffset.UtcNow,
             views = viewsTask.Result.Payload,
             movies = moviesTask.Result.Payload,
