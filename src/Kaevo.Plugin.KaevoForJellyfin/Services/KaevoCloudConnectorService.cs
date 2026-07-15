@@ -18,6 +18,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private const int RemoteArtworkMaximumBytes = 240_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
+    private const int ControlRequestConcurrency = 4;
     private static readonly TimeSpan RelayBodyAcknowledgementTimeout = TimeSpan.FromSeconds(30);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly HashSet<string> SafeMetadataQuery = new(StringComparer.OrdinalIgnoreCase)
@@ -190,7 +191,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 connector_name = "Kaevo Jellyfin Plugin",
                 host_type = "jellyfin_plugin",
-                app_version = "0.2.12",
+                app_version = "0.2.13",
                 capabilities = new[]
                 {
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
@@ -199,8 +200,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 },
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.12", null),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.12", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.13", null),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.13", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -213,27 +214,53 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         CancellationToken cancellationToken)
     {
         var heartbeatAt = DateTimeOffset.MinValue;
-        while (!cancellationToken.IsCancellationRequested)
+        var inFlight = new List<Task>(ControlRequestConcurrency);
+        try
         {
-            if (DateTimeOffset.UtcNow >= heartbeatAt)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                await HeartbeatAsync(configuration, secrets, cancellationToken).ConfigureAwait(false);
-                heartbeatAt = DateTimeOffset.UtcNow.AddSeconds(60);
-            }
+                for (var index = inFlight.Count - 1; index >= 0; index--)
+                {
+                    if (!inFlight[index].IsCompleted)
+                    {
+                        continue;
+                    }
 
-            var claim = await SendCloudAsync<CloudClaimResponse>(
-                configuration,
-                secrets,
-                HttpMethod.Post,
-                "/v1/remote-requests/claim",
-                new { connector_id = configuration.ConnectorId },
-                cancellationToken).ConfigureAwait(false);
-            if (claim.State != "empty" && claim.Request is not null)
-            {
-                await HandleClaimAsync(configuration, secrets, claim.Request, cancellationToken).ConfigureAwait(false);
-            }
+                    await inFlight[index].ConfigureAwait(false);
+                    inFlight.RemoveAt(index);
+                }
 
-            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+                if (DateTimeOffset.UtcNow >= heartbeatAt)
+                {
+                    await HeartbeatAsync(configuration, secrets, cancellationToken).ConfigureAwait(false);
+                    heartbeatAt = DateTimeOffset.UtcNow.AddSeconds(60);
+                }
+
+                if (inFlight.Count >= ControlRequestConcurrency)
+                {
+                    await Task.WhenAny(inFlight).ConfigureAwait(false);
+                    continue;
+                }
+
+                var claim = await SendCloudAsync<CloudClaimResponse>(
+                    configuration,
+                    secrets,
+                    HttpMethod.Post,
+                    "/v1/remote-requests/claim",
+                    new { connector_id = configuration.ConnectorId },
+                    cancellationToken).ConfigureAwait(false);
+                if (claim.State != "empty" && claim.Request is not null)
+                {
+                    inFlight.Add(HandleClaimAsync(configuration, secrets, claim.Request, cancellationToken));
+                    continue;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            await IgnoreCancellation(Task.WhenAll(inFlight)).ConfigureAwait(false);
         }
     }
 
@@ -253,9 +280,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.12", null),
-                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.12", configuration.OptimizerPlanningEnabled ? null : "disabled"),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.12", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.13", null),
+                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.13", configuration.OptimizerPlanningEnabled ? null : "disabled"),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.13", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -604,22 +631,25 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var showsLimit = Math.Clamp(QueryInt(query, "showsLimit", 80), 1, 80);
         var collectionsLimit = Math.Clamp(QueryInt(query, "collectionsLimit", 50), 1, 50);
         var resumeLimit = Math.Clamp(QueryInt(query, "resumeLimit", 20), 1, 20);
+        var recentLimit = Math.Clamp(QueryInt(query, "recentLimit", 30), 1, 50);
         var viewsTask = SendLocalAsync(configuration, secrets, HttpMethod.Get, $"/Users/{userId}/Views", null, null, cancellationToken);
         var moviesTask = ReadSnapshotItemsAsync(configuration, secrets, userId, "Movie", moviesLimit, null, cancellationToken);
         var showsTask = ReadSnapshotItemsAsync(configuration, secrets, userId, "Series", showsLimit, null, cancellationToken);
         var collectionsTask = ReadSnapshotItemsAsync(configuration, secrets, userId, "BoxSet", collectionsLimit, null, cancellationToken);
         var resumeTask = ReadSnapshotItemsAsync(configuration, secrets, userId, "Movie,Episode", resumeLimit, true, cancellationToken);
-        await Task.WhenAll(viewsTask, moviesTask, showsTask, collectionsTask, resumeTask).ConfigureAwait(false);
+        var recentTask = ReadSnapshotItemsAsync(configuration, secrets, userId, "Movie,Episode", recentLimit, null, cancellationToken);
+        await Task.WhenAll(viewsTask, moviesTask, showsTask, collectionsTask, resumeTask, recentTask).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
-            version = "0.2.12",
+            version = "0.2.13",
             generated_at = DateTimeOffset.UtcNow,
             views = viewsTask.Result.Payload,
             movies = moviesTask.Result.Payload,
             shows = showsTask.Result.Payload,
             collections = collectionsTask.Result.Payload,
             continueWatching = resumeTask.Result.Payload,
-            limits = new { movies_limit = moviesLimit, shows_limit = showsLimit, collections_limit = collectionsLimit, resume_limit = resumeLimit }
+            recentlyAdded = recentTask.Result.Payload,
+            limits = new { movies_limit = moviesLimit, shows_limit = showsLimit, collections_limit = collectionsLimit, resume_limit = resumeLimit, recent_limit = recentLimit }
         }, JsonOptions), false);
     }
 

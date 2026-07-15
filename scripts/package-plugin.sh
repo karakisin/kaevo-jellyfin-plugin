@@ -25,7 +25,7 @@ fi
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Keeps Recently Added current by requesting Jellyfin items in newest-added order while preserving the complete guarded HLS playback session.",
+  "changelog": "Prioritizes playback and metadata over artwork, processes Cloud requests concurrently, and returns an authoritative Recently Added feed.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -33,7 +33,7 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.12.0"
+  "version": "0.2.13.0"
 }
 EOF
 
