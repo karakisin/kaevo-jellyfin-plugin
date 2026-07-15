@@ -8,7 +8,7 @@ Updated: 2026-07-15
 - Jellyfin target: `10.11.x`
 - .NET target: `net8.0`
 - Foundation version: `0.1.0`
-- Current repository version: `0.2.13`
+- Current repository version: `0.2.14`
 
 ## Files created for the foundation
 

@@ -15,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const int RemoteArtworkMaximumBytes = 240_000;
+    private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
     private const int ControlRequestConcurrency = 4;
@@ -191,7 +191,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 connector_name = "Kaevo Jellyfin Plugin",
                 host_type = "jellyfin_plugin",
-                app_version = "0.2.13",
+                app_version = "0.2.14",
                 capabilities = new[]
                 {
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
@@ -200,8 +200,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 },
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.13", null),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.13", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.14", null),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.14", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -280,9 +280,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.13", null),
-                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.13", configuration.OptimizerPlanningEnabled ? null : "disabled"),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.13", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.14", null),
+                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.14", configuration.OptimizerPlanningEnabled ? null : "disabled"),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.14", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -641,7 +641,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         await Task.WhenAll(viewsTask, moviesTask, showsTask, collectionsTask, resumeTask, recentTask).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
-            version = "0.2.13",
+            version = "0.2.14",
             generated_at = DateTimeOffset.UtcNow,
             views = viewsTask.Result.Payload,
             movies = moviesTask.Result.Payload,
