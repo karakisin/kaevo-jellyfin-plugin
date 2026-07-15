@@ -46,7 +46,7 @@ public sealed class KaevoController : ControllerBase
         return Ok(new KaevoStatusResponse(
             "ok",
             "Kaevo",
-            "0.2.7",
+            "0.2.8",
             configuration.CloudConnectorEnabled,
             cloud.Status,
             cloud.LastHeartbeatUtc,
@@ -55,6 +55,7 @@ public sealed class KaevoController : ControllerBase
             configuration.RemotePlaybackEnabled,
             relay.Status,
             relay.LastConnectedUtc,
+            relay.ConnectedChannels,
             configuration.OptimizerExecutionEnabled));
     }
 

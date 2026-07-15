@@ -25,7 +25,7 @@ fi
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Ignores harmless late player cancellations after request cleanup so rapid Apple player starts cannot reconnect the relay.",
+  "changelog": "Adds a three-channel playback pool so normal network connection rotation cannot briefly remove the only media path.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -33,7 +33,7 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.7.0"
+  "version": "0.2.8.0"
 }
 EOF
 

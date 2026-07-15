@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.8.0",
+        "changelog": "Adds a three-channel playback pool so normal network connection rotation cannot briefly remove the only media path.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.8/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "01c3302c22dcd97cafa48ab36040d8e5",
+        "timestamp": "2026-07-15T05:54:29Z"
+      },
+      {
         "version": "0.2.7.0",
         "changelog": "Ignores harmless late player cancellations after request cleanup so rapid Apple player starts cannot reconnect the relay.",
         "targetAbi": "10.11.0.0",
