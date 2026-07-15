@@ -189,7 +189,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 connector_name = "Kaevo Jellyfin Plugin",
                 host_type = "jellyfin_plugin",
-                app_version = "0.2.6",
+                app_version = "0.2.7",
                 capabilities = new[]
                 {
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
@@ -198,8 +198,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 },
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.6", null),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.6", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.7", null),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.7", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -252,9 +252,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.6", null),
-                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.6", configuration.OptimizerPlanningEnabled ? null : "disabled"),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.6", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.7", null),
+                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.7", configuration.OptimizerPlanningEnabled ? null : "disabled"),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.7", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -611,7 +611,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         await Task.WhenAll(viewsTask, moviesTask, showsTask, collectionsTask, resumeTask).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
-            version = "0.2.6",
+            version = "0.2.7",
             generated_at = DateTimeOffset.UtcNow,
             views = viewsTask.Result.Payload,
             movies = moviesTask.Result.Payload,
@@ -1139,7 +1139,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private static ProviderReachability ProviderStatus(bool ok, bool configured, string version, string? reason)
         => new(ok, configured, version, reason);
 
-    private sealed class RelayRequestContext : IDisposable
+    internal sealed class RelayRequestContext : IDisposable
     {
         private readonly CancellationTokenSource _cancellation;
         private readonly SemaphoreSlim _bodyAcknowledged = new(0, 1);
@@ -1157,14 +1157,26 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             {
                 _bodyAcknowledged.Release();
             }
-            catch (SemaphoreFullException)
+            catch (Exception exception) when (exception is SemaphoreFullException or ObjectDisposedException)
             {
                 // Duplicate acknowledgements cannot enlarge the one-chunk
-                // flow-control window.
+                // flow-control window. A late acknowledgement may also race
+                // normal request cleanup and is safe to ignore.
             }
         }
 
-        public void Cancel() => _cancellation.Cancel();
+        public void Cancel()
+        {
+            try
+            {
+                _cancellation.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Relay cancellation can arrive immediately after the request
+                // task removes and disposes its context.
+            }
+        }
 
         public Task<bool> WaitForBodyAcknowledgementAsync(TimeSpan timeout)
             => _bodyAcknowledged.WaitAsync(timeout, _cancellation.Token);
