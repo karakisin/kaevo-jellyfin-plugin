@@ -14,6 +14,8 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
+    private const int RemoteArtworkMaximumBytes = 240_000;
+    private const int RemoteArtworkMaximumDimension = 2_160;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly HashSet<string> SafeMetadataQuery = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -135,7 +137,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         KaevoConnectorSecrets secrets,
         CancellationToken cancellationToken)
     {
-        await SendCloudAsync<JsonElement>(
+        var response = await SendCloudAsync<ConnectorRegistrationResponse>(
             configuration,
             secrets,
             HttpMethod.Post,
@@ -146,7 +148,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 connector_name = "Kaevo Jellyfin Plugin",
                 host_type = "jellyfin_plugin",
-                app_version = "0.2.1",
+                app_version = "0.2.3",
                 capabilities = new[]
                 {
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
@@ -155,11 +157,12 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 },
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.1", null),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.1", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.3", null),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.3", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
+        ApplyPlaybackConfiguration(configuration, response.Playback);
     }
 
     private async Task RunControlLoopAsync(
@@ -197,7 +200,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         KaevoConnectorSecrets secrets,
         CancellationToken cancellationToken)
     {
-        await SendCloudAsync<JsonElement>(
+        var response = await SendCloudAsync<ConnectorRegistrationResponse>(
             configuration,
             secrets,
             HttpMethod.Post,
@@ -208,13 +211,33 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.1", null),
-                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.1", configuration.OptimizerPlanningEnabled ? null : "disabled"),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.1", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.3", null),
+                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.3", configuration.OptimizerPlanningEnabled ? null : "disabled"),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.3", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
+        ApplyPlaybackConfiguration(configuration, response.Playback);
         _state.Set("online", heartbeat: true);
+    }
+
+    private static void ApplyPlaybackConfiguration(
+        PluginConfiguration configuration,
+        ConnectorPlaybackConfiguration? playback)
+    {
+        var relayUrl = playback?.RelayWebSocketUrl?.Trim() ?? string.Empty;
+        var playbackEnabled = playback?.Enabled == true
+            && Uri.TryCreate(relayUrl, UriKind.Absolute, out var relayUri)
+            && relayUri.Scheme == "wss";
+        if (configuration.RemotePlaybackEnabled == playbackEnabled
+            && string.Equals(configuration.RelayWebSocketUrl, playbackEnabled ? relayUrl : string.Empty, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        configuration.RemotePlaybackEnabled = playbackEnabled;
+        configuration.RelayWebSocketUrl = playbackEnabled ? relayUrl : string.Empty;
+        KaevoPlugin.Instance?.SaveConfiguration();
     }
 
     private async Task HandleClaimAsync(
@@ -470,30 +493,52 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             throw new InvalidOperationException("remoteArtworkRequestInvalid");
         }
 
-        var parameters = new Dictionary<string, JsonElement>
+        var requestedWidth = Math.Clamp(QueryInt(query, "max_width", 600), 1, RemoteArtworkMaximumDimension);
+        var requestedHeight = Math.Clamp(QueryInt(query, "max_height", 900), 1, RemoteArtworkMaximumDimension);
+        var requestedQuality = Math.Clamp(QueryInt(query, "quality", 90), 1, 95);
+        var attempts = new[]
         {
-            ["maxWidth"] = JsonSerializer.SerializeToElement(Math.Clamp(QueryInt(query, "max_width", 600), 1, 1200)),
-            ["maxHeight"] = JsonSerializer.SerializeToElement(Math.Clamp(QueryInt(query, "max_height", 900), 1, 1200)),
-            ["quality"] = JsonSerializer.SerializeToElement(Math.Clamp(QueryInt(query, "quality", 90), 1, 95))
-        };
-        var uri = BuildLocalUri(configuration, $"/Items/{itemId}/Images/{imageType}", parameters);
-        using var message = new HttpRequestMessage(HttpMethod.Get, uri);
-        message.Headers.Add("X-Emby-Token", secrets.JellyfinApiKey);
-        message.Headers.Accept.ParseAdd("image/jpeg,image/png,image/webp");
-        using var response = await _jellyfin.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-        var contentType = response.Content.Headers.ContentType?.MediaType?.ToLowerInvariant() ?? string.Empty;
-        if (contentType is not ("image/jpeg" or "image/png" or "image/webp"))
+            (Width: requestedWidth, Height: requestedHeight, Quality: requestedQuality),
+            (Width: Math.Min(requestedWidth, 1920), Height: Math.Min(requestedHeight, 1920), Quality: Math.Min(requestedQuality, 88)),
+            (Width: Math.Min(requestedWidth, 1600), Height: Math.Min(requestedHeight, 1600), Quality: Math.Min(requestedQuality, 85)),
+            (Width: Math.Min(requestedWidth, 1440), Height: Math.Min(requestedHeight, 1440), Quality: Math.Min(requestedQuality, 82)),
+            (Width: Math.Min(requestedWidth, 1200), Height: Math.Min(requestedHeight, 1200), Quality: Math.Min(requestedQuality, 80))
+        }.Distinct();
+
+        foreach (var attempt in attempts)
         {
-            throw new InvalidOperationException("remoteArtworkContentTypeInvalid");
+            var parameters = new Dictionary<string, JsonElement>
+            {
+                ["maxWidth"] = JsonSerializer.SerializeToElement(attempt.Width),
+                ["maxHeight"] = JsonSerializer.SerializeToElement(attempt.Height),
+                ["quality"] = JsonSerializer.SerializeToElement(attempt.Quality)
+            };
+            var uri = BuildLocalUri(configuration, $"/Items/{itemId}/Images/{imageType}", parameters);
+            using var message = new HttpRequestMessage(HttpMethod.Get, uri);
+            message.Headers.Add("X-Emby-Token", secrets.JellyfinApiKey);
+            message.Headers.Accept.ParseAdd("image/jpeg,image/png,image/webp");
+            using var response = await _jellyfin.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            var contentType = response.Content.Headers.ContentType?.MediaType?.ToLowerInvariant() ?? string.Empty;
+            if (contentType is not ("image/jpeg" or "image/png" or "image/webp"))
+            {
+                throw new InvalidOperationException("remoteArtworkContentTypeInvalid");
+            }
+
+            var bytes = await ReadBoundedAsync(response.Content, RemoteArtworkMaximumBytes, cancellationToken).ConfigureAwait(false);
+            if (bytes.Truncated)
+            {
+                continue;
+            }
+
+            return new CommandResult(200, JsonSerializer.SerializeToElement(new
+            {
+                content_type = contentType,
+                body_base64 = Convert.ToBase64String(bytes.Data)
+            }, JsonOptions), false);
         }
 
-        var bytes = await ReadBoundedAsync(response.Content, 240_000, cancellationToken).ConfigureAwait(false);
-        return new CommandResult(200, JsonSerializer.SerializeToElement(new
-        {
-            content_type = contentType,
-            body_base64 = Convert.ToBase64String(bytes.Data)
-        }, JsonOptions), bytes.Truncated);
+        throw new InvalidOperationException("remoteArtworkPayloadTooLarge");
     }
 
     private async Task<CommandResult> ReadMainSnapshotAsync(
@@ -525,7 +570,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         await Task.WhenAll(viewsTask, moviesTask, showsTask, collectionsTask, resumeTask).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
-            version = "0.2.1",
+            version = "0.2.3",
             generated_at = DateTimeOffset.UtcNow,
             views = viewsTask.Result.Payload,
             movies = moviesTask.Result.Payload,
@@ -610,6 +655,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             new { },
             cancellationToken).ConfigureAwait(false);
         using var socket = new ClientWebSocket();
+        socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
         socket.Options.SetRequestHeader("Authorization", $"Bearer {relayTicket.RelayTicket}");
         var relayUri = new Uri($"{configuration.RelayWebSocketUrl.TrimEnd('/')}/v1/connectors/{Uri.EscapeDataString(configuration.ConnectorId)}");
         await socket.ConnectAsync(relayUri, cancellationToken).ConfigureAwait(false);
@@ -620,7 +666,15 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             var raw = await ReceiveTextAsync(socket, cancellationToken).ConfigureAwait(false);
             var message = JsonSerializer.Deserialize<RelayMessage>(raw, JsonOptions)
                 ?? throw new InvalidOperationException("relayMessageMalformed");
-            if (message.Type == "cancel" && active.Remove(message.RequestId, out var existing))
+            if (message.Type == "ping")
+            {
+                await SendTextAsync(
+                    socket,
+                    sendGate,
+                    JsonSerializer.Serialize(new { type = "pong" }, JsonOptions),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            else if (message.Type == "cancel" && active.Remove(message.RequestId, out var existing))
             {
                 existing.Cancel();
                 existing.Dispose();

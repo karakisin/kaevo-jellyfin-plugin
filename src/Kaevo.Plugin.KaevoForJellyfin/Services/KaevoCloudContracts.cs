@@ -18,6 +18,14 @@ internal sealed record CloudClaimResponse(
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("request")] CloudRequest? Request);
 
+internal sealed record ConnectorRegistrationResponse(
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("playback")] ConnectorPlaybackConfiguration? Playback);
+
+internal sealed record ConnectorPlaybackConfiguration(
+    [property: JsonPropertyName("enabled")] bool Enabled,
+    [property: JsonPropertyName("relay_websocket_url")] string RelayWebSocketUrl);
+
 internal sealed record CloudRequest(
     [property: JsonPropertyName("request_id")] string RequestId,
     [property: JsonPropertyName("method")] string Method,
