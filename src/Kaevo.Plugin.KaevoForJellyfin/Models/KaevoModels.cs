@@ -10,6 +10,8 @@ public sealed record KaevoStatusResponse(
     bool RemoteMetadata,
     bool RemoteWrites,
     bool RemotePlayback,
+    string PlaybackRelayStatus,
+    DateTimeOffset? LastPlaybackRelayConnectedUtc,
     bool OptimizerExecution);
 
 public sealed record KaevoCloudPairingStatus(

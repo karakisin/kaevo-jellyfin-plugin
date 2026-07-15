@@ -9,7 +9,7 @@ metadata access without requiring a separate Kaevo server installation.
 - Jellyfin: `10.11.x`
 - .NET target: `net8.0`
 - Foundation baseline: `0.1.0`
-- Current repository build: `0.2.4`
+- Current repository build: `0.2.5`
 - Supported phase: local metadata plus app-guided Cloud activation
 
 Current endpoints:

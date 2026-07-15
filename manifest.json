@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.5.0",
+        "changelog": "Prevents abandoned player requests from blocking the playback channel and reports relay health independently from Cloud status.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.5/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "32b5c9fe08b0d0e14bee94389f20f6e0",
+        "timestamp": "2026-07-15T04:52:52Z"
+      },
+      {
         "version": "0.2.4.0",
         "changelog": "Keeps metadata online while playback reconnects independently, and enables guarded relay playback with local Jellyfin remux/transcoding.",
         "targetAbi": "10.11.0.0",

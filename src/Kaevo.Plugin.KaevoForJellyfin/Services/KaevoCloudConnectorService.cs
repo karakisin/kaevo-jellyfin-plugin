@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
@@ -16,6 +17,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
     private const int RemoteArtworkMaximumBytes = 240_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
+    private static readonly TimeSpan RelayBodyAcknowledgementTimeout = TimeSpan.FromSeconds(30);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly HashSet<string> SafeMetadataQuery = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -54,6 +56,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 if (!configuration.CloudConnectorEnabled)
                 {
                     _state.Set("disabled");
+                    _state.SetRelay("disabled");
                     await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken).ConfigureAwait(false);
                     continue;
                 }
@@ -72,6 +75,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 var relay = configuration.RemotePlaybackEnabled
                     ? RunRelaySupervisorAsync(configuration, secrets, linked.Token)
                     : Task.Delay(Timeout.Infinite, linked.Token);
+                if (!configuration.RemotePlaybackEnabled)
+                {
+                    _state.SetRelay("disabled");
+                }
                 await Task.WhenAny(control, relay).ConfigureAwait(false);
                 linked.Cancel();
                 await Task.WhenAll(IgnoreCancellation(control), IgnoreCancellation(relay)).ConfigureAwait(false);
@@ -148,7 +155,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 connector_name = "Kaevo Jellyfin Plugin",
                 host_type = "jellyfin_plugin",
-                app_version = "0.2.4",
+                app_version = "0.2.5",
                 capabilities = new[]
                 {
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
@@ -157,8 +164,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 },
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.4", null),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.4", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.5", null),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.5", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -211,9 +218,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.4", null),
-                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.4", configuration.OptimizerPlanningEnabled ? null : "disabled"),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.4", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.5", null),
+                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.5", configuration.OptimizerPlanningEnabled ? null : "disabled"),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.5", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -570,7 +577,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         await Task.WhenAll(viewsTask, moviesTask, showsTask, collectionsTask, resumeTask).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
-            version = "0.2.4",
+            version = "0.2.5",
             generated_at = DateTimeOffset.UtcNow,
             views = viewsTask.Result.Payload,
             movies = moviesTask.Result.Payload,
@@ -660,37 +667,79 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var relayUri = new Uri($"{configuration.RelayWebSocketUrl.TrimEnd('/')}/v1/connectors/{Uri.EscapeDataString(configuration.ConnectorId)}");
         await socket.ConnectAsync(relayUri, cancellationToken).ConfigureAwait(false);
         var sendGate = new SemaphoreSlim(1, 1);
-        var active = new Dictionary<string, CancellationTokenSource>(StringComparer.Ordinal);
-        while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
+        var active = new ConcurrentDictionary<string, RelayRequestContext>(StringComparer.Ordinal);
+        _state.SetRelay("online", connected: true);
+        try
         {
-            var raw = await ReceiveTextAsync(socket, cancellationToken).ConfigureAwait(false);
-            var message = JsonSerializer.Deserialize<RelayMessage>(raw, JsonOptions)
-                ?? throw new InvalidOperationException("relayMessageMalformed");
-            if (message.Type == "ping")
+            while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
             {
-                await SendTextAsync(
-                    socket,
-                    sendGate,
-                    JsonSerializer.Serialize(new { type = "pong" }, JsonOptions),
-                    cancellationToken).ConfigureAwait(false);
-            }
-            else if (message.Type == "cancel" && active.Remove(message.RequestId, out var existing))
-            {
-                existing.Cancel();
-                existing.Dispose();
-            }
-            else if (message.Type == "request" && !string.IsNullOrWhiteSpace(message.Grant))
-            {
-                var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                active[message.RequestId] = linked;
-                _ = HandleRelayRequestAsync(configuration, secrets, socket, sendGate, message, linked.Token)
-                    .ContinueWith(_ =>
+                var raw = await ReceiveTextAsync(socket, cancellationToken).ConfigureAwait(false);
+                var message = JsonSerializer.Deserialize<RelayMessage>(raw, JsonOptions)
+                    ?? throw new InvalidOperationException("relayMessageMalformed");
+                if (message.Type == "ping")
+                {
+                    await SendTextAsync(
+                        socket,
+                        sendGate,
+                        JsonSerializer.Serialize(new { type = "pong" }, JsonOptions),
+                        cancellationToken).ConfigureAwait(false);
+                }
+                else if (message.Type == "body_ack" && active.TryGetValue(message.RequestId, out var acknowledged))
+                {
+                    acknowledged.AcknowledgeBody();
+                }
+                else if (message.Type == "cancel" && active.TryGetValue(message.RequestId, out var existing))
+                {
+                    existing.Cancel();
+                }
+                else if (message.Type == "request" && !string.IsNullOrWhiteSpace(message.Grant))
+                {
+                    var context = new RelayRequestContext(cancellationToken);
+                    if (!active.TryAdd(message.RequestId, context))
                     {
-                        if (active.Remove(message.RequestId, out var completed))
-                        {
-                            completed.Dispose();
-                        }
-                    }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                        context.Dispose();
+                        continue;
+                    }
+
+                    _ = ProcessRelayRequestAsync(
+                        configuration,
+                        secrets,
+                        socket,
+                        sendGate,
+                        message,
+                        context,
+                        active);
+                }
+            }
+        }
+        finally
+        {
+            _state.SetRelay("reconnecting");
+            foreach (var context in active.Values)
+            {
+                context.Cancel();
+            }
+        }
+    }
+
+    private async Task ProcessRelayRequestAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        ClientWebSocket socket,
+        SemaphoreSlim sendGate,
+        RelayMessage message,
+        RelayRequestContext context,
+        ConcurrentDictionary<string, RelayRequestContext> active)
+    {
+        try
+        {
+            await HandleRelayRequestAsync(configuration, secrets, socket, sendGate, message, context).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (active.TryRemove(message.RequestId, out var completed))
+            {
+                completed.Dispose();
             }
         }
     }
@@ -714,6 +763,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             }
             catch (Exception exception)
             {
+                _state.SetRelay("reconnecting", SanitizeError(exception));
                 _logger.LogWarning(
                     "Kaevo playback relay reconnecting: {Category}",
                     SanitizeError(exception));
@@ -729,8 +779,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         ClientWebSocket socket,
         SemaphoreSlim sendGate,
         RelayMessage message,
-        CancellationToken cancellationToken)
+        RelayRequestContext context)
     {
+        var cancellationToken = context.Token;
         try
         {
             var grant = KaevoPlaybackSecurity.VerifyGrant(message.Grant!, secrets.PlaybackGrantKey, configuration.ConnectorId);
@@ -783,7 +834,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 var payload = new byte[prefix.Length + body.Length];
                 prefix.CopyTo(payload, 0);
                 body.CopyTo(payload, prefix.Length);
-                await SendBinaryAsync(socket, sendGate, payload, cancellationToken).ConfigureAwait(false);
+                await SendRelayBodyAsync(socket, sendGate, payload, context).ConfigureAwait(false);
             }
             else
             {
@@ -801,7 +852,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     var payload = new byte[prefix.Length + count];
                     prefix.CopyTo(payload, 0);
                     buffer.AsSpan(0, count).CopyTo(payload.AsSpan(prefix.Length));
-                    await SendBinaryAsync(socket, sendGate, payload, cancellationToken).ConfigureAwait(false);
+                    await SendRelayBodyAsync(socket, sendGate, payload, context).ConfigureAwait(false);
                 }
             }
 
@@ -813,12 +864,33 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
         catch (Exception exception)
         {
-            await SendTextAsync(socket, sendGate, JsonSerializer.Serialize(new
+            try
             {
-                type = "error",
-                request_id = message.RequestId,
-                category = SanitizeError(exception)
-            }, JsonOptions), CancellationToken.None).ConfigureAwait(false);
+                await SendTextAsync(socket, sendGate, JsonSerializer.Serialize(new
+                {
+                    type = "error",
+                    request_id = message.RequestId,
+                    category = SanitizeError(exception)
+                }, JsonOptions), cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception sendException) when (sendException is OperationCanceledException or WebSocketException or ObjectDisposedException)
+            {
+                // The viewer or relay already closed this request. The relay
+                // supervisor owns reconnecting the shared socket if needed.
+            }
+        }
+    }
+
+    private static async Task SendRelayBodyAsync(
+        ClientWebSocket socket,
+        SemaphoreSlim sendGate,
+        byte[] payload,
+        RelayRequestContext context)
+    {
+        await SendBinaryAsync(socket, sendGate, payload, context.Token).ConfigureAwait(false);
+        if (!await context.WaitForBodyAcknowledgementAsync(RelayBodyAcknowledgementTimeout).ConfigureAwait(false))
+        {
+            throw new InvalidOperationException("relayBackpressureTimedOut");
         }
     }
 
@@ -1032,6 +1104,43 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
     private static ProviderReachability ProviderStatus(bool ok, bool configured, string version, string? reason)
         => new(ok, configured, version, reason);
+
+    private sealed class RelayRequestContext : IDisposable
+    {
+        private readonly CancellationTokenSource _cancellation;
+        private readonly SemaphoreSlim _bodyAcknowledged = new(0, 1);
+
+        public RelayRequestContext(CancellationToken cancellationToken)
+        {
+            _cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        }
+
+        public CancellationToken Token => _cancellation.Token;
+
+        public void AcknowledgeBody()
+        {
+            try
+            {
+                _bodyAcknowledged.Release();
+            }
+            catch (SemaphoreFullException)
+            {
+                // Duplicate acknowledgements cannot enlarge the one-chunk
+                // flow-control window.
+            }
+        }
+
+        public void Cancel() => _cancellation.Cancel();
+
+        public Task<bool> WaitForBodyAcknowledgementAsync(TimeSpan timeout)
+            => _bodyAcknowledged.WaitAsync(timeout, _cancellation.Token);
+
+        public void Dispose()
+        {
+            _cancellation.Dispose();
+            _bodyAcknowledged.Dispose();
+        }
+    }
 
     private sealed record CommandResult(int Status, JsonElement Payload, bool Truncated);
     private sealed record ProviderReachability(bool Ok, bool Configured, string Version, string? Reason);

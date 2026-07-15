@@ -42,16 +42,19 @@ public sealed class KaevoController : ControllerBase
     {
         var configuration = KaevoPlugin.Instance?.Configuration ?? new Configuration.PluginConfiguration();
         var cloud = _cloudState.Snapshot();
+        var relay = _cloudState.RelaySnapshot();
         return Ok(new KaevoStatusResponse(
             "ok",
             "Kaevo",
-            "0.2.4",
+            "0.2.5",
             configuration.CloudConnectorEnabled,
             cloud.Status,
             cloud.LastHeartbeatUtc,
             configuration.RemoteMetadataEnabled,
             configuration.RemoteWritesEnabled,
             configuration.RemotePlaybackEnabled,
+            relay.Status,
+            relay.LastConnectedUtc,
             configuration.OptimizerExecutionEnabled));
     }
 
