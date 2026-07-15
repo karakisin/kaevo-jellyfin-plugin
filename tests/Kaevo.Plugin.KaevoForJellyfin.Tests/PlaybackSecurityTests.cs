@@ -92,7 +92,7 @@ public sealed class PlaybackSecurityTests
                 ["allowVideoStreamCopy"] = JsonSerializer.SerializeToElement(true),
                 ["allowAudioStreamCopy"] = JsonSerializer.SerializeToElement(false),
                 ["enableAutoStreamCopy"] = JsonSerializer.SerializeToElement(true),
-                ["segmentContainer"] = JsonSerializer.SerializeToElement("mp4")
+                ["segmentContainer"] = JsonSerializer.SerializeToElement("ts")
             },
             null);
 
@@ -101,7 +101,7 @@ public sealed class PlaybackSecurityTests
         Assert.Contains("audioCodec=aac", request.PathAndQuery, StringComparison.Ordinal);
         Assert.Contains("allowVideoStreamCopy=True", request.PathAndQuery, StringComparison.Ordinal);
         Assert.Contains("allowAudioStreamCopy=False", request.PathAndQuery, StringComparison.Ordinal);
-        Assert.Contains("segmentContainer=mp4", request.PathAndQuery, StringComparison.Ordinal);
+        Assert.Contains("segmentContainer=ts", request.PathAndQuery, StringComparison.Ordinal);
     }
 
     [Fact]

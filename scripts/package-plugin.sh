@@ -25,7 +25,7 @@ fi
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Keeps active playback valid across long streams and enables Jellyfin-managed audio transcoding while preserving compatible video streams.",
+  "changelog": "Fixes Apple playback startup for locally transcoded audio by using Jellyfin's MPEG-TS HLS output while preserving compatible video streams.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -33,7 +33,7 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.9.0"
+  "version": "0.2.10.0"
 }
 EOF
 
