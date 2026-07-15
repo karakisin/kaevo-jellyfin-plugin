@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.9.0",
+        "changelog": "Keeps active playback valid across long streams and enables Jellyfin-managed audio transcoding while preserving compatible video streams.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.9/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "b00384ab022405ad357bfcccdd4277a0",
+        "timestamp": "2026-07-15T07:57:00Z"
+      },
+      {
         "version": "0.2.8.0",
         "changelog": "Adds a three-channel playback pool so normal network connection rotation cannot briefly remove the only media path.",
         "targetAbi": "10.11.0.0",

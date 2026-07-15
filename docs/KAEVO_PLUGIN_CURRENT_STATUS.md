@@ -1,6 +1,6 @@
 # Kaevo Plugin Current Status
 
-Updated: 2026-07-14
+Updated: 2026-07-15
 
 ## Foundation
 
@@ -8,7 +8,7 @@ Updated: 2026-07-14
 - Jellyfin target: `10.11.x`
 - .NET target: `net8.0`
 - Foundation version: `0.1.0`
-- Current repository version: `0.2.8`
+- Current repository version: `0.2.9`
 
 ## Files created for the foundation
 
@@ -43,12 +43,14 @@ copied or installed there.
 - The Kaevo iOS app creates and exchanges pairing material automatically.
 - Users do not enter Cloud URLs, pairing codes, or server environment credentials.
 - The Jellyfin credential is stored only in the plugin's owner-only secret file.
-- Remote writes, remote playback, and optimizer execution are forced off.
+- Remote playback uses short-lived device-bound authorization and a bounded active session.
+- Jellyfin can locally transcode unsupported audio to AAC while copying compatible video.
+- Remote writes and optimizer execution remain off.
 
 ## Current product boundary
 
-Remote playback, remote mutations, and real-media optimizer execution remain
-outside the supported phase.
+Remote playback is supported through the plugin-backed secure path. Remote
+mutations and real-media optimizer execution remain outside the supported phase.
 
 ## Next validation
 

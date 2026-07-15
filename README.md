@@ -9,8 +9,8 @@ metadata access without requiring a separate Kaevo server installation.
 - Jellyfin: `10.11.x`
 - .NET target: `net8.0`
 - Foundation baseline: `0.1.0`
-- Current repository build: `0.2.8`
-- Supported phase: local metadata plus app-guided Cloud activation
+- Current repository build: `0.2.9`
+- Supported phase: local metadata, app-guided Cloud activation, and guarded remote playback
 
 Current endpoints:
 
@@ -24,8 +24,10 @@ Watching items, item IDs, and image tags. It does not return image binaries,
 stream URLs, provider secrets, or local credentials.
 
 The Kaevo app can activate the plugin without asking the user for a Cloud URL,
-pairing code, or TrueNAS environment credential. Remote playback, remote
-mutations, and optimizer execution remain disabled in this release.
+pairing code, or TrueNAS environment credential. Playback stays on the Jellyfin
+server: compatible video is copied directly and unsupported audio can be
+transcoded to AAC before secure delivery. Remote mutations and optimizer
+execution remain disabled.
 
 ## Install from the Jellyfin catalog
 

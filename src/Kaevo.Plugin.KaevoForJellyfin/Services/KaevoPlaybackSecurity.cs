@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -22,6 +23,12 @@ internal sealed record ResolvedPlaybackRequest(
 
 internal static partial class KaevoPlaybackSecurity
 {
+    private const long MaximumActivePlaybackSeconds = 12 * 60 * 60;
+    private const long MaximumIdlePlaybackSeconds = 5 * 60;
+    private const int MaximumActivePlaybackGrants = 256;
+    private sealed record ActivePlaybackGrant(PlaybackGrant Grant, long ActivatedAt, long LastSeenAt);
+    private static readonly ConcurrentDictionary<string, ActivePlaybackGrant> ActiveGrants = new(StringComparer.Ordinal);
+
     private static readonly HashSet<string> AllowedQueryKeys = new(StringComparer.Ordinal)
     {
         "mediaSourceId", "playSessionId", "deviceId", "static", "container", "segmentContainer",
@@ -31,11 +38,28 @@ internal static partial class KaevoPlaybackSecurity
         "enableAdaptiveBitrateStreaming", "runtimeTicks", "actualSegmentLengthTicks"
     };
 
-    public static PlaybackGrant VerifyGrant(string token, string grantKey, string connectorId)
+    public static PlaybackGrant VerifyGrant(string token, string grantKey, string connectorId, long? nowEpoch = null)
     {
         if (grantKey.Length < 32)
         {
             throw new InvalidOperationException("playbackConnectorGrantKeyTooShort");
+        }
+
+        var now = nowEpoch ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var tokenHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
+        if (ActiveGrants.TryGetValue(tokenHash, out var active))
+        {
+            if (!string.Equals(active.Grant.ConnectorId, connectorId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("playbackGrantConnectorMismatch");
+            }
+            if (now - active.ActivatedAt <= MaximumActivePlaybackSeconds
+                && now - active.LastSeenAt <= MaximumIdlePlaybackSeconds)
+            {
+                ActiveGrants[tokenHash] = active with { LastSeenAt = now };
+                return active.Grant;
+            }
+            ActiveGrants.TryRemove(tokenHash, out _);
         }
 
         var encodedPayload = token.Split('.', 2)[0];
@@ -58,7 +82,6 @@ internal static partial class KaevoPlaybackSecurity
 
         var expiresAt = RequiredInt64(payload, "exp");
         var notBefore = RequiredInt64(payload, "nbf");
-        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         if (now < notBefore || now >= expiresAt)
         {
             throw new InvalidOperationException("playbackGrantExpired");
@@ -82,7 +105,7 @@ internal static partial class KaevoPlaybackSecurity
             throw new InvalidOperationException("playbackGrantModeInvalid");
         }
 
-        return new PlaybackGrant(
+        var grant = new PlaybackGrant(
             tokenConnectorId,
             RequiredString(payload, "device_id"),
             itemId,
@@ -91,6 +114,34 @@ internal static partial class KaevoPlaybackSecurity
             mode,
             checked((int)RequiredInt64(payload, "max_bitrate")),
             expiresAt);
+        ActiveGrants[tokenHash] = new ActivePlaybackGrant(grant, now, now);
+        TrimActiveGrants(now);
+        return grant;
+    }
+
+    internal static void ResetActiveGrantsForTests() => ActiveGrants.Clear();
+
+    private static void TrimActiveGrants(long now)
+    {
+        foreach (var pair in ActiveGrants)
+        {
+            if (now - pair.Value.ActivatedAt > MaximumActivePlaybackSeconds
+                || now - pair.Value.LastSeenAt > MaximumIdlePlaybackSeconds)
+            {
+                ActiveGrants.TryRemove(pair.Key, out _);
+            }
+        }
+        if (ActiveGrants.Count <= MaximumActivePlaybackGrants)
+        {
+            return;
+        }
+        foreach (var key in ActiveGrants
+            .OrderBy(pair => pair.Value.LastSeenAt)
+            .Take(ActiveGrants.Count - MaximumActivePlaybackGrants)
+            .Select(pair => pair.Key))
+        {
+            ActiveGrants.TryRemove(key, out _);
+        }
     }
 
     public static ResolvedPlaybackRequest Resolve(
