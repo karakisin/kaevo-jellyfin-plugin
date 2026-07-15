@@ -26,17 +26,24 @@ internal static partial class KaevoPlaybackSecurity
     private const long MaximumActivePlaybackSeconds = 12 * 60 * 60;
     private const long MaximumIdlePlaybackSeconds = 5 * 60;
     private const int MaximumActivePlaybackGrants = 256;
+    private const int MaximumQueryParameters = 96;
+    private const int MaximumQueryValueLength = 4096;
+    private const int MaximumEncodedQueryLength = 32 * 1024;
     private sealed record ActivePlaybackGrant(PlaybackGrant Grant, long ActivatedAt, long LastSeenAt);
     private static readonly ConcurrentDictionary<string, ActivePlaybackGrant> ActiveGrants = new(StringComparer.Ordinal);
 
-    private static readonly HashSet<string> AllowedQueryKeys = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> BlockedQueryKeys = new(StringComparer.OrdinalIgnoreCase)
     {
-        "mediaSourceId", "playSessionId", "deviceId", "static", "container", "segmentContainer",
-        "segmentLength", "minSegments", "audioCodec", "videoCodec", "subtitleCodec", "audioBitRate",
-        "videoBitRate", "maxWidth", "maxHeight", "audioStreamIndex", "subtitleStreamIndex",
-        "enableAutoStreamCopy", "allowVideoStreamCopy", "allowAudioStreamCopy",
-        "enableAdaptiveBitrateStreaming", "runtimeTicks", "actualSegmentLengthTicks"
+        "api_key", "apikey", "access_token", "token", "authorization",
+        "x-emby-token", "x-mediabrowser-token", "x-emby-authorization"
     };
+
+    private enum PlaybackResourceKind
+    {
+        DirectStream,
+        Playlist,
+        Segment
+    }
 
     public static PlaybackGrant VerifyGrant(string token, string grantKey, string connectorId, long? nowEpoch = null)
     {
@@ -114,6 +121,10 @@ internal static partial class KaevoPlaybackSecurity
             mode,
             checked((int)RequiredInt64(payload, "max_bitrate")),
             expiresAt);
+        if (grant.MaximumBitrate is < 1 or > 100_000_000)
+        {
+            throw new InvalidOperationException("playbackGrantBitrateInvalid");
+        }
         ActiveGrants[tokenHash] = new ActivePlaybackGrant(grant, now, now);
         TrimActiveGrants(now);
         return grant;
@@ -151,59 +162,76 @@ internal static partial class KaevoPlaybackSecurity
         IReadOnlyDictionary<string, JsonElement>? query,
         string? rangeHeader)
     {
-        if (method is not ("GET" or "HEAD"))
+        if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException("playbackMethodNotAllowed");
         }
 
-        var staticMatch = StaticRouteRegex().Match(path);
-        var segmentMatch = SegmentRouteRegex().Match(path);
-        var match = staticMatch.Success ? staticMatch : segmentMatch;
-        if (!match.Success || !string.Equals(match.Groups[1].Value, grant.ItemId, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException("playbackRouteNotAllowed");
-        }
-
-        var route = staticMatch.Success ? staticMatch.Groups[2].Value : "segment";
-        if ((grant.Mode == "direct_play" && route != "stream")
-            || (grant.Mode != "direct_play" && route == "stream"))
+        var resource = ResolveResource(path, grant.ItemId);
+        if ((grant.Mode == "direct_play" && resource != PlaybackResourceKind.DirectStream)
+            || (grant.Mode != "direct_play" && resource == PlaybackResourceKind.DirectStream))
         {
             throw new InvalidOperationException("playbackModeRouteMismatch");
         }
 
-        var normalized = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var pair in query ?? new Dictionary<string, JsonElement>())
+        if (query?.Count > MaximumQueryParameters)
         {
-            if (!AllowedQueryKeys.Contains(pair.Key))
+            throw new InvalidOperationException("playbackQueryTooLarge");
+        }
+
+        var normalized = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in query ?? new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!QueryKeyRegex().IsMatch(pair.Key) || BlockedQueryKeys.Contains(pair.Key))
             {
                 throw new InvalidOperationException("playbackQueryNotAllowed");
             }
 
-            normalized[pair.Key] = pair.Value.ValueKind == JsonValueKind.String
-                ? pair.Value.GetString() ?? string.Empty
-                : pair.Value.ToString();
+            if (normalized.ContainsKey(pair.Key))
+            {
+                throw new InvalidOperationException("playbackQueryDuplicate");
+            }
+
+            var value = ScalarQueryValue(pair.Value);
+            if (value.Length > MaximumQueryValueLength
+                || value.IndexOfAny(['\r', '\n', '\0']) >= 0)
+            {
+                throw new InvalidOperationException("playbackQueryInvalid");
+            }
+
+            normalized.Add(pair.Key, value);
         }
 
         Bind(normalized, "mediaSourceId", grant.MediaSourceId);
         Bind(normalized, "playSessionId", grant.PlaybackSessionId);
         Bind(normalized, "deviceId", grant.DeviceId);
 
-        var bitrate = ParseNonNegative(normalized, "audioBitRate") + ParseNonNegative(normalized, "videoBitRate");
-        if (bitrate > grant.MaximumBitrate)
+        var audioBitrate = ParseNonNegative(normalized, "audioBitRate");
+        var videoBitrate = ParseNonNegative(normalized, "videoBitRate");
+        var maximumStreamingBitrate = ParseNonNegative(normalized, "maxStreamingBitrate");
+        if (audioBitrate > grant.MaximumBitrate
+            || videoBitrate > grant.MaximumBitrate
+            || maximumStreamingBitrate > grant.MaximumBitrate
+            || audioBitrate > grant.MaximumBitrate - videoBitrate)
         {
             throw new InvalidOperationException("playbackBitrateExceeded");
         }
 
         if (!string.IsNullOrWhiteSpace(rangeHeader)
-            && (grant.Mode != "direct_play" || !RangeRegex().IsMatch(rangeHeader)))
+            && !RangeRegex().IsMatch(rangeHeader))
         {
             throw new InvalidOperationException("playbackRangeInvalid");
         }
 
         var encodedQuery = string.Join('&', normalized.Select(pair =>
             $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
+        if (encodedQuery.Length > MaximumEncodedQueryLength)
+        {
+            throw new InvalidOperationException("playbackQueryTooLarge");
+        }
         return new ResolvedPlaybackRequest(
-            method == "HEAD" ? HttpMethod.Head : HttpMethod.Get,
+            string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase) ? HttpMethod.Head : HttpMethod.Get,
             encodedQuery.Length == 0 ? path : $"{path}?{encodedQuery}",
             rangeHeader);
     }
@@ -215,8 +243,90 @@ internal static partial class KaevoPlaybackSecurity
             throw new InvalidOperationException("playbackSessionBindingMismatch");
         }
 
+        values.Remove(key);
         values[key] = expected;
     }
+
+    internal static bool IsHlsSessionResourcePath(string path, string itemId)
+    {
+        try
+        {
+            return ResolveResource(path, itemId) is PlaybackResourceKind.Playlist or PlaybackResourceKind.Segment;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static PlaybackResourceKind ResolveResource(string path, string itemId)
+    {
+        if (string.IsNullOrWhiteSpace(path)
+            || path.Length > 2048
+            || path.Contains('\\')
+            || path.Contains('?')
+            || path.Contains('#')
+            || path.Contains("//", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("playbackRouteNotAllowed");
+        }
+
+        var segments = path.Split('/', StringSplitOptions.None);
+        if (segments.Length < 4
+            || segments[0].Length != 0
+            || !string.Equals(segments[1], "Videos", StringComparison.OrdinalIgnoreCase)
+            || !ItemIdPathRegex().IsMatch(segments[2])
+            || !string.Equals(NormalizeItemId(segments[2]), NormalizeItemId(itemId), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("playbackRouteNotAllowed");
+        }
+
+        var resourceSegments = segments[3..];
+        if (resourceSegments.Any(segment => string.IsNullOrWhiteSpace(segment)
+            || segment is "." or ".."
+            || !SafePathSegmentRegex().IsMatch(segment)))
+        {
+            throw new InvalidOperationException("playbackRouteNotAllowed");
+        }
+
+        if (resourceSegments.Length == 1 && DirectStreamRegex().IsMatch(resourceSegments[0]))
+        {
+            return PlaybackResourceKind.DirectStream;
+        }
+
+        if (resourceSegments.Length == 1 && PlaylistFileRegex().IsMatch(resourceSegments[0]))
+        {
+            return PlaybackResourceKind.Playlist;
+        }
+
+        if (resourceSegments.Length is < 2 or > 7 || !HlsPlaylistIdRegex().IsMatch(resourceSegments[0]))
+        {
+            throw new InvalidOperationException("playbackRouteNotAllowed");
+        }
+
+        var final = resourceSegments[^1];
+        if (PlaylistFileRegex().IsMatch(final))
+        {
+            return PlaybackResourceKind.Playlist;
+        }
+
+        if (SegmentFileRegex().IsMatch(final))
+        {
+            return PlaybackResourceKind.Segment;
+        }
+
+        throw new InvalidOperationException("playbackRouteNotAllowed");
+    }
+
+    private static string NormalizeItemId(string value) => value.Replace("-", string.Empty, StringComparison.Ordinal);
+
+    private static string ScalarQueryValue(JsonElement value)
+        => value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString() ?? string.Empty,
+            JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False or JsonValueKind.Null => value.ToString(),
+            _ => throw new InvalidOperationException("playbackQueryInvalid")
+        };
 
     private static long ParseNonNegative(IReadOnlyDictionary<string, string> values, string key)
     {
@@ -253,12 +363,27 @@ internal static partial class KaevoPlaybackSecurity
     [GeneratedRegex("^[0-9a-f]{32}$", RegexOptions.CultureInvariant)]
     private static partial Regex ItemIdRegex();
 
-    [GeneratedRegex("^/Videos/([0-9a-fA-F]{32})/(stream|master\\.m3u8|main\\.m3u8)$", RegexOptions.CultureInvariant)]
-    private static partial Regex StaticRouteRegex();
+    [GeneratedRegex("^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$", RegexOptions.CultureInvariant)]
+    private static partial Regex ItemIdPathRegex();
 
-    [GeneratedRegex("^/Videos/([0-9a-fA-F]{32})/hls1/main/(\\d+)\\.(ts|mp4|m4s)$", RegexOptions.CultureInvariant)]
-    private static partial Regex SegmentRouteRegex();
+    [GeneratedRegex("^[A-Za-z][A-Za-z0-9_.\\[\\]-]{0,95}$", RegexOptions.CultureInvariant)]
+    private static partial Regex QueryKeyRegex();
 
-    [GeneratedRegex("^bytes=\\d*-\\d*$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$", RegexOptions.CultureInvariant)]
+    private static partial Regex SafePathSegmentRegex();
+
+    [GeneratedRegex("^stream(?:\\.(?:mp4|m4v|mov|mkv|webm|ts))?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex DirectStreamRegex();
+
+    [GeneratedRegex("^(?:master|main|audio|subtitles?)\\.m3u8$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex PlaylistFileRegex();
+
+    [GeneratedRegex("^hls[0-9]{1,3}$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex HlsPlaylistIdRegex();
+
+    [GeneratedRegex("^-?[0-9]+\\.(?:ts|mp4|m4s|aac|m4a|mp3|vtt|webvtt)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SegmentFileRegex();
+
+    [GeneratedRegex("^bytes=(?:[0-9]+-[0-9]*|-[0-9]+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex RangeRegex();
 }

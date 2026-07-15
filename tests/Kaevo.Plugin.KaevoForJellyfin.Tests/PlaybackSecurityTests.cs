@@ -105,6 +105,69 @@ public sealed class PlaybackSecurityTests
     }
 
     [Fact]
+    public void GeneratedHlsPlaylistAcceptsJellyfinQueryCasingAndBindsSession()
+    {
+        KaevoPlaybackSecurity.ResetActiveGrantsForTests();
+        var grant = KaevoPlaybackSecurity.VerifyGrant(Token(mode: "transcode"), GrantKey, ConnectorId);
+        var request = KaevoPlaybackSecurity.Resolve(
+            grant,
+            "GET",
+            "/Videos/01234567-89ab-cdef-0123-456789abcdef/hls1/main.m3u8",
+            new Dictionary<string, JsonElement>
+            {
+                ["MediaSourceId"] = JsonSerializer.SerializeToElement("source-1"),
+                ["PlaySessionId"] = JsonSerializer.SerializeToElement("session-1"),
+                ["DeviceId"] = JsonSerializer.SerializeToElement("ios-device-1"),
+                ["BreakOnNonKeyFrames"] = JsonSerializer.SerializeToElement(false),
+                ["MaxAudioChannels"] = JsonSerializer.SerializeToElement(6)
+            },
+            null);
+
+        Assert.Contains("mediaSourceId=source-1", request.PathAndQuery, StringComparison.Ordinal);
+        Assert.Contains("playSessionId=session-1", request.PathAndQuery, StringComparison.Ordinal);
+        Assert.Contains("deviceId=ios-device-1", request.PathAndQuery, StringComparison.Ordinal);
+        Assert.Contains("BreakOnNonKeyFrames=False", request.PathAndQuery, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("-1.mp4")]
+    [InlineData("0.mp4")]
+    [InlineData("42.m4s")]
+    [InlineData("7.ts")]
+    public void HlsSessionAllowsInitializationAndMediaSegmentsWithRanges(string fileName)
+    {
+        KaevoPlaybackSecurity.ResetActiveGrantsForTests();
+        var grant = KaevoPlaybackSecurity.VerifyGrant(Token(mode: "transcode"), GrantKey, ConnectorId);
+        var request = KaevoPlaybackSecurity.Resolve(
+            grant,
+            "HEAD",
+            $"/Videos/{ItemId}/hls1/main/{fileName}",
+            null,
+            "bytes=0-4095");
+
+        Assert.Equal(HttpMethod.Head, request.Method);
+        Assert.Equal("bytes=0-4095", request.RangeHeader);
+    }
+
+    [Fact]
+    public void HlsSessionRejectsTraversalSecretsAndMultiRangeRequests()
+    {
+        KaevoPlaybackSecurity.ResetActiveGrantsForTests();
+        var grant = KaevoPlaybackSecurity.VerifyGrant(Token(mode: "transcode"), GrantKey, ConnectorId);
+
+        Assert.Throws<InvalidOperationException>(() => KaevoPlaybackSecurity.Resolve(
+            grant, "GET", $"/Videos/{ItemId}/hls1/../0.ts", null, null));
+        Assert.Throws<InvalidOperationException>(() => KaevoPlaybackSecurity.Resolve(
+            grant,
+            "GET",
+            $"/Videos/{ItemId}/hls1/main/0.ts",
+            new Dictionary<string, JsonElement> { ["X-Emby-Token"] = JsonSerializer.SerializeToElement("secret") },
+            null));
+        Assert.Throws<InvalidOperationException>(() => KaevoPlaybackSecurity.Resolve(
+            grant, "GET", $"/Videos/{ItemId}/hls1/main/0.ts", null, "bytes=0-1,4-5"));
+    }
+
+    [Fact]
     public void ActivePlaybackContinuesAfterShortLivedGrantExpires()
     {
         KaevoPlaybackSecurity.ResetActiveGrantsForTests();
