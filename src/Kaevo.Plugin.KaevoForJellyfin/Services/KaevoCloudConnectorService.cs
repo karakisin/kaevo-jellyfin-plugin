@@ -34,6 +34,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private readonly ILogger<KaevoCloudConnectorService> _logger;
     private readonly HttpClient _cloud = new() { Timeout = TimeSpan.FromSeconds(30) };
     private readonly HttpClient _jellyfin = new() { Timeout = TimeSpan.FromSeconds(45) };
+    private readonly HttpClient _provider = new(new HttpClientHandler { AllowAutoRedirect = false })
+    {
+        Timeout = TimeSpan.FromSeconds(30)
+    };
 
     public KaevoCloudConnectorService(
         KaevoSecretStore secretStore,
@@ -166,7 +170,12 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             throw new InvalidOperationException("connectorPairingRejected");
         }
 
-        var secrets = new KaevoConnectorSecrets(response.ConnectorToken, response.PlaybackGrantKey, jellyfinCredential);
+        var secrets = new KaevoConnectorSecrets(
+            response.ConnectorToken,
+            response.PlaybackGrantKey,
+            jellyfinCredential,
+            existing?.SonarrBaseUrl ?? string.Empty,
+            existing?.SonarrApiKey ?? string.Empty);
         await _secretStore.WriteAsync(secrets, cancellationToken).ConfigureAwait(false);
         configuration.ConnectorId = response.ConnectorId;
         configuration.ProfileId = response.ProfileId;
@@ -191,17 +200,22 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 connector_name = "Kaevo Jellyfin Plugin",
                 host_type = "jellyfin_plugin",
-                app_version = "0.2.14",
+                app_version = "0.2.15",
                 capabilities = new[]
                 {
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
                     "playback_tunnel_v1", "direct_play", "hls_remux", "hls_transcode",
-                    "bounded_media_scan_v1", "optimizer_plan_v1"
+                    "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1"
                 },
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.14", null),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.14", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.15", null),
+                    sonarr = ProviderStatus(
+                        !string.IsNullOrWhiteSpace(secrets.SonarrBaseUrl) && !string.IsNullOrWhiteSpace(secrets.SonarrApiKey),
+                        !string.IsNullOrWhiteSpace(secrets.SonarrBaseUrl) && !string.IsNullOrWhiteSpace(secrets.SonarrApiKey),
+                        "0.2.15",
+                        string.IsNullOrWhiteSpace(secrets.SonarrBaseUrl) || string.IsNullOrWhiteSpace(secrets.SonarrApiKey) ? "notConfigured" : null),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.15", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -280,9 +294,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 provider_status = new
                 {
-                    jellyfin = ProviderStatus(true, true, "0.2.14", null),
-                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.14", configuration.OptimizerPlanningEnabled ? null : "disabled"),
-                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.14", configuration.RemotePlaybackEnabled ? null : "disabled")
+                    jellyfin = ProviderStatus(true, true, "0.2.15", null),
+                    sonarr = ProviderStatus(
+                        !string.IsNullOrWhiteSpace(secrets.SonarrBaseUrl) && !string.IsNullOrWhiteSpace(secrets.SonarrApiKey),
+                        !string.IsNullOrWhiteSpace(secrets.SonarrBaseUrl) && !string.IsNullOrWhiteSpace(secrets.SonarrApiKey),
+                        "0.2.15",
+                        string.IsNullOrWhiteSpace(secrets.SonarrBaseUrl) || string.IsNullOrWhiteSpace(secrets.SonarrApiKey) ? "notConfigured" : null),
+                    optimizer = ProviderStatus(configuration.OptimizerPlanningEnabled, configuration.OptimizerPlanningEnabled, "0.2.15", configuration.OptimizerPlanningEnabled ? null : "disabled"),
+                    playback_tunnel = ProviderStatus(configuration.RemotePlaybackEnabled, configuration.RemotePlaybackEnabled, "0.2.15", configuration.RemotePlaybackEnabled ? null : "disabled")
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -463,7 +482,178 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             }, JsonOptions), false);
         }
 
+        if (operation == "sonarr.episode_inventory")
+        {
+            var tvdbId = RequirePositiveInt(parameters, "tvdb_id");
+            var series = await SendSonarrJsonAsync(secrets, HttpMethod.Get, "/api/v3/series", null, cancellationToken).ConfigureAwait(false);
+            var matches = series.EnumerateArray()
+                .Where(item => item.TryGetProperty("tvdbId", out var value) && value.TryGetInt32(out var id) && id == tvdbId)
+                .ToArray();
+            if (matches.Length != 1 || !matches[0].TryGetProperty("id", out var seriesIdElement) || !seriesIdElement.TryGetInt32(out var seriesId))
+            {
+                throw new InvalidOperationException(matches.Length == 0 ? "sonarrSeriesNotFound" : "sonarrSeriesAmbiguous");
+            }
+
+            var episodes = await SendSonarrJsonAsync(secrets, HttpMethod.Get, $"/api/v3/episode?seriesId={seriesId}&includeImages=false", null, cancellationToken).ConfigureAwait(false);
+            var queue = await SendSonarrJsonAsync(secrets, HttpMethod.Get, $"/api/v3/queue?seriesId={seriesId}&page=1&pageSize=1000", null, cancellationToken).ConfigureAwait(false);
+            var files = await SendSonarrJsonAsync(secrets, HttpMethod.Get, $"/api/v3/episodefile?seriesId={seriesId}", null, cancellationToken).ConfigureAwait(false);
+            return CompleteCommand(request, operation, new { series_id = seriesId, episodes, queue, files });
+        }
+
+        if (operation == "sonarr.search_episodes")
+        {
+            var episodeIds = RequirePositiveIds(parameters, "episode_ids");
+            await SendSonarrJsonAsync(secrets, HttpMethod.Put, "/api/v3/episode/monitor", new { episodeIds, monitored = true }, cancellationToken).ConfigureAwait(false);
+            var command = await SendSonarrJsonAsync(secrets, HttpMethod.Post, "/api/v3/command", new { name = "EpisodeSearch", episodeIds }, cancellationToken).ConfigureAwait(false);
+            return CompleteCommand(request, operation, new { episode_ids = episodeIds, command });
+        }
+
+        if (operation == "sonarr.cancel_episodes")
+        {
+            var seriesId = RequirePositiveInt(parameters, "series_id");
+            var episodeIds = RequirePositiveIds(parameters, "episode_ids");
+            await CancelSonarrEpisodesAsync(secrets, seriesId, episodeIds, cancellationToken).ConfigureAwait(false);
+            return CompleteCommand(request, operation, new { episode_ids = episodeIds, cancelled = true });
+        }
+
+        if (operation == "sonarr.remove_episode_files")
+        {
+            var seriesId = RequirePositiveInt(parameters, "series_id");
+            var episodeIds = RequirePositiveIds(parameters, "episode_ids");
+            await CancelSonarrEpisodesAsync(secrets, seriesId, episodeIds, cancellationToken).ConfigureAwait(false);
+            var files = await SendSonarrJsonAsync(secrets, HttpMethod.Get, $"/api/v3/episodefile?seriesId={seriesId}", null, cancellationToken).ConfigureAwait(false);
+            var target = episodeIds.ToHashSet();
+            foreach (var file in files.EnumerateArray())
+            {
+                if (!file.TryGetProperty("episodeIds", out var fileEpisodes) || fileEpisodes.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+                var contained = fileEpisodes.EnumerateArray().Where(value => value.TryGetInt32(out _)).Select(value => value.GetInt32()).ToArray();
+                if (!contained.Any(target.Contains))
+                {
+                    continue;
+                }
+                if (contained.Any(id => !target.Contains(id)))
+                {
+                    throw new InvalidOperationException("sonarrMultiEpisodeFileUnsafe");
+                }
+                if (file.TryGetProperty("id", out var fileId) && fileId.TryGetInt32(out var id))
+                {
+                    await SendSonarrJsonAsync(secrets, HttpMethod.Delete, $"/api/v3/episodefile/{id}", null, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            await SendSonarrJsonAsync(secrets, HttpMethod.Put, "/api/v3/episode/monitor", new { episodeIds, monitored = false }, cancellationToken).ConfigureAwait(false);
+            await SendLocalAsync(configuration, secrets, HttpMethod.Post, "/Library/Refresh", null, null, cancellationToken).ConfigureAwait(false);
+            return CompleteCommand(request, operation, new { episode_ids = episodeIds, removed = true });
+        }
+
         throw new InvalidOperationException("remoteCommandNotAllowed");
+    }
+
+    private static CommandResult CompleteCommand(CloudRequest request, string operation, object result)
+    {
+        return new CommandResult(200, JsonSerializer.SerializeToElement(new
+        {
+            requestId = request.RequestId,
+            state = "complete",
+            operation,
+            result
+        }, JsonOptions), false);
+    }
+
+    private async Task CancelSonarrEpisodesAsync(
+        KaevoConnectorSecrets secrets,
+        int seriesId,
+        IReadOnlyList<int> episodeIds,
+        CancellationToken cancellationToken)
+    {
+        var queuePayload = await SendSonarrJsonAsync(secrets, HttpMethod.Get, $"/api/v3/queue?seriesId={seriesId}&page=1&pageSize=1000", null, cancellationToken).ConfigureAwait(false);
+        var records = queuePayload.TryGetProperty("records", out var value) && value.ValueKind == JsonValueKind.Array
+            ? value.EnumerateArray().ToArray()
+            : queuePayload.ValueKind == JsonValueKind.Array ? queuePayload.EnumerateArray().ToArray() : Array.Empty<JsonElement>();
+        var target = episodeIds.ToHashSet();
+        var matchingDownloadIds = records
+            .Where(record => record.TryGetProperty("episodeId", out var episode) && episode.TryGetInt32(out var id) && target.Contains(id))
+            .Select(record => record.TryGetProperty("downloadId", out var download) ? download.GetString() : null)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.Ordinal);
+        var related = records.Where(record =>
+            record.TryGetProperty("downloadId", out var download)
+            && matchingDownloadIds.Contains(download.GetString() ?? string.Empty)).ToArray();
+        if (related.Any(record => record.TryGetProperty("episodeId", out var episode) && episode.TryGetInt32(out var id) && !target.Contains(id)))
+        {
+            throw new InvalidOperationException("sonarrSharedDownloadUnsafe");
+        }
+        foreach (var record in related)
+        {
+            if (record.TryGetProperty("id", out var queueId) && queueId.TryGetInt32(out var id))
+            {
+                await SendSonarrJsonAsync(secrets, HttpMethod.Delete, $"/api/v3/queue/{id}?removeFromClient=true&blocklist=true&skipRedownload=true&changeCategory=false", null, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        await SendSonarrJsonAsync(secrets, HttpMethod.Put, "/api/v3/episode/monitor", new { episodeIds, monitored = false }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<JsonElement> SendSonarrJsonAsync(
+        KaevoConnectorSecrets secrets,
+        HttpMethod method,
+        string path,
+        object? body,
+        CancellationToken cancellationToken)
+    {
+        if (!Uri.TryCreate(secrets.SonarrBaseUrl, UriKind.Absolute, out var baseUri)
+            || string.IsNullOrWhiteSpace(secrets.SonarrApiKey))
+        {
+            throw new InvalidOperationException("sonarrNotProvisioned");
+        }
+        var uri = new Uri(secrets.SonarrBaseUrl.TrimEnd('/') + "/" + path.TrimStart('/'), UriKind.Absolute);
+        using var message = new HttpRequestMessage(method, uri);
+        message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        message.Headers.Add("X-Api-Key", secrets.SonarrApiKey);
+        if (body is not null)
+        {
+            message.Content = new StringContent(JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json");
+        }
+        using var response = await _provider.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        if ((int)response.StatusCode is >= 300 and < 400)
+        {
+            throw new InvalidOperationException("sonarrRedirectRejected");
+        }
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"sonarrHttp{(int)response.StatusCode}");
+        }
+        if (response.Content.Headers.ContentLength == 0 || method == HttpMethod.Delete)
+        {
+            return JsonSerializer.SerializeToElement(new { ok = true }, JsonOptions);
+        }
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return document.RootElement.Clone();
+    }
+
+    private static int RequirePositiveInt(IReadOnlyDictionary<string, JsonElement> parameters, string key)
+    {
+        if (!parameters.TryGetValue(key, out var value) || !value.TryGetInt32(out var result) || result <= 0)
+        {
+            throw new InvalidOperationException("sonarrParameterInvalid");
+        }
+        return result;
+    }
+
+    private static int[] RequirePositiveIds(IReadOnlyDictionary<string, JsonElement> parameters, string key)
+    {
+        if (!parameters.TryGetValue(key, out var value) || value.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException("sonarrEpisodeIdsInvalid");
+        }
+        var ids = value.EnumerateArray().Where(item => item.TryGetInt32(out var id) && id > 0).Select(item => item.GetInt32()).Distinct().Take(500).ToArray();
+        if (ids.Length == 0)
+        {
+            throw new InvalidOperationException("sonarrEpisodeIdsInvalid");
+        }
+        return ids;
     }
 
     private async Task<CommandResult> PreparePlaybackAsync(
@@ -641,7 +831,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         await Task.WhenAll(viewsTask, moviesTask, showsTask, collectionsTask, resumeTask, recentTask).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
-            version = "0.2.14",
+            version = "0.2.15",
             generated_at = DateTimeOffset.UtcNow,
             views = viewsTask.Result.Payload,
             movies = moviesTask.Result.Payload,

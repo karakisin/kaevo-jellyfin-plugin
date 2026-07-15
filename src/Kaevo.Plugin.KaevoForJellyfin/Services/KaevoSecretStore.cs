@@ -6,7 +6,9 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 public sealed record KaevoConnectorSecrets(
     string ConnectorToken,
     string PlaybackGrantKey,
-    string JellyfinApiKey);
+    string JellyfinApiKey,
+    string SonarrBaseUrl = "",
+    string SonarrApiKey = "");
 
 public sealed class KaevoSecretStore
 {

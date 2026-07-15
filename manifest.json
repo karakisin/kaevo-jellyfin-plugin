@@ -9,12 +9,12 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
-        "version": "0.2.14.0",
-        "changelog": "Delivers high-resolution artwork through Kaevo Cloud without the previous 240 KB image ceiling.",
+        "version": "0.2.15.0",
+        "changelog": "Adds cellular-ready Sonarr episode inventory, immediate missing-episode downloads, exact cancellation, and guarded removal through the local Kaevo plugin.",
         "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.14/Kaevo.Plugin.KaevoForJellyfin.zip",
-        "checksum": "ac25e15d6cc1479436bd143b4ebb6453",
-        "timestamp": "2026-07-15T12:32:30Z"
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.15/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "38e029d30243118795e33361dd28b2f1",
+        "timestamp": "2026-07-15T21:04:13Z"
       },
       {
         "version": "0.2.13.0",

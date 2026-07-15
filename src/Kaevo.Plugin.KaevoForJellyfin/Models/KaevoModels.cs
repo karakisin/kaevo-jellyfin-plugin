@@ -32,6 +32,14 @@ public sealed record KaevoCloudActivationResponse(
     string State,
     string Message);
 
+public sealed record KaevoSonarrProvisionRequest(
+    string BaseUrl,
+    string ApiKey);
+
+public sealed record KaevoProviderProvisionResponse(
+    string State,
+    string Provider);
+
 public sealed record KaevoMediaScanResponse(
     int Libraries,
     int Movies,
