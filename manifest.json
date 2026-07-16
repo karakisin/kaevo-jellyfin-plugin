@@ -9,11 +9,19 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.28.0",
+        "changelog": "Adds grant-bound WebVTT captions that do not restart video, stabilizes track changes, keeps Jellyfin transcoding available, and reports the active plugin version accurately.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.28/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "da56b4427fc11b01e76986c1ff049c69",
+        "timestamp": "2026-07-16T08:45:00Z"
+      },
+      {
         "version": "0.2.27.0",
         "changelog": "Adds grant-bound WebVTT captions that do not restart video, stabilizes track changes, and keeps Jellyfin transcoding available for media Apple devices cannot directly play.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.27/Kaevo.Plugin.KaevoForJellyfin.zip",
-        "checksum": "72a1105432959e6848489be14c211d86",
+        "checksum": "e1f1f63bc4e8febe1f6f6d3f0a3e44ce",
         "timestamp": "2026-07-16T08:35:00Z"
       },
       {
