@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.29.0",
+        "changelog": "Adds signed direct-stream support for Kaevo's internal VLCKit compatibility player, preserves requested audio tracks, and prevents active playback grants from expiring during normal buffering.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.29/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "812d5c575b5de34368694e8840587f98",
+        "timestamp": "2026-07-16T09:15:00Z"
+      },
+      {
         "version": "0.2.28.0",
         "changelog": "Adds grant-bound WebVTT captions that do not restart video, stabilizes track changes, keeps Jellyfin transcoding available, and reports the active plugin version accurately.",
         "targetAbi": "10.11.0.0",
