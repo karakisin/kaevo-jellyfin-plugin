@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.21.0",
+        "changelog": "Fixes cellular playback by removing the relay body-ack deadlock, forces Apple-compatible H.264 and AAC HLS, and preserves video stream copy when Jellyfin can safely remux it.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.21/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "d071100dd6944fff6124b0e389cf7e37",
+        "timestamp": "2026-07-16T05:12:00Z"
+      },
+      {
         "version": "0.2.20.0",
         "changelog": "Installs the verified bidirectional HLS relay protocol as a new binary version, exposes its protocol fingerprint, and preserves local audio transcoding with Jellyfin progress reporting.",
         "targetAbi": "10.11.0.0",
