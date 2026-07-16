@@ -21,7 +21,7 @@
         "changelog": "Adds grant-bound WebVTT captions that do not restart video, stabilizes track changes, and keeps Jellyfin transcoding available for media Apple devices cannot directly play.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.27/Kaevo.Plugin.KaevoForJellyfin.zip",
-        "checksum": "e1f1f63bc4e8febe1f6f6d3f0a3e44ce",
+        "checksum": "72a1105432959e6848489be14c211d86",
         "timestamp": "2026-07-16T08:35:00Z"
       },
       {
