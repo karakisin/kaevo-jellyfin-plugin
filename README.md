@@ -9,7 +9,7 @@ metadata access without requiring a separate Kaevo server installation.
 - Jellyfin: `10.11.x`
 - .NET target: `net8.0`
 - Foundation baseline: `0.1.0`
-- Current repository build: `0.2.15`
+- Current repository build: `0.2.18`
 - Supported phase: local metadata, app-guided Cloud activation, and guarded remote playback
 
 Current endpoints:
@@ -18,6 +18,8 @@ Current endpoints:
 - `GET /kaevo/media-scan`
 - `GET /kaevo/main-snapshot`
 - `POST /kaevo/cloud/activate` (authenticated Jellyfin administrator only)
+- `GET /kaevo/providers/status` (authenticated Jellyfin administrator only)
+- `POST /kaevo/providers/{provider}` (authenticated Jellyfin administrator only)
 
 The snapshot may contain libraries, movies, shows, collections, Continue
 Watching items, item IDs, and image tags. It does not return image binaries,
@@ -28,6 +30,17 @@ pairing code, or TrueNAS environment credential. Playback stays on the Jellyfin
 server: compatible video is copied directly and unsupported audio can be
 transcoded to AAC before secure delivery. Remote mutations and optimizer
 execution remain disabled.
+
+The plugin settings page can privately store and independently enable local
+connections for Sonarr, Radarr, Seerr, Lidarr, Readarr, Prowlarr, Bazarr, and
+Tdarr. API keys and local addresses remain on the Jellyfin server. Sonarr
+missing-episode search, progress, cancellation, and guarded removal are the
+first active provider workflow; the other connections are foundations for the
+next provider-specific features.
+
+Kaevo can independently verify Local, DNS / Proxy, and Cloud connectivity for
+each supported service. The Cloud check travels through Kaevo Cloud to this
+plugin and then performs a bounded read-only health request on the home network.
 
 ## Install from the Jellyfin catalog
 

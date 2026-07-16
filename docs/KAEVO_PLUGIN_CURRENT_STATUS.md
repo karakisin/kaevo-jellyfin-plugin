@@ -8,7 +8,7 @@ Updated: 2026-07-15
 - Jellyfin target: `10.11.x`
 - .NET target: `net8.0`
 - Foundation version: `0.1.0`
-- Current repository version: `0.2.15`
+- Current repository version: `0.2.18`
 
 ## Files created for the foundation
 
@@ -28,6 +28,8 @@ Updated: 2026-07-15
 - `GET /kaevo/media-scan`
 - `GET /kaevo/main-snapshot`
 - `POST /kaevo/cloud/activate` (authenticated Jellyfin administrator only)
+- `GET /kaevo/providers/status` (authenticated Jellyfin administrator only)
+- `POST /kaevo/providers/{provider}` (authenticated Jellyfin administrator only)
 
 These endpoints provide bounded, read-only metadata. They do not provide image
 binaries, stream URLs, provider secrets, or credentials.
@@ -46,6 +48,14 @@ copied or installed there.
 - Remote playback uses short-lived device-bound authorization and a bounded active session.
 - Jellyfin can locally transcode unsupported audio to AAC while copying compatible video.
 - Remote writes and optimizer execution remain off.
+
+## Local media services
+
+- Administrators can independently connect or disable Sonarr, Radarr, Seerr,
+  Lidarr, Readarr, Prowlarr, Bazarr, and Tdarr from the plugin settings page.
+- Local addresses and API keys stay in the plugin's owner-only secret file.
+- Sonarr missing-episode search, live queue progress, cancellation, and guarded
+  removal are active. The remaining connections are ready for later workflows.
 
 ## Current product boundary
 

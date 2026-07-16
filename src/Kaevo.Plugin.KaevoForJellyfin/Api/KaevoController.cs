@@ -15,6 +15,18 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase
 {
+    private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey)> SupportedProviders =
+        new Dictionary<string, (string DisplayName, bool RequiresApiKey)>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["sonarr"] = ("Sonarr", true),
+            ["radarr"] = ("Radarr", true),
+            ["seerr"] = ("Seerr", true),
+            ["lidarr"] = ("Lidarr", true),
+            ["readarr"] = ("Readarr", true),
+            ["prowlarr"] = ("Prowlarr", true),
+            ["bazarr"] = ("Bazarr", true),
+            ["tdarr"] = ("Tdarr", false)
+        };
     private const int DefaultItemLimit = 50;
     private const int MaximumItemLimit = 100;
     private readonly ILibraryManager _libraryManager;
@@ -46,7 +58,7 @@ public sealed class KaevoController : ControllerBase
         return Ok(new KaevoStatusResponse(
             "ok",
             "Kaevo",
-            "0.2.15",
+            "0.2.18",
             configuration.CloudConnectorEnabled,
             cloud.Status,
             cloud.LastHeartbeatUtc,
@@ -94,7 +106,8 @@ public sealed class KaevoController : ControllerBase
                 string.Empty,
                 activation.JellyfinAccessToken,
                 existingSecrets?.SonarrBaseUrl ?? string.Empty,
-                existingSecrets?.SonarrApiKey ?? string.Empty),
+                existingSecrets?.SonarrApiKey ?? string.Empty,
+                existingSecrets?.Providers),
             cancellationToken).ConfigureAwait(false);
 
         var configuration = KaevoPlugin.Instance?.Configuration;
@@ -124,29 +137,71 @@ public sealed class KaevoController : ControllerBase
     }
 
     [Authorize(Policy = "RequiresElevation")]
-    [HttpPost("providers/sonarr")]
-    public async Task<ActionResult<KaevoProviderProvisionResponse>> ProvisionSonarr(
-        [FromBody] KaevoSonarrProvisionRequest request,
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpGet("providers/status")]
+    public async Task<ActionResult<IReadOnlyList<KaevoProviderStatusResponse>>> GetProviderStatus(
         CancellationToken cancellationToken)
     {
-        if (!Uri.TryCreate(request.BaseUrl?.Trim(), UriKind.Absolute, out var baseUri)
-            || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps)
-            || string.IsNullOrWhiteSpace(baseUri.Host)
-            || string.IsNullOrWhiteSpace(request.ApiKey))
+        var secrets = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        var response = SupportedProviders.Select(entry =>
         {
-            return BadRequest(new KaevoProviderProvisionResponse("invalid", "sonarr"));
+            var provider = secrets?.GetProvider(entry.Key);
+            var configured = provider is not null
+                && !string.IsNullOrWhiteSpace(provider.BaseUrl)
+                && (!entry.Value.RequiresApiKey || !string.IsNullOrWhiteSpace(provider.ApiKey));
+            return new KaevoProviderStatusResponse(
+                entry.Key,
+                entry.Value.DisplayName,
+                provider?.Enabled == true,
+                configured,
+                provider?.BaseUrl ?? string.Empty,
+                entry.Value.RequiresApiKey);
+        }).ToArray();
+        return Ok(response);
+    }
+
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("providers/{providerName}")]
+    public async Task<ActionResult<KaevoProviderProvisionResponse>> ProvisionProvider(
+        string providerName,
+        [FromBody] KaevoProviderProvisionRequest request,
+        CancellationToken cancellationToken)
+    {
+        var provider = providerName.Trim().ToLowerInvariant();
+        if (!SupportedProviders.TryGetValue(provider, out var definition))
+        {
+            return NotFound(new KaevoProviderProvisionResponse("unsupported", provider));
         }
 
         var existing = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false)
             ?? new KaevoConnectorSecrets(string.Empty, string.Empty, string.Empty);
+        var current = existing.GetProvider(provider);
+        var baseUrl = request.BaseUrl?.Trim().TrimEnd('/') ?? string.Empty;
+        var apiKey = string.IsNullOrWhiteSpace(request.ApiKey) ? current?.ApiKey ?? string.Empty : request.ApiKey.Trim();
+        if (request.Enabled
+            && (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var baseUri)
+                || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps)
+                || string.IsNullOrWhiteSpace(baseUri.Host)
+                || (definition.RequiresApiKey && string.IsNullOrWhiteSpace(apiKey))))
+        {
+            return BadRequest(new KaevoProviderProvisionResponse("invalid", provider));
+        }
+
+        var providers = existing.Providers is null
+            ? new Dictionary<string, KaevoLocalProviderSecret>(StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, KaevoLocalProviderSecret>(existing.Providers, StringComparer.OrdinalIgnoreCase);
+        providers[provider] = new KaevoLocalProviderSecret(baseUrl, apiKey, request.Enabled);
         await _secretStore.WriteAsync(
             existing with
             {
-                SonarrBaseUrl = request.BaseUrl.Trim().TrimEnd('/'),
-                SonarrApiKey = request.ApiKey.Trim()
+                // Preserve the legacy fields until every installed plugin has
+                // migrated its protected secret file.
+                SonarrBaseUrl = provider == "sonarr" ? baseUrl : existing.SonarrBaseUrl,
+                SonarrApiKey = provider == "sonarr" ? apiKey : existing.SonarrApiKey,
+                Providers = providers
             },
             cancellationToken).ConfigureAwait(false);
-        return Ok(new KaevoProviderProvisionResponse("ready", "sonarr"));
+        return Ok(new KaevoProviderProvisionResponse(request.Enabled ? "ready" : "disabled", provider));
     }
 
     [HttpGet("media-scan")]
