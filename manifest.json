@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.19.0",
+        "changelog": "Fixes cellular HLS startup for alternate audio renditions, prevents relay backpressure stalls, adds bidirectional Jellyfin playback progress, and keeps transcoding local.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.19/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "b1425a74786225488ab9b52d3dec6171",
+        "timestamp": "2026-07-16T04:17:33Z"
+      },
+      {
         "version": "0.2.18.0",
         "changelog": "Keeps provider settings live without a restart and securely enables Seerr and Arr reads through the Kaevo Plugin.",
         "targetAbi": "10.11.0.0",
