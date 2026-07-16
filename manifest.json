@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.22.0",
+        "changelog": "Adds secure multi-language audio selection and native HLS text captions, including temporary captions after rewind, without exposing Jellyfin credentials.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.22/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "cd9afb4c8d6477dd44d3c3f7c58905dd",
+        "timestamp": "2026-07-16T06:47:09Z"
+      },
+      {
         "version": "0.2.21.0",
         "changelog": "Fixes cellular playback by removing the relay body-ack deadlock, forces Apple-compatible H.264 and AAC HLS, and preserves video stream copy when Jellyfin can safely remux it.",
         "targetAbi": "10.11.0.0",
