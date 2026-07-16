@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.24.0",
+        "changelog": "Fixes 4K HEVC playback startup by securely relaying Jellyfin's native trickplay playlist and thumbnail tiles instead of rejecting the master playlist.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.24/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "064705aaaebacf24dd8bfc8e1aa91c5e",
+        "timestamp": "2026-07-16T07:50:00Z"
+      },
+      {
         "version": "0.2.23.0",
         "changelog": "Fixes HEVC playback by preventing incompatible MPEG-TS stream copy, refreshes sessions for audio and caption selection, restores Jellyfin watched actions, and adds confirmed media deletion.",
         "targetAbi": "10.11.0.0",
