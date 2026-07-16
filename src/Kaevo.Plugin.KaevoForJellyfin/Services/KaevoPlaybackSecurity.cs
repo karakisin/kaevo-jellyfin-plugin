@@ -375,13 +375,16 @@ internal static partial class KaevoPlaybackSecurity
     [GeneratedRegex("^stream(?:\\.(?:mp4|m4v|mov|mkv|webm|ts))?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex DirectStreamRegex();
 
-    [GeneratedRegex("^(?:master|main|audio|subtitles?)\\.m3u8$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    // Jellyfin can name alternate audio/subtitle rendition playlists with
+    // stream indexes (for example audio/0.m3u8). The surrounding route checks
+    // still bind every resource to the granted item and hlsN session tree.
+    [GeneratedRegex("^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\\.m3u8$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex PlaylistFileRegex();
 
     [GeneratedRegex("^hls[0-9]{1,3}$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex HlsPlaylistIdRegex();
 
-    [GeneratedRegex("^-?[0-9]+\\.(?:ts|mp4|m4s|aac|m4a|mp3|vtt|webvtt)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\\.(?:ts|mp4|m4s|aac|m4a|mp3|vtt|webvtt)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SegmentFileRegex();
 
     [GeneratedRegex("^bytes=(?:[0-9]+-[0-9]*|-[0-9]+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

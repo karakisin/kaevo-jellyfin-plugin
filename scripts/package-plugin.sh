@@ -25,7 +25,7 @@ fi
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Keeps provider settings live without a restart and securely enables Seerr and Arr reads through the Kaevo Plugin.",
+  "changelog": "Fixes cellular HLS startup for alternate audio renditions, prevents relay backpressure stalls, adds bidirectional Jellyfin playback progress, and keeps transcoding local.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -33,7 +33,7 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.18.0"
+  "version": "0.2.19.0"
 }
 EOF
 

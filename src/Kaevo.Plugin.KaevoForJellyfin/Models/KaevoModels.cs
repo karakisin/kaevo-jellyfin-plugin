@@ -32,13 +32,22 @@ public sealed record KaevoCloudActivationResponse(
     string State,
     string Message);
 
-public sealed record KaevoSonarrProvisionRequest(
+public sealed record KaevoProviderProvisionRequest(
     string BaseUrl,
-    string ApiKey);
+    string? ApiKey,
+    bool Enabled = true);
 
 public sealed record KaevoProviderProvisionResponse(
     string State,
     string Provider);
+
+public sealed record KaevoProviderStatusResponse(
+    string Provider,
+    string DisplayName,
+    bool Enabled,
+    bool Configured,
+    string BaseUrl,
+    bool RequiresApiKey);
 
 public sealed record KaevoMediaScanResponse(
     int Libraries,

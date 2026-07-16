@@ -47,6 +47,40 @@ public sealed class PlaybackPlaylistRewriterTests
     }
 
     [Fact]
+    public void MasterPlaylistRewritesIndexedAlternateAudioRendition()
+    {
+        var playlist = "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",URI=\"hls1/audio/0.m3u8?MediaSourceId=source-1\"\n";
+
+        var rewritten = KaevoPlaybackPlaylistRewriter.Rewrite(
+            playlist,
+            Grant,
+            ItemId,
+            $"/Videos/{ItemId}/master.m3u8?audioCodec=aac");
+
+        Assert.Contains(
+            $"URI=\"/v1/playback/{Grant}/Videos/{ItemId}/hls1/audio/0.m3u8?MediaSourceId=source-1\"",
+            rewritten,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AlternateAudioPlaylistRewritesNamedSegmentsInsideGrantedSession()
+    {
+        var playlist = "#EXTM3U\n#EXTINF:6.0,\naudio-00001.aac?PlaySessionId=session-1\n";
+
+        var rewritten = KaevoPlaybackPlaylistRewriter.Rewrite(
+            playlist,
+            Grant,
+            ItemId,
+            $"/Videos/{ItemId}/hls1/audio/0.m3u8");
+
+        Assert.Contains(
+            $"/v1/playback/{Grant}/Videos/{ItemId}/hls1/audio/audio-00001.aac?PlaySessionId=session-1",
+            rewritten,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PlaylistRejectsExternalOrCrossItemUris()
     {
         Assert.Throws<InvalidOperationException>(() => KaevoPlaybackPlaylistRewriter.Rewrite(
