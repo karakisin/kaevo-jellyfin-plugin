@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.30.0",
+        "changelog": "Adds read-only playback compatibility inventory and immediately reconnects the Cloud connector after Remote Access is repaired.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.30/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "1ec837fb80f4b39f4061f48558b99401",
+        "timestamp": "2026-07-17T20:51:38Z"
+      },
+      {
         "version": "0.2.29.0",
         "changelog": "Adds signed direct-stream support for Kaevo's internal VLCKit compatibility player, preserves requested audio tracks, and prevents active playback grants from expiring during normal buffering.",
         "targetAbi": "10.11.0.0",
