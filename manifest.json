@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.33.0",
+        "changelog": "Adds guarded one-title Direct Play conversion with expiring approval, server-side disk checks, verified H.264/AAC output, original backup, rollback, and asynchronous job status.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.33/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "a7154c676b5541c0cdcf4ea0775573a4",
+        "timestamp": "2026-07-17T21:52:37Z"
+      },
+      {
         "version": "0.2.32.0",
         "changelog": "Makes safe Direct Play planning available after upgrades even when an older persisted plugin setting disabled planning.",
         "targetAbi": "10.11.0.0",
