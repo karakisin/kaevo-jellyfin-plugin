@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.32.0",
+        "changelog": "Makes safe Direct Play planning available after upgrades even when an older persisted plugin setting disabled planning.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.32/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "079ab4e2105280691335f8656aeaf794",
+        "timestamp": "2026-07-17T21:38:43Z"
+      },
+      {
         "version": "0.2.31.0",
         "changelog": "Adds detailed Direct Play compatibility results and safe read-only per-title conversion planning with resolution and bitrate evidence.",
         "targetAbi": "10.11.0.0",
