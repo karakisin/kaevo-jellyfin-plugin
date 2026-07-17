@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.39.0",
+        "changelog": "Selects the fastest safe Direct Play path: remux, copy compatible video while converting audio, or full video conversion only when required.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.39/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "70a2b7b9485d1317fa6a67f45682b056",
+        "timestamp": "2026-07-17T23:12:07Z"
+      },
+      {
         "version": "0.2.38.0",
         "changelog": "Fixes Direct Play planning for incompatible MP4 videos and shows both the series and episode name throughout optimization progress.",
         "targetAbi": "10.11.0.0",
