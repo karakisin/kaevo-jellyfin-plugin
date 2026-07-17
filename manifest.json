@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.37.0",
+        "changelog": "Fixes Direct Play planning for HEVC and other incompatible videos already stored in an MP4 container while preserving the exact Jellyfin file path.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.37/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "92b86f08f63ef1cd5e980fa754b9d525",
+        "timestamp": "2026-07-17T22:49:07Z"
+      },
+      {
         "version": "0.2.36.0",
         "changelog": "Adds persistent active and pending Media Optimization jobs with safe priority reordering while one conversion runs at a time.",
         "targetAbi": "10.11.0.0",
