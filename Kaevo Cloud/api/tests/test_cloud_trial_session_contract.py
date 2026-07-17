@@ -189,11 +189,14 @@ def test_existing_online_plugin_migrates_and_rotates_session(monkeypatch):
     }))
     assert unauthorized["statusCode"] == 401
 
-    migrated = handler.migrate_existing_app_session(event({
+    migration_event = event({
         "profile_id": profile_id,
         "connector_id": connector_id,
         "installation_id": "ios-existing-1",
-    }, dev_key="migration-dev-key"))
+    }, dev_key="migration-dev-key")
+    migration_event["rawPath"] = "/v1/app-sessions/migrate"
+    migration_event["requestContext"] = {"http": {"method": "POST"}}
+    migrated = handler.lambda_handler(migration_event, None)
     migrated_body = json.loads(migrated["body"])
     assert migrated["statusCode"] == 200
     assert migrated_body["state"] == "remote_access_ready"

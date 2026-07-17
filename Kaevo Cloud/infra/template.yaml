@@ -23,7 +23,7 @@ Parameters:
 Globals:
   Function:
     Runtime: python3.12
-    Timeout: 10
+    Timeout: 15
     MemorySize: 128
     Architectures:
       - arm64
@@ -38,6 +38,7 @@ Globals:
         HOME_CONNECTORS_TABLE: !Ref KaevoHomeConnectorsTable
         REMOTE_REQUESTS_TABLE: !Ref KaevoRemoteRequestsTable
         REMOTE_PAYLOADS_BUCKET: !Ref KaevoRemotePayloadsBucket
+        PROFILE_AVATARS_BUCKET: !Ref KaevoProfileAvatarsBucket
         APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
         PLAYBACK_GRANT_SIGNING_KEY: !Ref PlaybackGrantSigningKey
         PLAYBACK_RELAY_PUBLIC_URL: !Ref PlaybackRelayPublicUrl
@@ -215,6 +216,27 @@ Resources:
             Status: Enabled
             ExpirationInDays: 1
 
+  KaevoProfileAvatarsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldAvatarVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+
   KaevoUserPool:
     Type: AWS::Cognito::UserPool
     Properties:
@@ -267,6 +289,8 @@ Resources:
             TableName: !Ref KaevoAppSessionsTable
         - S3CrudPolicy:
             BucketName: !Ref KaevoRemotePayloadsBucket
+        - S3CrudPolicy:
+            BucketName: !Ref KaevoProfileAvatarsBucket
       Events:
         Root:
           Type: HttpApi
@@ -345,6 +369,13 @@ Resources:
             Path: /v1/profiles/{profileId}/settings
             Method: PUT
 
+        ProfileAvatar:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/profiles/{profileId}/avatar
+            Method: ANY
+
         PersonalizedHome:
           Type: HttpApi
           Properties:
@@ -378,6 +409,13 @@ Resources:
           Properties:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v1/trials/activate
+            Method: POST
+
+        MigrateAppSession:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/app-sessions/migrate
             Method: POST
 
         RefreshAppSession:

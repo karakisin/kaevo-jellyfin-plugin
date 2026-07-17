@@ -17,7 +17,7 @@ from botocore.exceptions import ClientError
 
 
 SERVICE_NAME = "kaevo-cloud"
-VERSION = "0.0.26"
+VERSION = "0.0.29"
 
 EVENTS_TABLE = os.environ.get("PROFILE_EVENTS_TABLE")
 PROFILE_SETTINGS_TABLE = os.environ.get("PROFILE_SETTINGS_TABLE")
@@ -26,6 +26,7 @@ ENTITLEMENTS_TABLE = os.environ.get("ENTITLEMENTS_TABLE")
 HOME_CONNECTORS_TABLE = os.environ.get("HOME_CONNECTORS_TABLE")
 REMOTE_REQUESTS_TABLE = os.environ.get("REMOTE_REQUESTS_TABLE")
 REMOTE_PAYLOADS_BUCKET = os.environ.get("REMOTE_PAYLOADS_BUCKET")
+PROFILE_AVATARS_BUCKET = os.environ.get("PROFILE_AVATARS_BUCKET")
 APP_SESSIONS_TABLE = os.environ.get("APP_SESSIONS_TABLE")
 DEV_API_KEY = os.environ.get("DEV_API_KEY")
 PLAYBACK_GRANT_SIGNING_KEY = os.environ.get("PLAYBACK_GRANT_SIGNING_KEY", "")
@@ -49,7 +50,7 @@ devices_table = dynamodb.Table(DEVICES_TABLE) if DEVICES_TABLE else None
 entitlements_table = dynamodb.Table(ENTITLEMENTS_TABLE) if ENTITLEMENTS_TABLE else None
 home_connectors_table = dynamodb.Table(HOME_CONNECTORS_TABLE) if HOME_CONNECTORS_TABLE else None
 remote_requests_table = dynamodb.Table(REMOTE_REQUESTS_TABLE) if REMOTE_REQUESTS_TABLE else None
-s3_client = boto3.client("s3") if REMOTE_PAYLOADS_BUCKET else None
+s3_client = boto3.client("s3") if REMOTE_PAYLOADS_BUCKET or PROFILE_AVATARS_BUCKET else None
 app_sessions_table = dynamodb.Table(APP_SESSIONS_TABLE) if APP_SESSIONS_TABLE else None
 
 
@@ -77,6 +78,97 @@ DEFAULT_ENTITLEMENTS = {
     "expires_at": "",
     "feature_flags": {}
 }
+
+
+def extract_profile_id_from_avatar_path(path):
+    match = re.fullmatch(r"/v1/profiles/([^/]+)/avatar", path or "")
+    return match.group(1) if match else ""
+
+
+def profile_avatar_key(profile_id):
+    digest = hashlib.sha256(str(profile_id).encode("utf-8")).hexdigest()
+    return f"profile-avatars/{digest}.jpg"
+
+
+def profile_avatar_cloud_allowed(event, profile_id):
+    if require_dev_key(event):
+        return True
+    entitlements, _ = load_entitlements_for_profile(profile_id)
+    return bool_value(entitlements.get("cloud_enabled"), False)
+
+
+def put_profile_avatar(event, path):
+    profile_id = extract_profile_id_from_avatar_path(path)
+    if not profile_id:
+        return response(400, {"state": "bad_request", "message": "invalid profile avatar path"})
+    if not require_profile_auth(event, profile_id):
+        return response(401, {"state": "unauthorized"})
+    if not profile_avatar_cloud_allowed(event, profile_id):
+        return response(403, {"state": "cloud_inactive", "message": "Cloud Access is required for profile photo sync"})
+    if not PROFILE_AVATARS_BUCKET or s3_client is None:
+        return response(503, {"state": "unavailable", "message": "profile avatar storage is not configured"})
+
+    body = parse_json_body(event)
+    encoded = str((body or {}).get("jpeg_base64") or "")
+    try:
+        image_data = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError):
+        return response(400, {"state": "bad_request", "message": "jpeg_base64 is invalid"})
+    if not image_data or len(image_data) > 400_000:
+        return response(400, {"state": "bad_request", "message": "profile photo must be 400 KB or smaller"})
+    if not image_data.startswith(b"\xff\xd8\xff"):
+        return response(400, {"state": "bad_request", "message": "profile photo must be a JPEG"})
+
+    updated_at = utc_now_iso()
+    s3_client.put_object(
+        Bucket=PROFILE_AVATARS_BUCKET,
+        Key=profile_avatar_key(profile_id),
+        Body=image_data,
+        ContentType="image/jpeg",
+        CacheControl="private, max-age=300",
+        Metadata={"profile-id-hash": hashlib.sha256(profile_id.encode("utf-8")).hexdigest(), "updated-at": updated_at}
+    )
+    return response(200, {"state": "saved", "profile_id": profile_id, "updated_at": updated_at})
+
+
+def get_profile_avatar(event, path):
+    profile_id = extract_profile_id_from_avatar_path(path)
+    if not profile_id:
+        return response(400, {"state": "bad_request", "message": "invalid profile avatar path"})
+    if not require_profile_auth(event, profile_id):
+        return response(401, {"state": "unauthorized"})
+    if not profile_avatar_cloud_allowed(event, profile_id):
+        return response(403, {"state": "cloud_inactive", "message": "Cloud Access is required for profile photo sync"})
+    if not PROFILE_AVATARS_BUCKET or s3_client is None:
+        return response(503, {"state": "unavailable", "message": "profile avatar storage is not configured"})
+    try:
+        avatar = s3_client.get_object(Bucket=PROFILE_AVATARS_BUCKET, Key=profile_avatar_key(profile_id))
+    except ClientError as error:
+        if str(error.response.get("Error", {}).get("Code")) in {"NoSuchKey", "404"}:
+            return response(404, {"state": "not_found"})
+        raise
+
+    image_data = avatar["Body"].read()
+    return response(200, {
+        "state": "ready",
+        "profile_id": profile_id,
+        "jpeg_base64": base64.b64encode(image_data).decode("ascii"),
+        "updated_at": avatar.get("LastModified").astimezone(timezone.utc).isoformat() if avatar.get("LastModified") else None
+    })
+
+
+def delete_profile_avatar(event, path):
+    profile_id = extract_profile_id_from_avatar_path(path)
+    if not profile_id:
+        return response(400, {"state": "bad_request", "message": "invalid profile avatar path"})
+    if not require_profile_auth(event, profile_id):
+        return response(401, {"state": "unauthorized"})
+    if not profile_avatar_cloud_allowed(event, profile_id):
+        return response(403, {"state": "cloud_inactive", "message": "Cloud Access is required for profile photo sync"})
+    if not PROFILE_AVATARS_BUCKET or s3_client is None:
+        return response(503, {"state": "unavailable", "message": "profile avatar storage is not configured"})
+    s3_client.delete_object(Bucket=PROFILE_AVATARS_BUCKET, Key=profile_avatar_key(profile_id))
+    return response(200, {"state": "deleted", "profile_id": profile_id})
 
 PROVIDER_SETTING_KEYS = [
     "discovery_provider",
@@ -199,6 +291,11 @@ def sign_playback_grant(payload):
     encoded = base64url_encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
     signature = hmac.new(PLAYBACK_GRANT_SIGNING_KEY.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).digest()
     return f"{encoded}.{base64url_encode(signature)}"
+
+
+def avfoundation_safe_grant_path(token, chunk_size=180):
+    """Represent a signed grant using path components AVFoundation will request."""
+    return "/".join(token[index:index + chunk_size] for index in range(0, len(token), chunk_size))
 
 
 def add_home_connector_signature(payload, connector_grant_key):
@@ -1556,7 +1653,10 @@ def get_remote_routes(event):
     online_connectors = [item for item in connectors if item.get("online")]
     active_connector = online_connectors[0] if online_connectors else None
 
-    providers = ["jellyfin", "playback_tunnel", "seerr", "sonarr", "radarr", "downloaders"]
+    providers = [
+        "jellyfin", "playback_tunnel", "seerr", "sonarr", "radarr",
+        "lidarr", "readarr", "prowlarr", "bazarr", "tdarr", "downloaders"
+    ]
     routes = []
 
     provider_status = active_connector.get("provider_status", {}) if active_connector else {}
@@ -1610,6 +1710,9 @@ REMOTE_COMMAND_ID_NAMESPACE = uuid.UUID("dd84f037-4c25-4b21-a393-6971989adddf")
 SAFE_JELLYFIN_ITEM_ID = re.compile(r"^[0-9a-fA-F]{32}$")
 SAFE_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 SAFE_APPROVAL_TOKEN = re.compile(r"^[A-Za-z0-9_-]{24,128}$")
+SUPPORTED_LOCAL_PROVIDERS = {
+    "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr"
+}
 
 
 def positive_int(value, maximum=2_147_483_647):
@@ -1624,15 +1727,38 @@ def positive_int(value, maximum=2_147_483_647):
     return parsed if 1 <= parsed <= maximum else None
 
 
+def non_negative_int(value, maximum=10_000):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if 0 <= parsed <= maximum else None
+
+
 def normalize_remote_command(operation, parameters):
     operation = str(operation or "").strip()
     parameters = parameters if isinstance(parameters, dict) else {}
+
+    if operation == "provider.health":
+        provider = str(parameters.get("provider") or "").strip().lower()
+        if provider not in SUPPORTED_LOCAL_PROVIDERS:
+            return None, "provider is not supported"
+        return {
+            "provider": "home_server",
+            "method": "COMMAND",
+            "path": "/commands/provider.health",
+            "query": {},
+            "body": {"provider": provider}
+        }, ""
 
     if operation in {
         "jellyfin.mark_played",
         "jellyfin.mark_unplayed",
         "jellyfin.favorite",
         "jellyfin.unfavorite",
+        "jellyfin.delete_item",
         "optimizer.plan_remux"
     }:
         item_id = str(parameters.get("item_id") or "").strip()
@@ -1656,9 +1782,67 @@ def normalize_remote_command(operation, parameters):
             return None, "device_id is invalid"
         if max_bitrate is None:
             return None, "max_bitrate is invalid"
+        audio_stream_index = None
+        subtitle_stream_index = None
+        if "audio_stream_index" in parameters:
+            audio_stream_index = non_negative_int(parameters.get("audio_stream_index"))
+            if audio_stream_index is None:
+                return None, "audio_stream_index is invalid"
+        if "subtitle_stream_index" in parameters:
+            subtitle_stream_index = non_negative_int(parameters.get("subtitle_stream_index"))
+            if subtitle_stream_index is None:
+                return None, "subtitle_stream_index is invalid"
+        compatibility_player = parameters.get("compatibility_player", False)
+        if not isinstance(compatibility_player, bool):
+            return None, "compatibility_player is invalid"
+        playback_body = {
+            "item_id": item_id.lower(),
+            "device_id": device_id,
+            "max_bitrate": max_bitrate,
+        }
+        if compatibility_player:
+            playback_body["compatibility_player"] = True
+        if audio_stream_index is not None:
+            playback_body["audio_stream_index"] = audio_stream_index
+        if subtitle_stream_index is not None:
+            playback_body["subtitle_stream_index"] = subtitle_stream_index
         return {
             "provider": "home_server", "method": "COMMAND", "path": "/commands/jellyfin.prepare_playback",
-            "query": {}, "body": {"item_id": item_id.lower(), "device_id": device_id, "max_bitrate": max_bitrate}
+            "query": {}, "body": playback_body
+        }, ""
+
+    if operation in {
+        "jellyfin.playback_started",
+        "jellyfin.playback_progress",
+        "jellyfin.playback_stopped"
+    }:
+        item_id = str(parameters.get("item_id") or "").strip()
+        media_source_id = str(parameters.get("media_source_id") or "").strip()
+        play_session_id = str(parameters.get("play_session_id") or "").strip()
+        try:
+            position_ticks = int(parameters.get("position_ticks") or 0)
+        except (TypeError, ValueError):
+            return None, "position_ticks is invalid"
+        if not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
+            return None, "item_id must be a 32-character Jellyfin id"
+        if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(media_source_id):
+            return None, "media_source_id is invalid"
+        if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(play_session_id):
+            return None, "play_session_id is invalid"
+        if position_ticks < 0 or position_ticks > 100_000_000_000_000:
+            return None, "position_ticks is invalid"
+        return {
+            "provider": "home_server",
+            "method": "COMMAND",
+            "path": f"/commands/{operation}",
+            "query": {},
+            "body": {
+                "item_id": item_id.lower(),
+                "media_source_id": media_source_id,
+                "play_session_id": play_session_id,
+                "position_ticks": position_ticks,
+                "is_paused": bool(parameters.get("is_paused", False))
+            }
         }, ""
 
     if operation == "optimizer.scan":
@@ -1738,6 +1922,54 @@ def normalize_remote_command(operation, parameters):
             "body": {"request_id": request_id}
         }, ""
 
+    if operation == "sonarr.episode_inventory":
+        tvdb_id = positive_int(parameters.get("tvdb_id"))
+        if tvdb_id is None:
+            return None, "tvdb_id must be a positive integer"
+        return {
+            "provider": "home_server",
+            "method": "COMMAND",
+            "path": "/commands/sonarr.episode_inventory",
+            "query": {},
+            "body": {"tvdb_id": tvdb_id}
+        }, ""
+
+    if operation in {"sonarr.search_episodes", "sonarr.cancel_episodes", "sonarr.remove_episode_files"}:
+        raw_ids = parameters.get("episode_ids") or []
+        if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 500:
+            return None, "episode_ids must contain between 1 and 500 entries"
+        episode_ids = []
+        for raw_id in raw_ids:
+            episode_id = positive_int(raw_id)
+            if episode_id is None:
+                return None, "episode_ids must contain positive integers"
+            episode_ids.append(episode_id)
+        payload = {"episode_ids": sorted(set(episode_ids))}
+        if operation != "sonarr.search_episodes":
+            series_id = positive_int(parameters.get("series_id"))
+            if series_id is None:
+                return None, "series_id must be a positive integer"
+            payload["series_id"] = series_id
+        if operation == "sonarr.cancel_episodes":
+            raw_command_ids = parameters.get("command_ids") or []
+            if not isinstance(raw_command_ids, list) or len(raw_command_ids) > 500:
+                return None, "command_ids must contain no more than 500 entries"
+            command_ids = []
+            for raw_id in raw_command_ids:
+                command_id = positive_int(raw_id)
+                if command_id is None:
+                    return None, "command_ids must contain positive integers"
+                command_ids.append(command_id)
+            if command_ids:
+                payload["command_ids"] = sorted(set(command_ids))
+        return {
+            "provider": "home_server",
+            "method": "COMMAND",
+            "path": f"/commands/{operation}",
+            "query": {},
+            "body": payload
+        }, ""
+
     return None, "unsupported remote command"
 
 
@@ -1786,6 +2018,21 @@ def is_safe_remote_path(provider, path, query):
             "/api/v1/movie/",
             "/api/v1/tv/"
         ],
+        "lidarr": [
+            "/api/v1/system/status",
+            "/api/v1/artist",
+            "/api/v1/queue",
+            "/api/v1/history",
+            "/api/v1/wanted/missing"
+        ],
+        "readarr": [
+            "/api/v1/system/status",
+            "/api/v1/author",
+            "/api/v1/book",
+            "/api/v1/queue",
+            "/api/v1/history",
+            "/api/v1/wanted/missing"
+        ],
         "qbittorrent": [
             "/api/v2/app/version",
             "/api/v2/transfer/info",
@@ -1796,7 +2043,11 @@ def is_safe_remote_path(provider, path, query):
         ],
         "prowlarr": [
             "/api/v1/system/status",
-            "/api/v1/indexerstatus"
+            "/api/v1/indexerstatus",
+            "/api/v1/indexer"
+        ],
+        "tdarr": [
+            "/api/v2/status"
         ]
     }
 
@@ -1838,6 +2089,12 @@ def remote_request_priority(request_payload):
 
     if method == "COMMAND" and path == "/commands/jellyfin.prepare_playback":
         return 0
+    if method == "COMMAND" and path in {
+        "/commands/jellyfin.playback_started",
+        "/commands/jellyfin.playback_progress",
+        "/commands/jellyfin.playback_stopped"
+    }:
+        return 1
     if re.fullmatch(r"/Users/[0-9a-fA-F]{32}/Items/[0-9a-fA-F]{32}", path):
         return 10
     if re.fullmatch(r"/Shows/[0-9a-fA-F]{32}/(Seasons|Episodes)", path):
@@ -2015,8 +2272,26 @@ def create_remote_command(event):
 
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "profile_id is required"})
+    profile_authorized_operations = {
+        "jellyfin.prepare_playback",
+        "jellyfin.playback_started",
+        "jellyfin.playback_progress",
+        "jellyfin.playback_stopped",
+        "jellyfin.mark_played",
+        "jellyfin.mark_unplayed",
+        "jellyfin.favorite",
+        "jellyfin.unfavorite",
+        "jellyfin.delete_item",
+        "provider.health",
+        "seerr.create_request",
+        "seerr.cancel_request",
+        "sonarr.episode_inventory",
+        "sonarr.search_episodes",
+        "sonarr.cancel_episodes",
+        "sonarr.remove_episode_files"
+    }
     if not require_dev_key(event):
-        if operation != "jellyfin.prepare_playback" or not require_profile_auth(event, profile_id):
+        if operation not in profile_authorized_operations or not require_profile_auth(event, profile_id):
             return response(401, {"state": "unauthorized"})
     if not SAFE_IDEMPOTENCY_KEY.fullmatch(idempotency_key):
         return response(400, {"state": "bad_request", "message": "idempotency_key must be 8-128 safe characters"})
@@ -2096,13 +2371,10 @@ def create_playback_grant(event):
     if len(PLAYBACK_GRANT_SIGNING_KEY) < 32:
         return response(503, {"state": "playback_grants_not_configured"})
     entitlements, _ = load_entitlements_for_profile(profile_id)
-    feature_flags = entitlements.get("feature_flags") if isinstance(entitlements.get("feature_flags"), dict) else {}
     subscription_state = str(entitlements.get("subscription_state") or "").lower()
     if not (
         bool_value(entitlements.get("cloud_enabled"), False)
         and subscription_state in {"active", "trialing", "grace_period"}
-        and bool_value(feature_flags.get("remote_playback"), False)
-        and bool_value(feature_flags.get("remote_playback_relay"), False)
     ):
         return response(403, {"state": "playback_not_entitled"})
     connector = latest_online_connector_for_profile(profile_id)
@@ -2137,7 +2409,10 @@ def create_playback_grant(event):
         "grant_id": payload["grant_id"],
         "expires_at": payload["exp"],
         "connector_id": payload["connector_id"],
-        "relay_base_url": f"{PLAYBACK_RELAY_PUBLIC_URL}/v1/playback/{token}" if PLAYBACK_RELAY_PUBLIC_URL else ""
+        "relay_base_url": (
+            f"{PLAYBACK_RELAY_PUBLIC_URL}/v1/playback/{avfoundation_safe_grant_path(token)}"
+            if PLAYBACK_RELAY_PUBLIC_URL else ""
+        )
     })
 
 
@@ -2346,10 +2621,10 @@ def fail_remote_request(event, path):
     })
 
 
-REMOTE_IMAGE_MAX_BYTES = 240_000
+REMOTE_IMAGE_MAX_BYTES = 3_500_000
 REMOTE_IMAGE_MAX_DIMENSION = 2_160
-REMOTE_IMAGE_POLL_TIMEOUT_SECONDS = 8
-REMOTE_IMAGE_POLL_INTERVAL_SECONDS = 1
+REMOTE_IMAGE_POLL_TIMEOUT_SECONDS = 12
+REMOTE_IMAGE_POLL_INTERVAL_SECONDS = 0.25
 REMOTE_IMAGE_TYPES = {"primary", "backdrop", "logo", "thumb"}
 REMOTE_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
@@ -2361,7 +2636,6 @@ def binary_response(status_code, content_type, data, headers=None):
     }
     if headers:
         merged_headers.update(headers)
-    priority = remote_request_priority(request_payload)
     return {
         "statusCode": status_code,
         "headers": merged_headers,
@@ -2503,8 +2777,10 @@ def lambda_handler(event, context):
                 "/v1/devices/register",
                 "/v1/devices",
                 "/v1/profiles/{profileId}/settings",
+                "/v1/profiles/{profileId}/avatar",
                 "/v1/trials/start",
                 "/v1/trials/activate",
+                "/v1/app-sessions/migrate",
                 "/v1/app-sessions/refresh",
                 "/v1/app-sessions/status",
                 "/v1/app-sessions/revoke",
@@ -2539,6 +2815,9 @@ def lambda_handler(event, context):
 
     if method == "POST" and path == "/v1/trials/activate":
         return activate_cloud_trial(event)
+
+    if method == "POST" and path == "/v1/app-sessions/migrate":
+        return migrate_existing_app_session(event)
 
     if method == "POST" and path == "/v1/app-sessions/refresh":
         return refresh_app_session(event)
@@ -2576,6 +2855,14 @@ def lambda_handler(event, context):
 
         if method == "PUT":
             return put_profile_settings(event, path)
+
+    if path.startswith("/v1/profiles/") and path.endswith("/avatar"):
+        if method == "GET":
+            return get_profile_avatar(event, path)
+        if method == "PUT":
+            return put_profile_avatar(event, path)
+        if method == "DELETE":
+            return delete_profile_avatar(event, path)
 
     if method == "GET" and path == "/v1/home/personalized":
         return get_personalized_home(event)
