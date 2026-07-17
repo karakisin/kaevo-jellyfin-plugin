@@ -9,60 +9,20 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.36.0",
+        "changelog": "Adds persistent active and pending Media Optimization jobs with safe priority reordering while one conversion runs at a time.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.36/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "3834ecde3e5fecee33bb6bc125e4ac50",
+        "timestamp": "2026-07-17T22:37:23Z"
+      },
+      {
         "version": "0.2.35.0",
         "changelog": "Fixes FFmpeg conversion startup by preserving the MP4 extension on temporary output and adds a safe retry workflow.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.35/Kaevo.Plugin.KaevoForJellyfin.zip",
         "checksum": "e6c4c37799198492fa15fd7460b9bb81",
         "timestamp": "2026-07-17T22:11:09Z"
-      },
-      {
-        "version": "0.2.34.0",
-        "changelog": "Adds trustworthy FFmpeg-derived conversion progress for Kaevo's in-app progress bar and Live Activity.",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.34/Kaevo.Plugin.KaevoForJellyfin.zip",
-        "checksum": "3ab15148e59ae6488cdc7ed73d262c0e",
-        "timestamp": "2026-07-17T22:01:52Z"
-      },
-      {
-        "version": "0.2.33.0",
-        "changelog": "Adds guarded one-title Direct Play conversion with expiring approval, server-side disk checks, verified H.264/AAC output, original backup, rollback, and asynchronous job status.",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.33/Kaevo.Plugin.KaevoForJellyfin.zip",
-        "checksum": "a7154c676b5541c0cdcf4ea0775573a4",
-        "timestamp": "2026-07-17T21:52:37Z"
-      },
-      {
-        "version": "0.2.32.0",
-        "changelog": "Makes safe Direct Play planning available after upgrades even when an older persisted plugin setting disabled planning.",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.32/Kaevo.Plugin.KaevoForJellyfin.zip",
-        "checksum": "079ab4e2105280691335f8656aeaf794",
-        "timestamp": "2026-07-17T21:38:43Z"
-      },
-      {
-        "version": "0.2.31.0",
-        "changelog": "Adds detailed Direct Play compatibility results and safe read-only per-title conversion planning with resolution and bitrate evidence.",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.31/Kaevo.Plugin.KaevoForJellyfin.zip",
-        "checksum": "c94db3e9181eec061f80d0ca17d5a78d",
-        "timestamp": "2026-07-17T21:29:52Z"
-      },
-      {
-        "version": "0.2.30.0",
-        "changelog": "Adds read-only playback compatibility inventory and immediately reconnects the Cloud connector after Remote Access is repaired.",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.30/Kaevo.Plugin.KaevoForJellyfin.zip",
-        "checksum": "1ec837fb80f4b39f4061f48558b99401",
-        "timestamp": "2026-07-17T20:51:38Z"
-      },
-      {
-        "version": "0.2.29.0",
-        "changelog": "Adds signed direct-stream support for Kaevo's internal VLCKit compatibility player, preserves requested audio tracks, and prevents active playback grants from expiring during normal buffering.",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.29/Kaevo.Plugin.KaevoForJellyfin.zip",
-        "checksum": "812d5c575b5de34368694e8840587f98",
-        "timestamp": "2026-07-16T09:15:00Z"
       },
       {
         "version": "0.2.28.0",
