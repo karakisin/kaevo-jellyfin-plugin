@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.35.0",
+        "changelog": "Fixes FFmpeg conversion startup by preserving the MP4 extension on temporary output and adds a safe retry workflow.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.35/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "e6c4c37799198492fa15fd7460b9bb81",
+        "timestamp": "2026-07-17T22:11:09Z"
+      },
+      {
         "version": "0.2.34.0",
         "changelog": "Adds trustworthy FFmpeg-derived conversion progress for Kaevo's in-app progress bar and Live Activity.",
         "targetAbi": "10.11.0.0",
