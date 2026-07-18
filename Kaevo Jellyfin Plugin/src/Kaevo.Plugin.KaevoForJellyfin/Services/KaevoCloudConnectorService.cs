@@ -1679,6 +1679,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
     private static void ValidateConfiguration(PluginConfiguration configuration)
     {
+        if (KaevoPlugin.Instance?.PackageIntegrityValid != true)
+        {
+            throw new InvalidOperationException("pluginPackageVersionMismatch");
+        }
         if (!Uri.TryCreate(configuration.CloudBaseUrl, UriKind.Absolute, out var cloud) || cloud.Scheme != Uri.UriSchemeHttps)
         {
             throw new InvalidOperationException("cloudBaseUrlInvalid");

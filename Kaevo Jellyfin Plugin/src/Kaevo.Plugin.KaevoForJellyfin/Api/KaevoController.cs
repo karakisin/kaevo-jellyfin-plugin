@@ -5,6 +5,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
 using Kaevo.Plugin.KaevoForJellyfin.Models;
 using Kaevo.Plugin.KaevoForJellyfin.Services;
 
@@ -14,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Authorize]
 [Route("kaevo")]
 [Produces("application/json")]
-public sealed class KaevoController : ControllerBase
+public sealed class KaevoController : ControllerBase, IActionFilter
 {
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey)>(StringComparer.OrdinalIgnoreCase)
@@ -61,6 +62,16 @@ public sealed class KaevoController : ControllerBase
         _lifecycleStore = lifecycleStore;
         _providerAudit = providerAudit;
     }
+
+    public void OnActionExecuting(ActionExecutingContext context)
+    {
+        if (KaevoPlugin.Instance?.PackageIntegrityValid != true)
+        {
+            context.Result = StatusCode(503, new { state = "pluginPackageVersionMismatch" });
+        }
+    }
+
+    public void OnActionExecuted(ActionExecutedContext context) { }
 
     [HttpGet("status")]
     public ActionResult<KaevoStatusResponse> GetStatus()
