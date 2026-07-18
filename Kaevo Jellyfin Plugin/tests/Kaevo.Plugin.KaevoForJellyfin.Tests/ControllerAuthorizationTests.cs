@@ -22,6 +22,11 @@ public sealed class ControllerAuthorizationTests
     [InlineData(nameof(KaevoController.ActivateCloud))]
     [InlineData(nameof(KaevoController.GetProviderStatus))]
     [InlineData(nameof(KaevoController.ProvisionProvider))]
+    [InlineData(nameof(KaevoController.PairLifecycle))]
+    [InlineData(nameof(KaevoController.RotateLifecycle))]
+    [InlineData(nameof(KaevoController.RecoverLifecycle))]
+    [InlineData(nameof(KaevoController.RevokeLifecycle))]
+    [InlineData(nameof(KaevoController.UnpairLifecycle))]
     public void SensitiveConfigurationEndpointsRequireElevation(string methodName)
     {
         var method = typeof(KaevoController).GetMethod(methodName);
