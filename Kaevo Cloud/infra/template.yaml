@@ -646,11 +646,15 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoInstallationsTable
         - Statement:
-            - Sid: WriteSecurityAudit
+            - Sid: ConnectorLifecycleTransactions
               Effect: Allow
               Action:
                 - dynamodb:PutItem
-              Resource: !GetAtt KaevoSecurityAuditTable.Arn
+                - dynamodb:TransactWriteItems
+              Resource:
+                - !GetAtt KaevoHomeConnectorsTable.Arn
+                - !GetAtt KaevoAppSessionsTable.Arn
+                - !GetAtt KaevoSecurityAuditTable.Arn
             - Sid: ReadAuditReferenceKey
               Effect: Allow
               Action:
@@ -848,6 +852,8 @@ Resources:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v1/home-connectors/pairing/start
             Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
 
         ExchangeHomeConnectorPairing:
           Type: HttpApi
@@ -862,6 +868,40 @@ Resources:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v2/home-connectors/pairing/exchange
             Method: POST
+
+        StartHomeConnectorRotation:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/home-connectors/{connectorId}/rotation-intents
+            Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
+
+        StartHomeConnectorRecovery:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/home-connectors/{connectorId}/recovery-intents
+            Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
+
+        ActivateHomeConnectorLifecycleIntent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/home-connectors/lifecycle/intents/{intentId}/activate
+            Method: POST
+
+        CancelHomeConnectorLifecycleIntent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/home-connectors/lifecycle/intents/{intentId}/cancel
+            Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
 
         RegisterHomeConnector:
           Type: HttpApi
@@ -883,6 +923,8 @@ Resources:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v1/home-connectors/{connectorId}/revoke
             Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
 
         CreateConnectorRelayTicket:
           Type: HttpApi

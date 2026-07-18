@@ -38,6 +38,16 @@ from security_audit import (
     prepare_audit_item,
     write_audit_item,
 )
+from connector_lifecycle import (
+    LifecycleError,
+    activate_intent,
+    binding_key,
+    cancel_intent,
+    create_pairing_intent,
+    create_update_intent,
+    opaque_intent,
+    random_pairing_code,
+)
 
 
 SERVICE_NAME = "kaevo-cloud"
@@ -517,7 +527,26 @@ def require_connector_auth(event, connector_id):
     if home_connectors_table is None or not connector_id:
         return False
     item = home_connectors_table.get_item(Key={"connector_id": connector_id}).get("Item")
-    if not item or item.get("auth_state") != "active" or bool_value(item.get("revoked"), False):
+    if not item or bool_value(item.get("revoked"), False):
+        return False
+    lifecycle = bool(item.get("server_id"))
+    if lifecycle:
+        if item.get("state") not in {"active", "rotation_pending", "recovery_pending"}:
+            return False
+        if not hmac.compare_digest(str(item.get("environment") or ""), KAEVO_ENV):
+            return False
+        supplied_version = str(header_value(event, "x-kaevo-credential-version") or "")
+        if not supplied_version or not hmac.compare_digest(supplied_version, str(item.get("credential_version") or "")):
+            return False
+        binding = home_connectors_table.get_item(
+            Key={"connector_id": binding_key(str(item.get("server_id") or ""))}, ConsistentRead=True,
+        ).get("Item")
+        if not binding or any(not hmac.compare_digest(str(binding.get(key) or ""), str(expected)) for key, expected in (
+            ("environment", KAEVO_ENV), ("account_id", item.get("account_id")),
+            ("household_id", item.get("household_id")), ("active_connector_id", connector_id),
+        )):
+            return False
+    elif item.get("auth_state") != "active":
         return False
     expected_thumbprint = str(item.get("key_thumbprint") or "")
     if expected_thumbprint:
@@ -1901,20 +1930,51 @@ def start_connector_pairing(event):
     body = parse_json_body(event)
     if body is None:
         return response(400, {"state": "bad_request", "message": "invalid JSON body"})
-    profile_id = identity.profile_id if identity else str(body.get("profile_id") or "").strip()
-    if not profile_id:
-        return response(400, {"state": "bad_request", "message": "profile_id is required"})
-    connector_id, pairing_code, expires_at = create_pairing_record(
-        profile_id,
-        body.get("connector_name"),
-        account_id=identity.account_id if identity else "",
-        household_id=identity.household_id if identity else "",
-    )
+    if identity is None:
+        if KAEVO_ENV not in {"dev", "development", "local", "test"}:
+            return response(401, {"state": "not_authorized"})
+        profile_id = str(body.get("profile_id") or "").strip()
+        if not profile_id:
+            return response(400, {"state": "bad_request"})
+        connector_id, pairing_code, expires_at = create_pairing_record(profile_id, body.get("connector_name"))
+        return response(201, {"state": "pairing_created", "connector_id": connector_id,
+                              "pairing_code": pairing_code, "expires_at": expires_at})
+    try:
+        public_jwk = validate_public_jwk(body.get("public_jwk") or {})
+        recovery_jwk = validate_public_jwk(body.get("recovery_public_jwk") or {})
+        thumbprint = jwk_thumbprint(public_jwk)
+        recovery_thumbprint = jwk_thumbprint(recovery_jwk)
+        url = request_absolute_url(event)
+        verify_dpop(str(header_value(event, "dpop") or ""), method=method_for(event), url=url,
+                    expected_thumbprint=thumbprint, replay_guard=record_dpop_jti)
+        verify_dpop(str(header_value(event, "dpop-recovery") or ""), method=method_for(event), url=url,
+                    expected_thumbprint=recovery_thumbprint, replay_guard=record_dpop_jti)
+        pairing_code = random_pairing_code()
+        created = create_pairing_intent(
+            client=dynamodb.meta.client, connectors=home_connectors_table,
+            intents=app_sessions_table, audits=security_audit_table, identity=identity,
+            environment=KAEVO_ENV, server_id=body.get("server_id"),
+            local_nonce=body.get("local_nonce"),
+            public_jwk_json=json.dumps(public_jwk, separators=(",", ":"), sort_keys=True),
+            key_thumbprint=thumbprint,
+            recovery_public_jwk_json=json.dumps(recovery_jwk, separators=(",", ":"), sort_keys=True),
+            recovery_thumbprint=recovery_thumbprint,
+            connector_name=str(body.get("connector_name") or "Kaevo Home Server"),
+            pairing_code=pairing_code, request_id=request_correlation_id(event), now=epoch_now(),
+        )
+    except IdentityError as error:
+        return identity_error_response(error)
+    except LifecycleError as error:
+        return response(error.status_code, {"state": error.reason})
+    except AuditReferenceError:
+        return audit_unavailable_response()
     return response(201, {
         "state": "pairing_created",
-        "connector_id": connector_id,
+        "connector_id": created["connector"]["connector_id"],
+        "intent_id": created["intent"]["intent_id"],
         "pairing_code": pairing_code,
-        "expires_at": expires_at
+        "expires_at": created["intent"]["expires_at"],
+        "credential_version": 1,
     })
 
 
@@ -1923,8 +1983,10 @@ def exchange_connector_pairing_v2(event):
         return response(503, {"state": "connector_storage_unavailable"})
     body = parse_json_body(event)
     connector_id = str((body or {}).get("connector_id") or "").strip()
+    intent_id = str((body or {}).get("intent_id") or "").strip()
     pairing_code = str((body or {}).get("pairing_code") or "").strip().upper()
-    if not connector_id or not pairing_code:
+    local_nonce = str((body or {}).get("local_nonce") or "").strip()
+    if not connector_id or not intent_id or not pairing_code or not local_nonce:
         return response(400, {"state": "bad_request"})
     try:
         public_jwk = validate_public_jwk((body or {}).get("public_jwk") or {})
@@ -1941,68 +2003,144 @@ def exchange_connector_pairing_v2(event):
     candidate = home_connectors_table.get_item(
         Key={"connector_id": connector_id}, ConsistentRead=True
     ).get("Item")
-    pairing_valid = bool(candidate) and all((
-        candidate.get("auth_state") == "pairing",
-        hmac.compare_digest(str(candidate.get("pairing_code_hash") or ""), secret_hash(pairing_code)),
-        int(candidate.get("pairing_expires_at") or 0) >= epoch_now(),
-        not candidate.get("key_thumbprint"),
+    intent = opaque_intent(app_sessions_table, intent_id)
+    pairing_valid = bool(candidate and intent) and all((
+        candidate.get("state") == "pending_pairing",
+        hmac.compare_digest(str(intent.get("pairing_code_hash") or ""), secret_hash(pairing_code)),
+        int(intent.get("expires_at") or 0) >= epoch_now(), not candidate.get("key_thumbprint"),
     ))
     if not pairing_valid:
         return response(401, {"state": "pairing_invalid"})
     try:
-        audit = prepare_security_audit(
-            event,
-            str(candidate.get("household_id") or candidate.get("profile_id") or ""),
-            "connector_paired",
-            str(candidate.get("profile_id") or ""),
-            actor_type="profile",
-            target_id=connector_id,
-            target_type="connector",
+        item = activate_intent(
+            client=dynamodb.meta.client, connectors=home_connectors_table,
+            intents=app_sessions_table, audits=security_audit_table, environment=KAEVO_ENV,
+            intent=intent, connector=candidate, local_nonce=local_nonce,
+            public_jwk_json=json.dumps(public_jwk, separators=(",", ":"), sort_keys=True),
+            proposed_thumbprint=thumbprint, request_id=request_correlation_id(event), now=epoch_now(),
         )
-    except AuditReferenceError:
-        return audit_unavailable_response()
-    playback_grant_key = secrets.token_urlsafe(32)
-    now = utc_now_iso()
-    try:
-        item = home_connectors_table.update_item(
-            Key={"connector_id": connector_id},
-            ConditionExpression=(
-                "auth_state = :pairing AND pairing_code_hash = :pairing_hash "
-                "AND pairing_expires_at >= :now_epoch AND attribute_not_exists(key_thumbprint)"
-            ),
-            UpdateExpression=(
-                "SET auth_state = :active, public_jwk_json = :public_jwk, "
-                "key_thumbprint = :thumbprint, credential_version = :credential_version, "
-                "playback_grant_key = :grant_key, paired_at = :now, updated_at = :now "
-                "REMOVE pairing_code_hash, pairing_expires_at, connector_token_hash"
-            ),
-            ExpressionAttributeValues={
-                ":pairing": "pairing",
-                ":pairing_hash": secret_hash(pairing_code),
-                ":now_epoch": epoch_now(),
-                ":active": "active",
-                ":public_jwk": json.dumps(public_jwk, separators=(",", ":"), sort_keys=True),
-                ":thumbprint": thumbprint,
-                ":credential_version": 1,
-                ":grant_key": playback_grant_key,
-                ":now": now,
-            },
-            ReturnValues="ALL_NEW",
-        ).get("Attributes", {})
-    except ClientError as error:
-        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-            return response(401, {"state": "pairing_invalid"})
-        raise
-    commit_security_audit(audit)
+    except LifecycleError as error:
+        return response(error.status_code, {"state": "pairing_invalid"})
     return response(200, {
         "state": "paired",
         "connector_id": connector_id,
         "profile_id": item.get("profile_id"),
         "credential_type": "ES256_DPOP",
-        "credential_version": 1,
+        "credential_version": item["credential_version"],
         "key_thumbprint": thumbprint,
-        "playback_grant_key": playback_grant_key,
+        "server_id": item["server_id"],
     })
+
+
+def start_connector_update_intent(event, path, operation):
+    try:
+        identity, _ = authoritative_identity(event, "pair_connector")
+    except IdentityError as error:
+        return identity_error_response(error)
+    connector_id = path.split("/home-connectors/", 1)[-1].split("/", 1)[0]
+    body = parse_json_body(event) or {}
+    connector = home_connectors_table.get_item(
+        Key={"connector_id": connector_id}, ConsistentRead=True,
+    ).get("Item") if home_connectors_table else None
+    if not connector or not hmac.compare_digest(str(connector.get("server_id") or ""), str(body.get("server_id") or "")):
+        return response(404, {"state": "connector_unavailable"})
+    try:
+        proposed_jwk = validate_public_jwk(body.get("public_jwk") or {})
+        proposed_thumbprint = jwk_thumbprint(proposed_jwk)
+        url = request_absolute_url(event)
+        if operation == "rotate":
+            if not require_connector_auth(event, connector_id):
+                return response(401, {"state": "connector_unauthorized"})
+        else:
+            verify_dpop(str(header_value(event, "dpop-recovery") or ""), method=method_for(event), url=url,
+                        expected_thumbprint=str(connector.get("recovery_key_thumbprint") or ""), replay_guard=record_dpop_jti)
+        verify_dpop(str(header_value(event, "dpop-new") or ""), method=method_for(event), url=url,
+                    expected_thumbprint=proposed_thumbprint, replay_guard=record_dpop_jti)
+        intent = create_update_intent(
+            operation=operation, client=dynamodb.meta.client, connectors=home_connectors_table,
+            intents=app_sessions_table, audits=security_audit_table, identity=identity,
+            environment=KAEVO_ENV, connector=connector, local_nonce=body.get("local_nonce"),
+            proposed_public_jwk_json=json.dumps(proposed_jwk, separators=(",", ":"), sort_keys=True),
+            proposed_thumbprint=proposed_thumbprint, request_id=request_correlation_id(event), now=epoch_now(),
+        )
+    except IdentityError as error:
+        return identity_error_response(error)
+    except LifecycleError as error:
+        return response(error.status_code, {"state": error.reason})
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    return response(201, {
+        "state": f"{operation}_pending", "intent_id": intent["intent_id"],
+        "connector_id": connector_id, "server_id": connector["server_id"],
+        "current_version": intent["current_version"], "target_version": intent["target_version"],
+        "expires_at": intent["expires_at"],
+    })
+
+
+def activate_connector_update_intent(event, path):
+    intent_id = path.split("/lifecycle/intents/", 1)[-1].split("/", 1)[0]
+    body = parse_json_body(event) or {}
+    intent = opaque_intent(app_sessions_table, intent_id) if app_sessions_table else {}
+    connector_id = str(intent.get("connector_id") or "")
+    connector = home_connectors_table.get_item(
+        Key={"connector_id": connector_id}, ConsistentRead=True,
+    ).get("Item") if home_connectors_table and connector_id else None
+    if not intent or not connector or intent.get("operation") not in {"rotate", "recover"}:
+        return response(401, {"state": "lifecycle_intent_invalid"})
+    try:
+        proposed_jwk = validate_public_jwk(body.get("public_jwk") or {})
+        proposed_thumbprint = jwk_thumbprint(proposed_jwk)
+        url = request_absolute_url(event)
+        if intent["operation"] == "rotate":
+            if not require_connector_auth(event, connector_id):
+                return response(401, {"state": "connector_unauthorized"})
+        else:
+            verify_dpop(str(header_value(event, "dpop-recovery") or ""), method=method_for(event), url=url,
+                        expected_thumbprint=str(connector.get("recovery_key_thumbprint") or ""), replay_guard=record_dpop_jti)
+        verify_dpop(str(header_value(event, "dpop-new") or ""), method=method_for(event), url=url,
+                    expected_thumbprint=proposed_thumbprint, replay_guard=record_dpop_jti)
+        updated = activate_intent(
+            client=dynamodb.meta.client, connectors=home_connectors_table, intents=app_sessions_table,
+            audits=security_audit_table, environment=KAEVO_ENV, intent=intent, connector=connector,
+            local_nonce=body.get("local_nonce"),
+            public_jwk_json=json.dumps(proposed_jwk, separators=(",", ":"), sort_keys=True),
+            proposed_thumbprint=proposed_thumbprint, request_id=request_correlation_id(event), now=epoch_now(),
+        )
+    except IdentityError as error:
+        return identity_error_response(error)
+    except LifecycleError as error:
+        return response(error.status_code, {"state": "lifecycle_intent_invalid"})
+    return response(200, {
+        "state": "active", "operation": intent["operation"], "connector_id": connector_id,
+        "server_id": updated["server_id"], "credential_version": updated["credential_version"],
+        "key_thumbprint": updated["key_thumbprint"],
+    })
+
+
+def cancel_connector_lifecycle_intent(event, path):
+    try:
+        identity, _ = authoritative_identity(event, "pair_connector")
+    except IdentityError as error:
+        return identity_error_response(error)
+    intent_id = path.split("/lifecycle/intents/", 1)[-1].split("/", 1)[0]
+    intent = opaque_intent(app_sessions_table, intent_id) if app_sessions_table else {}
+    connector_id = str(intent.get("connector_id") or "")
+    connector = home_connectors_table.get_item(
+        Key={"connector_id": connector_id}, ConsistentRead=True,
+    ).get("Item") if home_connectors_table and connector_id else None
+    if not intent or not connector:
+        return response(404, {"state": "lifecycle_intent_unavailable"})
+    try:
+        cancel_intent(
+            client=dynamodb.meta.client, connectors=home_connectors_table, intents=app_sessions_table,
+            audits=security_audit_table, identity=identity, intent=intent, connector=connector,
+            request_id=request_correlation_id(event), now=epoch_now(),
+        )
+    except LifecycleError as error:
+        return response(error.status_code, {"state": error.reason})
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    return response(200, {"state": "canceled"})
 
 
 def exchange_connector_pairing(event):
@@ -2069,13 +2207,56 @@ def revoke_home_connector(event, path):
         return response(404, {"state": "not_found"})
     if identity and not hmac.compare_digest(str(item.get("profile_id") or ""), identity.profile_id):
         return response(404, {"state": "not_found"})
-    item["revoked"] = True
-    item["auth_state"] = "revoked"
-    item["updated_at"] = utc_now_iso()
-    item.pop("connector_token_hash", None)
-    item.pop("public_jwk_json", None)
-    item.pop("key_thumbprint", None)
-    home_connectors_table.put_item(Item=item)
+    if not item.get("server_id"):
+        if KAEVO_ENV not in {"dev", "development", "local", "test"}:
+            return response(409, {"state": "lifecycle_upgrade_required"})
+        item["revoked"] = True
+        item["auth_state"] = "revoked"
+        item["updated_at"] = utc_now_iso()
+        item.pop("connector_token_hash", None)
+        home_connectors_table.put_item(Item=item)
+        return response(200, {"state": "revoked", "connector_id": connector_id})
+    current_revocation = int(item.get("revocation_version") or 0)
+    updated = dict(item)
+    updated.update({
+        "revoked": True, "state": "revoked", "auth_state": "revoked",
+        "revocation_version": current_revocation + 1, "revoked_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+    })
+    for key in ("pending_intent_id", "pending_intent_expires_at", "proposed_public_jwk_json", "proposed_key_thumbprint"):
+        updated.pop(key, None)
+    binding = home_connectors_table.get_item(
+        Key={"connector_id": binding_key(str(item["server_id"]))}, ConsistentRead=True,
+    ).get("Item")
+    if not binding or binding.get("active_connector_id") != connector_id:
+        return response(409, {"state": "server_binding_invalid"})
+    binding_updated = dict(binding)
+    binding_updated.update({"state": "revoked", "updated_at": utc_now_iso()})
+    try:
+        audit = prepare_audit_item(
+            scope_id=str(item.get("household_id") or ""), event_type="connector_revoked",
+            actor_subject=identity.subject if identity else "development_owner",
+            target_id=connector_id, target_type="connector", request_id=request_correlation_id(event), now=epoch_now(),
+        )
+    except AuditReferenceError:
+        audit = fallback_audit_item(
+            event_type="connector_revoked", result="success", reason_code="audit_key_unavailable", now=epoch_now(),
+        )
+    try:
+        dynamodb.meta.client.transact_write_items(TransactItems=[
+            {"Put": {"TableName": home_connectors_table.name, "Item": updated,
+                     "ConditionExpression": "revocation_version = :current AND attribute_exists(connector_id)",
+                     "ExpressionAttributeValues": {":current": current_revocation}}},
+            {"Put": {"TableName": home_connectors_table.name, "Item": binding_updated,
+                     "ConditionExpression": "active_connector_id = :connector",
+                     "ExpressionAttributeValues": {":connector": connector_id}}},
+            {"Put": {"TableName": security_audit_table.name, "Item": audit,
+                     "ConditionExpression": "attribute_not_exists(event_id)"}},
+        ])
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "TransactionCanceledException":
+            return response(409, {"state": "lifecycle_conflict"})
+        raise
     return response(200, {"state": "revoked", "connector_id": connector_id})
 
 
@@ -3682,6 +3863,18 @@ def lambda_handler(event, context):
 
     if method == "POST" and path == "/v2/home-connectors/pairing/exchange":
         return exchange_connector_pairing_v2(event)
+
+    if method == "POST" and path.startswith("/v2/home-connectors/") and path.endswith("/rotation-intents"):
+        return start_connector_update_intent(event, path, "rotate")
+
+    if method == "POST" and path.startswith("/v2/home-connectors/") and path.endswith("/recovery-intents"):
+        return start_connector_update_intent(event, path, "recover")
+
+    if method == "POST" and path.startswith("/v2/home-connectors/lifecycle/intents/") and path.endswith("/activate"):
+        return activate_connector_update_intent(event, path)
+
+    if method == "POST" and path.startswith("/v2/home-connectors/lifecycle/intents/") and path.endswith("/cancel"):
+        return cancel_connector_lifecycle_intent(event, path)
 
     if method == "POST" and path.startswith("/v1/home-connectors/") and path.endswith("/revoke"):
         return revoke_home_connector(event, path)
