@@ -1,4 +1,4 @@
-# KSEC-010A — Audit Principal Privacy
+# KSEC-010B — Audit Principal Identifier Privacy
 
 Date: 2026-07-18
 Candidate base: `c0320937721cc1af7b8125b9fabdbf4b333f997a`
@@ -6,10 +6,16 @@ Branch: `security/audit-principal-privacy-2026-07-18`
 
 ## Diagnostic finding
 
-KSEC-010A is confirmed. The security-audit data path retains stable identity and
+KSEC-010B is confirmed. The security-audit data path retains stable identity and
 household identifiers beyond what is required to investigate a security event.
 This is a privacy and breach-impact defect; it is not evidence of an
 authorization bypass.
+
+Historical evidence created during the initial investigation reused the label
+`KSEC-010A` for this privacy issue. That label remains the canonical identifier
+for the earlier authoritative Cognito access-claim issuer gap. Historical
+artifacts are preserved unchanged; references to audit principal privacy under
+`KSEC-010A` are aliases for `KSEC-010B` only.
 
 ### Exact current exposure
 
@@ -44,7 +50,7 @@ present in CloudFormation outputs, metrics, or alarms.
 Raw Cognito subjects and household/profile identifiers also exist in the
 principal, membership, household, profile, installation, session, connector,
 and application tables where they are required for authoritative identity,
-authorization, ownership lookup, or product state. KSEC-010A does not authorize
+authorization, ownership lookup, or product state. KSEC-010B does not authorize
 changing those operational keys. They must never be copied into the audit
 schema, logs, errors, metrics, outputs, or client responses merely for
 correlation.
