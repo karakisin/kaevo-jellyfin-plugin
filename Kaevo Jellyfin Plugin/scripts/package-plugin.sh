@@ -19,6 +19,11 @@ test -f "$BUILD_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" || {
     exit 1
 }
 
+command -v python3 >/dev/null 2>&1 || {
+    echo "Python 3 is required to create the deterministic Plugin archive." >&2
+    exit 1
+}
+
 rm -rf "$PLUGIN_DIR" "$ZIP_PATH"
 mkdir -p "$PLUGIN_DIR"
 
@@ -42,10 +47,7 @@ EOF
 NORMALIZED_TIMESTAMP="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$TIMESTAMP" '+%Y%m%d%H%M.%S')"
 touch -t "$NORMALIZED_TIMESTAMP" "$PLUGIN_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/meta.json"
 
-(
-    cd "$PLUGIN_DIR"
-    zip -X -q -r "$ZIP_PATH" .
-)
+python3 "$SCRIPT_DIR/create-deterministic-plugin-zip.py" "$PLUGIN_DIR" "$ZIP_PATH"
 
 echo "Packaged directory: $PLUGIN_DIR"
 echo "Packaged archive:   $ZIP_PATH"
