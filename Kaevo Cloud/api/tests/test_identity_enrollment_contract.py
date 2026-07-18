@@ -5,8 +5,8 @@ import os
 import pathlib
 import sys
 
+import boto3
 import pytest
-from boto3.dynamodb.types import TypeDeserializer
 from botocore.exceptions import ClientError
 
 os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
@@ -16,10 +16,8 @@ os.environ.setdefault("AWS_DEFAULT_REGION", "us-west-2")
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from identity_authority import AuthorityError
+import identity_enrollment
 from identity_enrollment import enroll_owner
-
-
-DESERIALIZER = TypeDeserializer()
 
 
 class FakeTable:
@@ -46,15 +44,15 @@ class FakeTransactionClient:
             hook, self.collision_hook = self.collision_hook, None
             hook()
             raise ClientError({"Error": {"Code": "TransactionCanceledException"}}, "TransactWriteItems")
-        decoded = []
+        pending = []
         for operation in TransactItems:
             put = operation["Put"]
-            item = {key: DESERIALIZER.deserialize(value) for key, value in put["Item"].items()}
+            item = put["Item"]
             table = self.owner.tables[put["TableName"]]
             if item[table.key] in table.items:
                 raise ClientError({"Error": {"Code": "TransactionCanceledException"}}, "TransactWriteItems")
-            decoded.append((table, item))
-        for table, item in decoded:
+            pending.append((table, item))
+        for table, item in pending:
             table.items[item[table.key]] = item
 
 
@@ -144,3 +142,59 @@ def test_concurrent_enrollment_converges_on_one_authoritative_principal():
     assert len(dynamo.tables["principals"].items) == 1
     assert len(dynamo.tables["households"].items) == 1
     assert len(dynamo.tables["profiles"].items) == 1
+
+
+def test_owner_enrollment_uses_one_resource_client_serialization_layer():
+    resource = boto3.resource(
+        "dynamodb",
+        region_name="us-west-2",
+        aws_access_key_id="testing",
+        aws_secret_access_key="testing",
+    )
+    dynamo = FakeDynamo()
+    dynamo.meta.client = resource.meta.client
+    captured = {}
+
+    class WireRequestCaptured(Exception):
+        pass
+
+    def capture_wire_request(request, **_kwargs):
+        captured.update(json.loads(request.body))
+        raise WireRequestCaptured
+
+    resource.meta.client.meta.events.register(
+        "before-send.dynamodb.TransactWriteItems",
+        capture_wire_request,
+    )
+    with pytest.raises(WireRequestCaptured):
+        enroll_owner(event(), dynamodb=dynamo, now=1_000)
+
+    operations = captured["TransactItems"]
+    assert len(operations) == 5
+    principal = operations[0]["Put"]["Item"]
+    assert principal["principal_id"] == {"S": "user-1"}
+    assert set(principal["account_id"]) == {"S"}
+    assert set(principal["household_id"]) == {"S"}
+    assert principal["authz_version"] == {"N": "1"}
+    assert principal["profile_ids"]["L"][0].keys() == {"S"}
+    assert principal["revoked"] == {"BOOL": False}
+
+    for operation in operations:
+        for value in operation["Put"]["Item"].values():
+            assert not (set(value) == {"M"} and set(value["M"]) == {"S"})
+
+
+def test_enrollment_failure_log_does_not_expose_identity_or_token(caplog):
+    canary_subject = "synthetic-canary-subject-never-log"
+    canary_token = "synthetic-canary-token-never-log"
+    request = event(canary_subject, client_id="unauthorized-client")
+    request["headers"] = {"authorization": f"Bearer {canary_token}"}
+
+    response = identity_enrollment.lambda_handler(request, None)
+
+    assert response["statusCode"] == 401
+    assert json.loads(response["body"]) == {"state": "not_authorized"}
+    combined = "\n".join(record.getMessage() for record in caplog.records)
+    assert canary_subject not in combined
+    assert canary_token not in combined
+    assert "Bearer" not in combined
