@@ -18,9 +18,6 @@ rm -rf "$PLUGIN_DIR" "$ZIP_PATH"
 mkdir -p "$PLUGIN_DIR"
 
 cp "$BUILD_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/"
-if [[ -f "$BUILD_DIR/Kaevo.Plugin.KaevoForJellyfin.pdb" ]]; then
-    cp "$BUILD_DIR/Kaevo.Plugin.KaevoForJellyfin.pdb" "$PLUGIN_DIR/"
-fi
 
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
@@ -37,9 +34,12 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
 }
 EOF
 
+NORMALIZED_TIMESTAMP="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$TIMESTAMP" '+%Y%m%d%H%M.%S')"
+touch -t "$NORMALIZED_TIMESTAMP" "$PLUGIN_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/meta.json"
+
 (
     cd "$PLUGIN_DIR"
-    zip -q -r "$ZIP_PATH" .
+    zip -X -q -r "$ZIP_PATH" .
 )
 
 echo "Packaged directory: $PLUGIN_DIR"
