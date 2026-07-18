@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/Users/jeffersonsumagang/Developer/StageDoorNative/Kaevo Cloud"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+source "$SCRIPT_DIR/lib/kaevo-workspace.sh"
+kaevo_init_cloud_root "$SCRIPT_DIR" || { status=$?; [[ $status -eq 10 ]] && exit 0; exit "$status"; }
 ENV_FILE="$ROOT/config/providers.env.local"
-OUT_DIR="$ROOT/docs/provider-tests"
+OUT_DIR="$KAEVO_PROVIDER_TEST_OUTPUT_ROOT"
 
-mkdir -p "$OUT_DIR"
+mkdir -p -m 700 "$OUT_DIR"
 
 set -a
 source "$ENV_FILE"
@@ -18,8 +20,8 @@ import os
 import urllib.parse
 import urllib.request
 
-root = Path("/Users/jeffersonsumagang/Developer/StageDoorNative/Kaevo Cloud")
-out_dir = root / "docs/provider-tests"
+root = Path(os.environ["KAEVO_CLOUD_ROOT"])
+out_dir = Path(os.environ["KAEVO_PROVIDER_TEST_OUTPUT_ROOT"])
 
 base = os.environ["KAEVO_JELLYFIN_BASE_URL"].rstrip("/")
 user_id = os.environ["KAEVO_JELLYFIN_USER_ID"]

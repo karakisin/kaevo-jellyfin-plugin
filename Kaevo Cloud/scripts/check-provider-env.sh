@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/Users/jeffersonsumagang/Developer/StageDoorNative/Kaevo Cloud"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+source "$SCRIPT_DIR/lib/kaevo-workspace.sh"
+kaevo_init_cloud_root "$SCRIPT_DIR" || { status=$?; [[ $status -eq 10 ]] && exit 0; exit "$status"; }
 ENV_FILE="$ROOT/config/providers.env.local"
 
 if [ ! -f "$ENV_FILE" ]; then

@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/Users/jeffersonsumagang/Developer/StageDoorNative/Kaevo Cloud"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+source "$SCRIPT_DIR/lib/kaevo-workspace.sh"
+kaevo_init_cloud_root "$SCRIPT_DIR" || { status=$?; [[ $status -eq 10 ]] && exit 0; exit "$status"; }
 ENV_FILE="$ROOT/config/providers.env.local"
-USERS_JSON="$ROOT/docs/provider-tests/jellyfin-users.json"
-USERS_SUMMARY="$ROOT/docs/provider-tests/jellyfin-users-summary.txt"
+USERS_JSON="$KAEVO_PROVIDER_TEST_OUTPUT_ROOT/jellyfin-users.json"
+USERS_SUMMARY="$KAEVO_PROVIDER_TEST_OUTPUT_ROOT/jellyfin-users-summary.txt"
+mkdir -p -m 700 "$KAEVO_PROVIDER_TEST_OUTPUT_ROOT"
 
 source "$ENV_FILE"
 
@@ -23,10 +26,11 @@ import json
 import os
 import re
 
-root = Path("/Users/jeffersonsumagang/Developer/StageDoorNative/Kaevo Cloud")
+root = Path(os.environ["KAEVO_CLOUD_ROOT"])
 env_path = root / "config/providers.env.local"
-users_json = root / "docs/provider-tests/jellyfin-users.json"
-users_summary = root / "docs/provider-tests/jellyfin-users-summary.txt"
+out_dir = Path(os.environ["KAEVO_PROVIDER_TEST_OUTPUT_ROOT"])
+users_json = out_dir / "jellyfin-users.json"
+users_summary = out_dir / "jellyfin-users-summary.txt"
 
 target_name = os.environ.get("KAEVO_JELLYFIN_USERNAME", "Jefferson")
 
