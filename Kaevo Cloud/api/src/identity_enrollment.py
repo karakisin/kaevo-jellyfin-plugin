@@ -18,6 +18,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from identity_authority import AuthorityError, derive_authoritative_claims, validate_access_token_claims
+from security_audit import AuditReferenceError, prepare_audit_item
 
 
 LOGGER = logging.getLogger(__name__)
@@ -36,6 +37,10 @@ def _claims(event: Mapping[str, Any]) -> Mapping[str, Any]:
     authorizer = (((event.get("requestContext") or {}).get("authorizer") or {}).get("jwt") or {})
     claims = authorizer.get("claims")
     return claims if isinstance(claims, Mapping) else {}
+
+
+def _request_id(event: Mapping[str, Any]) -> str:
+    return str((event.get("requestContext") or {}).get("requestId") or "")[:128]
 
 
 def _name(environment_name: str) -> str:
@@ -125,14 +130,20 @@ def enroll_owner(event: Mapping[str, Any], *, dynamodb: Any, now: int | None = N
         "state": "active",
         "created_at": created_at,
     }
-    audit = {
-        "household_id": household_id,
-        "event_id": f"{current:010d}#{_identifier('event')}",
-        "event_type": "identity_owner_enrolled",
-        "subject_hash": __import__("hashlib").sha256(subject.encode("utf-8")).hexdigest(),
-        "created_at": created_at,
-        "expires_at": current + (400 * 24 * 60 * 60),
-    }
+    try:
+        audit = prepare_audit_item(
+            scope_id=household_id,
+            event_type="identity_owner_enrolled",
+            actor_subject=subject,
+            actor_type="cognito_subject",
+            target_id=profile_id,
+            target_type="profile",
+            result="success",
+            request_id=_request_id(event),
+            now=current,
+        )
+    except AuditReferenceError as error:
+        raise AuthorityError("audit_unavailable") from error
     entries = [
         (_name("PRINCIPALS_TABLE"), "principal_id", principal),
         (_name("IDENTITY_MEMBERSHIPS_TABLE"), "principal_id", membership),

@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -31,10 +32,17 @@ from security_identity import (
     validate_public_jwk,
     verify_dpop,
 )
+from security_audit import (
+    AuditReferenceError,
+    fallback_audit_item,
+    prepare_audit_item,
+    write_audit_item,
+)
 
 
 SERVICE_NAME = "kaevo-cloud"
 VERSION = "0.0.29"
+LOGGER = logging.getLogger(__name__)
 
 EVENTS_TABLE = os.environ.get("PROFILE_EVENTS_TABLE")
 PROFILE_SETTINGS_TABLE = os.environ.get("PROFILE_SETTINGS_TABLE")
@@ -398,19 +406,51 @@ def identity_error_response(error):
     return response(error.status_code, {"state": error.reason})
 
 
-def audit_security_event(household_id, event_type, subject, details=None):
-    if security_audit_table is None or not household_id:
-        return
-    now = epoch_now()
-    security_audit_table.put_item(Item={
-        "household_id": household_id,
-        "event_id": f"{now:010d}#{uuid.uuid4()}",
-        "event_type": event_type,
-        "subject": subject,
-        "details_json": json.dumps(details or {}, separators=(",", ":"), sort_keys=True),
-        "created_at": utc_now_iso(),
-        "expires_at": now + (400 * 24 * 60 * 60),
-    })
+def request_correlation_id(event):
+    return str((event.get("requestContext") or {}).get("requestId") or "")[:128]
+
+
+def prepare_security_audit(
+    event, household_id, event_type, subject, *, target_id="", target_type="",
+    actor_type="cognito_subject", result="success", reason_code="", containment=False,
+):
+    try:
+        return prepare_audit_item(
+            scope_id=household_id,
+            event_type=event_type,
+            actor_subject=subject,
+            actor_type=actor_type,
+            target_id=target_id,
+            target_type=target_type,
+            result=result,
+            reason_code=reason_code,
+            request_id=request_correlation_id(event),
+            now=epoch_now(),
+        )
+    except AuditReferenceError:
+        if not containment:
+            raise
+        return fallback_audit_item(
+            event_type=event_type,
+            result=result,
+            reason_code=reason_code or "audit_key_unavailable",
+            now=epoch_now(),
+        )
+
+
+def commit_security_audit(item, *, containment=False):
+    try:
+        write_audit_item(security_audit_table, item)
+    except Exception:
+        if not containment:
+            raise
+        # Containment must proceed even if DynamoDB is unavailable. This
+        # deliberately non-identifying log is the fallback audit trail.
+        LOGGER.error("security_audit_write_failed event=%s", item.get("event_type", "security_event"))
+
+
+def audit_unavailable_response():
+    return response(503, {"state": "temporarily_unavailable"})
 
 
 def require_profile_auth(event, profile_id):
@@ -1502,7 +1542,20 @@ def register_installation_v2(event):
             replay_guard=record_dpop_jti,
         )
     except IdentityError as error:
+        denial = prepare_security_audit(
+            event, identity.household_id, "dpop_proof_denied", identity.subject,
+            target_id=installation_id, target_type="installation",
+            result="denied", reason_code=error.reason, containment=True,
+        )
+        commit_security_audit(denial, containment=True)
         return identity_error_response(error)
+    try:
+        audit = prepare_security_audit(
+            event, identity.household_id, "installation_registered", identity.subject,
+            target_id=installation_id, target_type="installation",
+        )
+    except AuditReferenceError:
+        return audit_unavailable_response()
     now = epoch_now()
     item = {
         "installation_id": installation_id,
@@ -1531,7 +1584,7 @@ def register_installation_v2(event):
         if not same_binding or existing.get("state") != "active":
             return response(409, {"state": "installation_binding_conflict"})
         item = existing
-    audit_security_event(identity.household_id, "installation_registered", identity.subject, {"installation_id": installation_id})
+    commit_security_audit(audit)
     return response(201, {
         "state": "installation_registered",
         "installation_id": installation_id,
@@ -1565,13 +1618,24 @@ def issue_bound_session_v2(event):
             replay_guard=record_dpop_jti,
         )
     except IdentityError as error:
+        denial = prepare_security_audit(
+            event, identity.household_id, "dpop_proof_denied", identity.subject,
+            target_id=installation_id, target_type="installation",
+            result="denied", reason_code=error.reason, containment=True,
+        )
+        commit_security_audit(denial, containment=True)
         return identity_error_response(error)
+    try:
+        audit = prepare_security_audit(
+            event, identity.household_id, "session_issued", identity.subject,
+            target_id=installation_id, target_type="installation",
+        )
+    except AuditReferenceError:
+        return audit_unavailable_response()
     access, refresh, access_token, refresh_token = new_session_material(identity, installation)
     app_sessions_table.put_item(Item=access)
     app_sessions_table.put_item(Item=refresh)
-    audit_security_event(identity.household_id, "session_issued", identity.subject, {
-        "family_id": access["family_id"], "installation_id": installation_id
-    })
+    commit_security_audit(audit)
     return response(201, {
         "state": "session_issued",
         # OAuth token_type protocol label, not a credential.
@@ -1614,10 +1678,14 @@ def refresh_bound_session_v2(event):
     if not record:
         return response(401, {"state": "invalid_refresh"})
     if record.get("state") != "active":
+        audit = prepare_security_audit(
+            event, str(record.get("household_id") or ""), "refresh_reuse_detected",
+            str(record.get("principal_id") or ""),
+            target_id=str(record.get("installation_id") or ""), target_type="installation",
+            result="denied", reason_code="refresh_token_reuse", containment=True,
+        )
         revoke_session_family(str(record.get("family_id") or ""), "refresh_token_reuse")
-        audit_security_event(str(record.get("household_id") or ""), "refresh_reuse_detected", str(record.get("principal_id") or ""), {
-            "family_id": str(record.get("family_id") or ""), "installation_id": str(record.get("installation_id") or "")
-        })
+        commit_security_audit(audit, containment=True)
         return response(401, {"state": "session_family_revoked"})
     installation_id = str(record.get("installation_id") or "")
     installation = installations_table.get_item(Key={"installation_id": installation_id}, ConsistentRead=True).get("Item")
@@ -1640,10 +1708,24 @@ def refresh_bound_session_v2(event):
             ExpressionAttributeValues={":active": "active"},
         )
     except IdentityError as error:
+        audit = prepare_security_audit(
+            event, str(record.get("household_id") or ""), "dpop_proof_denied",
+            str(record.get("principal_id") or ""), target_id=installation_id,
+            target_type="installation", result="denied", reason_code=error.reason,
+            containment=True,
+        )
+        commit_security_audit(audit, containment=True)
         return identity_error_response(error)
     except ClientError as error:
         if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            audit = prepare_security_audit(
+                event, str(record.get("household_id") or ""), "refresh_reuse_detected",
+                str(record.get("principal_id") or ""), target_id=installation_id,
+                target_type="installation", result="denied",
+                reason_code="refresh_token_reuse", containment=True,
+            )
             revoke_session_family(str(record.get("family_id") or ""), "refresh_token_reuse")
+            commit_security_audit(audit, containment=True)
             return response(401, {"state": "session_family_revoked"})
         raise
     app_sessions_table.put_item(Item=access)
@@ -1668,6 +1750,13 @@ def revoke_installation_v2(event, path):
     installation = installations_table.get_item(Key={"installation_id": installation_id}, ConsistentRead=True).get("Item") if installations_table else None
     if not installation or not hmac.compare_digest(str(installation.get("household_id") or ""), identity.household_id):
         return response(404, {"state": "installation_not_found"})
+    try:
+        audit = prepare_security_audit(
+            event, identity.household_id, "installation_revoked", identity.subject,
+            target_id=installation_id, target_type="installation",
+        )
+    except AuditReferenceError:
+        return audit_unavailable_response()
     installation["state"] = "revoked"
     installation["revoked"] = True
     installation["revoked_at"] = utc_now_iso()
@@ -1678,7 +1767,7 @@ def revoke_installation_v2(event, path):
     ).get("Items", []) if app_sessions_table else []
     for family_id in {str(item.get("family_id") or "") for item in records}:
         revoke_session_family(family_id, "installation_revoked")
-    audit_security_event(identity.household_id, "installation_revoked", identity.subject, {"installation_id": installation_id})
+    commit_security_audit(audit)
     return response(200, {"state": "installation_revoked", "installation_id": installation_id})
 
 
@@ -1849,6 +1938,29 @@ def exchange_connector_pairing_v2(event):
         )
     except IdentityError as error:
         return identity_error_response(error)
+    candidate = home_connectors_table.get_item(
+        Key={"connector_id": connector_id}, ConsistentRead=True
+    ).get("Item")
+    pairing_valid = bool(candidate) and all((
+        candidate.get("auth_state") == "pairing",
+        hmac.compare_digest(str(candidate.get("pairing_code_hash") or ""), secret_hash(pairing_code)),
+        int(candidate.get("pairing_expires_at") or 0) >= epoch_now(),
+        not candidate.get("key_thumbprint"),
+    ))
+    if not pairing_valid:
+        return response(401, {"state": "pairing_invalid"})
+    try:
+        audit = prepare_security_audit(
+            event,
+            str(candidate.get("household_id") or candidate.get("profile_id") or ""),
+            "connector_paired",
+            str(candidate.get("profile_id") or ""),
+            actor_type="profile",
+            target_id=connector_id,
+            target_type="connector",
+        )
+    except AuditReferenceError:
+        return audit_unavailable_response()
     playback_grant_key = secrets.token_urlsafe(32)
     now = utc_now_iso()
     try:
@@ -1881,9 +1993,7 @@ def exchange_connector_pairing_v2(event):
         if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
             return response(401, {"state": "pairing_invalid"})
         raise
-    audit_security_event(str(item.get("household_id") or item.get("profile_id") or ""), "connector_paired", str(item.get("profile_id") or ""), {
-        "connector_id": connector_id, "credential_version": 1
-    })
+    commit_security_audit(audit)
     return response(200, {
         "state": "paired",
         "connector_id": connector_id,

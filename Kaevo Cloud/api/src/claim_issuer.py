@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import time
@@ -28,18 +27,14 @@ KAEVO_CLAIMS = [
 ]
 
 
-def _safe_subject(subject: str) -> str:
-    return hashlib.sha256(subject.encode("utf-8")).hexdigest()[:12]
-
-
 def _deny(reason: str, event: Mapping[str, Any], started: float) -> None:
     request_id = str(event.get("requestId") or "")[:64]
-    raw_subject = str(((event.get("request") or {}).get("userAttributes") or {}).get("sub") or "")
+    subject_present = bool(((event.get("request") or {}).get("userAttributes") or {}).get("sub"))
     LOGGER.warning(
-        "identity_claim_denied reason=%s request=%s subject_hash=%s duration_ms=%d",
+        "identity_claim_denied reason=%s request=%s subject_state=%s duration_ms=%d",
         reason,
         request_id,
-        _safe_subject(raw_subject) if raw_subject else "missing",
+        "present" if subject_present else "missing",
         int((time.monotonic() - started) * 1000),
     )
     raise RuntimeError("Not authorized")
