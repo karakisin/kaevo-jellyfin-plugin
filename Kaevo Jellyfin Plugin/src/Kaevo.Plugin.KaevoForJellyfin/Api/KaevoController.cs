@@ -182,25 +182,7 @@ public sealed class KaevoController : ControllerBase
 
     private static bool ValidAdminAction(string value) => string.Equals(value, "lifecycle", StringComparison.Ordinal);
     private static bool ValidOwnerToken(string value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 8192 && !value.Any(char.IsWhiteSpace);
-    private static bool TryCloudUri(string value, out Uri uri)
-    {
-        if (Uri.TryCreate(value?.Trim().TrimEnd('/'), UriKind.Absolute, out var parsed)
-            && parsed.Scheme == Uri.UriSchemeHttps && string.IsNullOrEmpty(parsed.UserInfo)
-            && string.IsNullOrEmpty(parsed.Query) && string.IsNullOrEmpty(parsed.Fragment))
-        {
-            if (!string.Equals(parsed.Host, "aneohx5ff6.execute-api.us-west-2.amazonaws.com", StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(parsed.Host, "kaevo.app", StringComparison.OrdinalIgnoreCase)
-                && !parsed.Host.EndsWith(".kaevo.app", StringComparison.OrdinalIgnoreCase))
-            {
-                uri = null!;
-                return false;
-            }
-            uri = parsed;
-            return true;
-        }
-        uri = null!;
-        return false;
-    }
+    private static bool TryCloudUri(string value, out Uri uri) => KaevoCloudEndpointPolicy.TryNormalize(value, out uri);
 
     [Authorize(Policy = "RequiresElevation")]
     [HttpGet("providers/status")]

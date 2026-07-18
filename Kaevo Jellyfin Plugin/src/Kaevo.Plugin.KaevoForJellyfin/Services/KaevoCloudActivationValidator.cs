@@ -18,13 +18,7 @@ public static partial class KaevoCloudActivationValidator
         ArgumentNullException.ThrowIfNull(request);
 
         var cloudBaseUrl = request.CloudBaseUrl?.Trim().TrimEnd('/') ?? string.Empty;
-        if (!Uri.TryCreate(cloudBaseUrl, UriKind.Absolute, out var cloudUri)
-            || !string.Equals(cloudUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-            || !string.IsNullOrEmpty(cloudUri.UserInfo)
-            || !string.IsNullOrEmpty(cloudUri.Query)
-            || !string.IsNullOrEmpty(cloudUri.Fragment)
-            || (!cloudUri.IsDefaultPort && cloudUri.Port != 443)
-            || !IsApprovedCloudHost(cloudUri.Host))
+        if (!KaevoCloudEndpointPolicy.TryNormalize(cloudBaseUrl, out _))
         {
             throw new ArgumentException("cloudServiceUnavailable");
         }
@@ -47,11 +41,6 @@ public static partial class KaevoCloudActivationValidator
             jellyfinUserId,
             jellyfinAccessToken);
     }
-
-    private static bool IsApprovedCloudHost(string host)
-        => string.Equals(host, "aneohx5ff6.execute-api.us-west-2.amazonaws.com", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(host, "kaevo.app", StringComparison.OrdinalIgnoreCase)
-            || host.EndsWith(".kaevo.app", StringComparison.OrdinalIgnoreCase);
 
     private static string RequireMatch(string? value, Regex regex, string error)
     {
