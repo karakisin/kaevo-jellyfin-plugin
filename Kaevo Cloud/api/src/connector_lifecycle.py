@@ -18,8 +18,13 @@ from security_audit import prepare_audit_item, principal_ref
 INTENT_TTL_SECONDS = 10 * 60
 SERVER_ID = re.compile(r"^srv_[A-Za-z0-9_-]{24,96}$")
 NONCE = re.compile(r"^[A-Za-z0-9_-]{24,128}$")
-OPERATIONS = frozenset({"pair", "rotate", "recover"})
-PENDING_STATE = {"pair": "pending_pairing", "rotate": "rotation_pending", "recover": "recovery_pending"}
+OPERATIONS = frozenset({"pair", "rotate", "recover", "unpair"})
+PENDING_STATE = {
+    "pair": "pending_pairing",
+    "rotate": "rotation_pending",
+    "recover": "recovery_pending",
+    "unpair": "unpair_pending",
+}
 
 
 class LifecycleError(RuntimeError):
@@ -247,6 +252,116 @@ def create_update_intent(
     return intent
 
 
+def create_unpair_intent(
+    *, client: Any, connectors: Any, intents: Any, audits: Any, identity: Any,
+    environment: str, connector: Mapping[str, Any], local_nonce: str,
+    request_id: str, now: int | None = None,
+) -> dict[str, Any]:
+    """Prepare an explicit destructive unpair without releasing the binding yet."""
+    current = int(time.time()) if now is None else int(now)
+    local_nonce = require_nonce(local_nonce)
+    if connector.get("state") not in {"active", "revoked"}:
+        raise LifecycleError("connector_unavailable", 404)
+    if any(not hmac.compare_digest(str(connector.get(key) or ""), str(expected)) for key, expected in (
+        ("environment", environment), ("account_id", identity.account_id),
+        ("household_id", identity.household_id), ("profile_id", identity.profile_id),
+    )):
+        raise LifecycleError("connector_unavailable", 404)
+    intent_id = str(uuid.uuid4())
+    expires_at = current + INTENT_TTL_SECONDS
+    prior_state = str(connector["state"])
+    updated = dict(connector)
+    updated.update({
+        "state": "unpair_pending", "auth_state": "unpair_pending",
+        "pending_intent_id": intent_id, "pending_intent_expires_at": expires_at,
+        "updated_at": _now_iso(current),
+    })
+    intent = {
+        "token_hash": intent_key(intent_id), "record_type": "connector_lifecycle_intent",
+        "intent_id": intent_id, "operation": "unpair", "state": "pending",
+        "environment": environment, "account_id": identity.account_id,
+        "household_id": identity.household_id, "owner_principal_ref": principal_ref(identity.subject),
+        "server_id": connector["server_id"], "connector_id": connector["connector_id"],
+        "current_version": int(connector.get("credential_version") or 0),
+        "target_version": int(connector.get("credential_version") or 0),
+        "current_thumbprint": str(connector.get("key_thumbprint") or ""),
+        "proposed_thumbprint": "", "local_nonce_hash": _hash(local_nonce),
+        "prior_state": prior_state, "prior_auth_state": str(connector.get("auth_state") or prior_state),
+        "prior_revoked": bool(connector.get("revoked")),
+        "issued_at": current, "expires_at": expires_at, "created_at": _now_iso(current),
+    }
+    audit = prepare_audit_item(
+        scope_id=identity.household_id, event_type="connector_unpair_intent_created",
+        actor_subject=identity.subject, target_id=str(connector["connector_id"]),
+        target_type="connector", request_id=request_id, now=current,
+    )
+    _transact(client, [
+        {"Put": {"TableName": connectors.name, "Item": updated,
+                 "ConditionExpression": "#s = :prior AND attribute_not_exists(pending_intent_id)",
+                 "ExpressionAttributeNames": {"#s": "state"},
+                 "ExpressionAttributeValues": {":prior": prior_state}}},
+        {"Put": {"TableName": intents.name, "Item": intent,
+                 "ConditionExpression": "attribute_not_exists(token_hash)"}},
+        _audit_put(audits, audit),
+    ])
+    return intent
+
+
+def activate_unpair_intent(
+    *, client: Any, connectors: Any, intents: Any, audits: Any, identity: Any,
+    environment: str, intent: Mapping[str, Any], connector: Mapping[str, Any],
+    local_nonce: str, request_id: str, now: int | None = None,
+) -> dict[str, Any]:
+    """Permanently tombstone the connector and atomically release its server binding."""
+    current = int(time.time()) if now is None else int(now)
+    if (intent.get("operation") != "unpair" or intent.get("state") != "pending"
+            or int(intent.get("expires_at") or 0) < current):
+        raise LifecycleError("lifecycle_intent_invalid", 401)
+    if not hmac.compare_digest(str(intent.get("local_nonce_hash") or ""), _hash(require_nonce(local_nonce))):
+        raise LifecycleError("lifecycle_intent_invalid", 401)
+    if any(not hmac.compare_digest(str(intent.get(key) or ""), str(expected)) for key, expected in (
+        ("environment", environment), ("account_id", identity.account_id),
+        ("household_id", identity.household_id), ("connector_id", connector.get("connector_id")),
+        ("server_id", connector.get("server_id")),
+    )):
+        raise LifecycleError("lifecycle_intent_invalid", 401)
+    if connector.get("state") != "unpair_pending" or connector.get("pending_intent_id") != intent.get("intent_id"):
+        raise LifecycleError("lifecycle_conflict")
+    binding_id = binding_key(str(connector["server_id"]))
+    tombstone = dict(connector)
+    for key in ("pending_intent_id", "pending_intent_expires_at", "public_jwk_json",
+                "key_thumbprint", "recovery_public_jwk_json", "recovery_key_thumbprint",
+                "playback_grant_key", "connector_token_hash"):
+        tombstone.pop(key, None)
+    tombstone.update({
+        "state": "unpaired", "auth_state": "unpaired", "revoked": True,
+        "revocation_version": int(connector.get("revocation_version") or 0) + 1,
+        "unpaired_at": _now_iso(current), "updated_at": _now_iso(current),
+    })
+    consumed = dict(intent)
+    consumed.update({"state": "consumed", "consumed_at": _now_iso(current), "expires_at": current + 3600})
+    audit = prepare_audit_item(
+        scope_id=identity.household_id, event_type="connector_unpaired",
+        actor_subject=identity.subject, target_id=str(connector["connector_id"]),
+        target_type="connector", request_id=request_id, now=current,
+    )
+    _transact(client, [
+        {"Put": {"TableName": connectors.name, "Item": tombstone,
+                 "ConditionExpression": "#s = :pending AND pending_intent_id = :intent",
+                 "ExpressionAttributeNames": {"#s": "state"},
+                 "ExpressionAttributeValues": {":pending": "unpair_pending", ":intent": intent["intent_id"]}}},
+        {"Delete": {"TableName": connectors.name, "Key": {"connector_id": binding_id},
+                    "ConditionExpression": "active_connector_id = :connector",
+                    "ExpressionAttributeValues": {":connector": connector["connector_id"]}}},
+        {"Put": {"TableName": intents.name, "Item": consumed,
+                 "ConditionExpression": "#s = :pending",
+                 "ExpressionAttributeNames": {"#s": "state"},
+                 "ExpressionAttributeValues": {":pending": "pending"}}},
+        _audit_put(audits, audit),
+    ])
+    return tombstone
+
+
 def activate_intent(
     *, client: Any, connectors: Any, intents: Any, audits: Any, environment: str,
     intent: Mapping[str, Any], connector: Mapping[str, Any], local_nonce: str,
@@ -351,7 +466,14 @@ def cancel_intent(
         restored = dict(connector)
         for key in ("pending_intent_id", "pending_intent_expires_at", "proposed_public_jwk_json", "proposed_key_thumbprint"):
             restored.pop(key, None)
-        restored.update({"state": "active", "auth_state": "active", "updated_at": _now_iso(current)})
+        if operation == "unpair":
+            restored.update({
+                "state": str(intent.get("prior_state") or "revoked"),
+                "auth_state": str(intent.get("prior_auth_state") or intent.get("prior_state") or "revoked"),
+                "revoked": bool(intent.get("prior_revoked")), "updated_at": _now_iso(current),
+            })
+        else:
+            restored.update({"state": "active", "auth_state": "active", "updated_at": _now_iso(current)})
         writes.append({"Put": {"TableName": connectors.name, "Item": restored,
                                "ConditionExpression": "#s = :pending AND pending_intent_id = :intent",
                                "ExpressionAttributeNames": {"#s": "state"},

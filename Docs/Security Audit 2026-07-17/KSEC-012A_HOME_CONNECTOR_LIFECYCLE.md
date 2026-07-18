@@ -19,6 +19,7 @@ active -> rotation_pending -> active(version + 1)
 active -> recovery_pending -> active(version + 1)
 active|rotation_pending|recovery_pending -> revoked
 pending intent -> canceled (prior accepted key remains authoritative)
+active or revoked -> unpair_pending -> unpaired tombstone (binding released atomically)
 ```
 
 The existing Home connector table stores both connector records and unique
@@ -64,6 +65,10 @@ Pairing intent creation, pairing activation, rotation intent/activation,
 recovery intent/activation, cancellation, and revocation commit connector,
 binding, intent, and KSEC-010B privacy-safe audit records in one DynamoDB
 transaction. Activation cannot succeed without durable audit evidence.
+Destructive unpair uses a separate recent-owner intent and atomically tombstones
+the connector, consumes the one-time intent, releases only the exact server binding,
+and writes privacy-safe audit evidence. A new household enrollment therefore cannot
+reuse recovery and can begin only after this explicit destructive transition.
 Revocation uses a non-correlatable fallback audit record when the audit key is
 unavailable so containment remains available without retaining raw identity.
 

@@ -222,3 +222,61 @@ def test_connector_auth_requires_current_version_and_server_binding(monkeypatch)
     assert handler.require_connector_auth(event, "connector-1")
     event["headers"]["x-kaevo-credential-version"] = "2"
     assert not handler.require_connector_auth(event, "connector-1")
+
+
+def test_destructive_unpair_is_owner_bound_and_releases_binding_atomically(identity):
+    server_id = "srv_" + "S" * 32
+    connector = {
+        "connector_id": "connector-1", "server_id": server_id, "environment": "security-stage",
+        "account_id": "acct_1", "household_id": "hh_1", "profile_id": "profile_1",
+        "state": "active", "auth_state": "active", "credential_version": 5,
+        "max_issued_credential_version": 5, "key_thumbprint": "current",
+        "revocation_version": 2, "revoked": False,
+    }
+    start_client = Client()
+    intent = lifecycle.create_unpair_intent(
+        client=start_client, connectors=Table("connectors"), intents=Table("intents"), audits=Table("audits"),
+        identity=identity, environment="security-stage", connector=connector, local_nonce="U" * 32,
+        request_id="unpair-start", now=400,
+    )
+    pending = start_client.calls[0]["TransactItems"][0]["Put"]["Item"]
+    assert pending["state"] == "unpair_pending"
+    assert intent["prior_state"] == "active"
+    pending["pending_intent_id"] = intent["intent_id"]
+    finish_client = Client()
+    tombstone = lifecycle.activate_unpair_intent(
+        client=finish_client, connectors=Table("connectors"), intents=Table("intents"), audits=Table("audits"),
+        identity=identity, environment="security-stage", intent=intent, connector=pending,
+        local_nonce="U" * 32, request_id="unpair-finish", now=401,
+    )
+    writes = finish_client.calls[0]["TransactItems"]
+    assert tombstone["state"] == "unpaired" and tombstone["revoked"] is True
+    assert tombstone["revocation_version"] == 3
+    assert "key_thumbprint" not in tombstone
+    assert writes[1]["Delete"]["Key"] == {"connector_id": lifecycle.binding_key(server_id)}
+    assert writes[2]["Put"]["Item"]["state"] == "consumed"
+    assert writes[3]["Put"]["Item"]["actor_ref"].startswith("apr1_")
+
+
+def test_canceled_unpair_restores_exact_prior_revoked_state(identity):
+    server_id = "srv_" + "S" * 32
+    connector = {
+        "connector_id": "connector-1", "server_id": server_id, "account_id": "acct_1",
+        "household_id": "hh_1", "state": "unpair_pending", "auth_state": "unpair_pending",
+        "revoked": True, "credential_version": 5, "pending_intent_id": "intent-u",
+    }
+    intent = {
+        "token_hash": lifecycle.intent_key("intent-u"), "intent_id": "intent-u",
+        "operation": "unpair", "state": "pending", "account_id": "acct_1", "household_id": "hh_1",
+        "connector_id": "connector-1", "server_id": server_id, "prior_state": "revoked",
+        "prior_auth_state": "revoked", "prior_revoked": True,
+    }
+    client = Client()
+    lifecycle.cancel_intent(
+        client=client, connectors=Table("c"), intents=Table("i"), audits=Table("a"),
+        identity=identity, intent=intent, connector=connector, request_id="cancel-u", now=500,
+    )
+    restored = client.calls[0]["TransactItems"][0]["Put"]["Item"]
+    assert restored["state"] == "revoked"
+    assert restored["auth_state"] == "revoked"
+    assert restored["revoked"] is True

@@ -41,9 +41,11 @@ from security_audit import (
 from connector_lifecycle import (
     LifecycleError,
     activate_intent,
+    activate_unpair_intent,
     binding_key,
     cancel_intent,
     create_pairing_intent,
+    create_unpair_intent,
     create_update_intent,
     opaque_intent,
     random_pairing_code,
@@ -2117,6 +2119,65 @@ def activate_connector_update_intent(event, path):
     })
 
 
+def start_connector_unpair_intent(event, path):
+    try:
+        identity, _ = authoritative_identity(event, "revoke_connector")
+    except IdentityError as error:
+        return identity_error_response(error)
+    connector_id = path.split("/home-connectors/", 1)[-1].split("/", 1)[0]
+    body = parse_json_body(event) or {}
+    connector = home_connectors_table.get_item(
+        Key={"connector_id": connector_id}, ConsistentRead=True,
+    ).get("Item") if home_connectors_table else None
+    if not connector or not hmac.compare_digest(str(connector.get("server_id") or ""), str(body.get("server_id") or "")):
+        return response(404, {"state": "connector_unavailable"})
+    try:
+        intent = create_unpair_intent(
+            client=dynamodb.meta.client, connectors=home_connectors_table, intents=app_sessions_table,
+            audits=security_audit_table, identity=identity, environment=KAEVO_ENV, connector=connector,
+            local_nonce=body.get("local_nonce"), request_id=request_correlation_id(event), now=epoch_now(),
+        )
+    except LifecycleError as error:
+        return response(error.status_code, {"state": error.reason})
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    return response(201, {
+        "state": "unpair_pending", "intent_id": intent["intent_id"],
+        "connector_id": connector_id, "server_id": connector["server_id"],
+        "expires_at": intent["expires_at"],
+    })
+
+
+def activate_connector_unpair_intent(event, path):
+    try:
+        identity, _ = authoritative_identity(event, "revoke_connector")
+    except IdentityError as error:
+        return identity_error_response(error)
+    intent_id = path.split("/lifecycle/intents/", 1)[-1].split("/", 1)[0]
+    body = parse_json_body(event) or {}
+    intent = opaque_intent(app_sessions_table, intent_id) if app_sessions_table else {}
+    connector_id = str(intent.get("connector_id") or "")
+    connector = home_connectors_table.get_item(
+        Key={"connector_id": connector_id}, ConsistentRead=True,
+    ).get("Item") if home_connectors_table and connector_id else None
+    if not intent or not connector or intent.get("operation") != "unpair":
+        return response(401, {"state": "lifecycle_intent_invalid"})
+    try:
+        updated = activate_unpair_intent(
+            client=dynamodb.meta.client, connectors=home_connectors_table, intents=app_sessions_table,
+            audits=security_audit_table, identity=identity, environment=KAEVO_ENV,
+            intent=intent, connector=connector, local_nonce=body.get("local_nonce"),
+            request_id=request_correlation_id(event), now=epoch_now(),
+        )
+    except LifecycleError as error:
+        return response(error.status_code, {"state": "lifecycle_intent_invalid"})
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    return response(200, {
+        "state": "unpaired", "connector_id": connector_id, "server_id": updated["server_id"]
+    })
+
+
 def cancel_connector_lifecycle_intent(event, path):
     try:
         identity, _ = authoritative_identity(event, "pair_connector")
@@ -3869,6 +3930,12 @@ def lambda_handler(event, context):
 
     if method == "POST" and path.startswith("/v2/home-connectors/") and path.endswith("/recovery-intents"):
         return start_connector_update_intent(event, path, "recover")
+
+    if method == "POST" and path.startswith("/v2/home-connectors/") and path.endswith("/unpair-intents"):
+        return start_connector_unpair_intent(event, path)
+
+    if method == "POST" and path.startswith("/v2/home-connectors/lifecycle/intents/") and path.endswith("/unpair"):
+        return activate_connector_unpair_intent(event, path)
 
     if method == "POST" and path.startswith("/v2/home-connectors/lifecycle/intents/") and path.endswith("/activate"):
         return activate_connector_update_intent(event, path)

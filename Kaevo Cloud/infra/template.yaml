@@ -887,6 +887,24 @@ Resources:
             Auth:
               Authorizer: KaevoOwnerAuthorizer
 
+        StartHomeConnectorUnpair:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/home-connectors/{connectorId}/unpair-intents
+            Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
+
+        ActivateHomeConnectorUnpair:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/home-connectors/lifecycle/intents/{intentId}/unpair
+            Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
+
         ActivateHomeConnectorLifecycleIntent:
           Type: HttpApi
           Properties:
