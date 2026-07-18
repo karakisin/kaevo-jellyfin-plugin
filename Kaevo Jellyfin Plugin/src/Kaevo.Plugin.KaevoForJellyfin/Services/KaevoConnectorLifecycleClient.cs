@@ -24,8 +24,14 @@ public sealed class KaevoConnectorLifecycleClient
         _http = http;
     }
 
-    public async Task<KaevoLifecycleResult> PairAsync(Uri cloudBase, string ownerToken, CancellationToken cancellationToken)
+    public async Task<KaevoLifecycleResult> PairAsync(Uri cloudBase, string ownerToken, string profileId, CancellationToken cancellationToken)
     {
+        var existing = await _store.LoadOrInitializeAsync(cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(existing.PendingKeyFile))
+        {
+            var reconciled = await ReconcilePendingAsync(cloudBase, profileId, cancellationToken).ConfigureAwait(false);
+            if (reconciled.State == "active") return Result(reconciled);
+        }
         var (pending, proposed) = await _store.BeginTransitionAsync("pair", cancellationToken).ConfigureAwait(false);
         using (proposed)
         using (var recovery = _store.LoadRecovery(pending))
@@ -43,6 +49,7 @@ public sealed class KaevoConnectorLifecycleClient
                     connector_name = "Kaevo Jellyfin Plugin"
                 }, cancellationToken, ownerToken, ("DPoP", proposed.CreateProof(HttpMethod.Post, startUri)),
                     ("DPoP-Recovery", recovery.CreateProof(HttpMethod.Post, startUri))).ConfigureAwait(false);
+                pending = await _store.BindPendingConnectorAsync(start.ConnectorId, cancellationToken).ConfigureAwait(false);
                 var exchangeUri = Build(cloudBase, "/v2/home-connectors/pairing/exchange");
                 var exchange = await PostAsync<LifecycleResponse>(exchangeUri, new
                 {
@@ -63,15 +70,66 @@ public sealed class KaevoConnectorLifecycleClient
         }
     }
 
-    public Task<KaevoLifecycleResult> RotateAsync(Uri cloudBase, string ownerToken, CancellationToken cancellationToken) =>
-        UpdateKeyAsync(cloudBase, ownerToken, "rotation", cancellationToken);
+    public async Task<KaevoConnectorLifecycleState> ReconcilePendingAsync(Uri cloudBase, string profileId, CancellationToken cancellationToken)
+    {
+        var state = await _store.LoadOrInitializeAsync(cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(state.PendingKeyFile)) return state;
+        if (string.IsNullOrWhiteSpace(state.ConnectorId) || string.IsNullOrWhiteSpace(profileId))
+        {
+            if (state.CredentialVersion == 0) return await _store.AbortTransitionAsync(cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException("connectorLifecycleReconciliationRequired");
+        }
 
-    public Task<KaevoLifecycleResult> RecoverAsync(Uri cloudBase, string ownerToken, CancellationToken cancellationToken) =>
-        UpdateKeyAsync(cloudBase, ownerToken, "recovery", cancellationToken);
+        var targetVersion = state.CredentialVersion + 1;
+        using (var pending = _store.LoadPending(state))
+        {
+            var pendingAccepted = await ProbeRegistrationAsync(cloudBase, profileId, state.ConnectorId, targetVersion, pending, cancellationToken).ConfigureAwait(false);
+            if (pendingAccepted)
+            {
+                return await _store.CommitTransitionAsync(state.ConnectorId, targetVersion, cancellationToken).ConfigureAwait(false);
+            }
+        }
 
-    private async Task<KaevoLifecycleResult> UpdateKeyAsync(Uri cloudBase, string ownerToken, string operation, CancellationToken cancellationToken)
+        if (state.CredentialVersion > 0)
+        {
+            using var current = _store.LoadCurrent(state);
+            if (await ProbeRegistrationAsync(cloudBase, profileId, state.ConnectorId, state.CredentialVersion, current, cancellationToken).ConfigureAwait(false))
+            {
+                return await _store.AbortTransitionAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        throw new InvalidOperationException("connectorLifecycleReconciliationRequired");
+    }
+
+    private async Task<bool> ProbeRegistrationAsync(Uri cloudBase, string profileId, string connectorId, int version, KaevoConnectorIdentity identity, CancellationToken cancellationToken)
+    {
+        var uri = Build(cloudBase, $"/v1/home-connectors/{Uri.EscapeDataString(connectorId)}/heartbeat");
+        using var request = new HttpRequestMessage(HttpMethod.Post, uri)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(new
+            {
+                connector_id = connectorId, profile_id = profileId, provider_status = new { }
+            }, JsonOptions), Encoding.UTF8, "application/json")
+        };
+        request.Headers.TryAddWithoutValidation("DPoP", identity.CreateProof(HttpMethod.Post, uri));
+        request.Headers.TryAddWithoutValidation("X-Kaevo-Credential-Version", version.ToString());
+        using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        return response.IsSuccessStatusCode;
+    }
+
+    public Task<KaevoLifecycleResult> RotateAsync(Uri cloudBase, string ownerToken, string profileId, CancellationToken cancellationToken) =>
+        UpdateKeyAsync(cloudBase, ownerToken, profileId, "rotation", cancellationToken);
+
+    public Task<KaevoLifecycleResult> RecoverAsync(Uri cloudBase, string ownerToken, string profileId, CancellationToken cancellationToken) =>
+        UpdateKeyAsync(cloudBase, ownerToken, profileId, "recovery", cancellationToken);
+
+    private async Task<KaevoLifecycleResult> UpdateKeyAsync(Uri cloudBase, string ownerToken, string profileId, string operation, CancellationToken cancellationToken)
     {
         var before = await _store.LoadOrInitializeAsync(cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(before.PendingKeyFile))
+        {
+            return Result(await ReconcilePendingAsync(cloudBase, profileId, cancellationToken).ConfigureAwait(false));
+        }
         if (before.CredentialVersion < 1 || string.IsNullOrEmpty(before.ConnectorId)) throw new InvalidOperationException("connectorLifecycleNotPaired");
         var storeOperation = operation == "rotation" ? "rotate" : "recover";
         var (pending, proposed) = await _store.BeginTransitionAsync(storeOperation, cancellationToken).ConfigureAwait(false);

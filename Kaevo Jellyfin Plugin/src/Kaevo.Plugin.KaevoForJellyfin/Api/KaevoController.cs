@@ -118,7 +118,7 @@ public sealed class KaevoController : ControllerBase
         {
             return BadRequest(new KaevoLifecycleResponse("invalid", 0));
         }
-        var result = await _lifecycleClient.PairAsync(cloud, request.OwnerAccessToken, cancellationToken).ConfigureAwait(false);
+        var result = await _lifecycleClient.PairAsync(cloud, request.OwnerAccessToken, request.ProfileId.Trim(), cancellationToken).ConfigureAwait(false);
         var existing = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false);
         await _secretStore.WriteAsync(new KaevoConnectorSecrets(
             string.Empty, string.Empty, request.JellyfinAccessToken,
@@ -148,34 +148,36 @@ public sealed class KaevoController : ControllerBase
     [Authorize(Policy = "RequiresElevation")]
     [HttpPost("cloud/lifecycle/rotate")]
     public Task<ActionResult<KaevoLifecycleResponse>> RotateLifecycle([FromBody] KaevoLifecycleOwnerRequest request, [FromHeader(Name = "X-Kaevo-Admin-Action")] string action, CancellationToken token) =>
-        RunLifecycleOwnerAction(request, action, (uri, owner) => _lifecycleClient.RotateAsync(uri, owner, token));
+        RunLifecycleOwnerAction(request, action, (uri, owner, profile) => _lifecycleClient.RotateAsync(uri, owner, profile, token));
 
     [Authorize(Policy = "RequiresElevation")]
     [HttpPost("cloud/lifecycle/recover")]
     public Task<ActionResult<KaevoLifecycleResponse>> RecoverLifecycle([FromBody] KaevoLifecycleOwnerRequest request, [FromHeader(Name = "X-Kaevo-Admin-Action")] string action, CancellationToken token) =>
-        RunLifecycleOwnerAction(request, action, (uri, owner) => _lifecycleClient.RecoverAsync(uri, owner, token));
+        RunLifecycleOwnerAction(request, action, (uri, owner, profile) => _lifecycleClient.RecoverAsync(uri, owner, profile, token));
 
     [Authorize(Policy = "RequiresElevation")]
     [HttpPost("cloud/lifecycle/revoke")]
     public Task<ActionResult<KaevoLifecycleResponse>> RevokeLifecycle([FromBody] KaevoLifecycleOwnerRequest request, [FromHeader(Name = "X-Kaevo-Admin-Action")] string action, CancellationToken token) =>
-        RunLifecycleOwnerAction(request, action, (uri, owner) => _lifecycleClient.RevokeAsync(uri, owner, token));
+        RunLifecycleOwnerAction(request, action, (uri, owner, _) => _lifecycleClient.RevokeAsync(uri, owner, token));
 
     [Authorize(Policy = "RequiresElevation")]
     [HttpPost("cloud/lifecycle/unpair")]
     public Task<ActionResult<KaevoLifecycleResponse>> UnpairLifecycle([FromBody] KaevoLifecycleOwnerRequest request, [FromHeader(Name = "X-Kaevo-Admin-Action")] string action, CancellationToken token) =>
-        RunLifecycleOwnerAction(request, action, (uri, owner) => _lifecycleClient.UnpairAsync(uri, owner, token));
+        RunLifecycleOwnerAction(request, action, (uri, owner, _) => _lifecycleClient.UnpairAsync(uri, owner, token));
 
     private async Task<ActionResult<KaevoLifecycleResponse>> RunLifecycleOwnerAction(
         KaevoLifecycleOwnerRequest request,
         string action,
-        Func<Uri, string, Task<KaevoLifecycleResult>> operation)
+        Func<Uri, string, string, Task<KaevoLifecycleResult>> operation)
     {
         var baseUrl = KaevoPlugin.Instance?.Configuration.CloudBaseUrl ?? string.Empty;
         if (!ValidAdminAction(action) || !ValidOwnerToken(request.OwnerAccessToken) || !TryCloudUri(baseUrl, out var cloud))
         {
             return BadRequest(new KaevoLifecycleResponse("invalid", 0));
         }
-        var result = await operation(cloud, request.OwnerAccessToken).ConfigureAwait(false);
+        var profileId = KaevoPlugin.Instance?.Configuration.ProfileId ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(profileId)) return BadRequest(new KaevoLifecycleResponse("invalid", 0));
+        var result = await operation(cloud, request.OwnerAccessToken, profileId).ConfigureAwait(false);
         _cloudState.SignalConfigurationChanged();
         return Ok(new KaevoLifecycleResponse(result.State, result.CredentialVersion));
     }

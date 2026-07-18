@@ -164,6 +164,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             throw new InvalidOperationException("lifecycle_upgrade_required");
         }
         var lifecycle = await _lifecycleStore.LoadOrInitializeAsync(cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(lifecycle.PendingKeyFile))
+        {
+            lifecycle = await _lifecycleClient.ReconcilePendingAsync(
+                new Uri(configuration.CloudBaseUrl, UriKind.Absolute), configuration.ProfileId, cancellationToken).ConfigureAwait(false);
+        }
         if (lifecycle.State != "active" || lifecycle.CredentialVersion < 1 || string.IsNullOrWhiteSpace(lifecycle.ConnectorId))
         {
             throw new InvalidOperationException("lifecycle_upgrade_required");
@@ -1833,7 +1838,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private static int QueryInt(IReadOnlyDictionary<string, JsonElement>? query, string key, int fallback)
         => int.TryParse(QueryString(query, key), out var value) ? value : fallback;
 
-    private static async Task<(byte[] Data, bool Truncated)> ReadBoundedAsync(
+    internal static async Task<(byte[] Data, bool Truncated)> ReadBoundedAsync(
         HttpContent content,
         int maximum,
         CancellationToken cancellationToken)

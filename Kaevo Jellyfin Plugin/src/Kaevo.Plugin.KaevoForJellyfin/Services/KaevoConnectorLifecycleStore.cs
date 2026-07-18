@@ -14,7 +14,8 @@ public sealed record KaevoConnectorLifecycleState(
     string PendingOperation = "",
     string CurrentKeyThumbprint = "",
     string RecoveryKeyThumbprint = "",
-    string State = "unenrolled");
+    string State = "unenrolled",
+    int SchemaVersion = 1);
 
 public sealed class KaevoConnectorLifecycleStore
 {
@@ -51,7 +52,8 @@ public sealed class KaevoConnectorLifecycleStore
             {
                 var state = JsonSerializer.Deserialize<KaevoConnectorLifecycleState>(await File.ReadAllBytesAsync(_statePath, cancellationToken).ConfigureAwait(false), JsonOptions)
                     ?? throw new InvalidOperationException("connectorLifecycleStateInvalid");
-                if (!string.Equals(state.Environment, _environment, StringComparison.Ordinal)
+                if (state.SchemaVersion != 1
+                    || !string.Equals(state.Environment, _environment, StringComparison.Ordinal)
                     || !state.ServerId.StartsWith("srv_", StringComparison.Ordinal))
                 {
                     throw new InvalidOperationException("connectorLifecycleEnvironmentMismatch");
@@ -132,6 +134,27 @@ public sealed class KaevoConnectorLifecycleStore
                 SecureDelete(Path.Combine(_directory, state.CurrentKeyFile));
             }
             return committed;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<KaevoConnectorLifecycleState> BindPendingConnectorAsync(string connectorId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(connectorId)) throw new ArgumentException("connectorLifecycleConnectorInvalid", nameof(connectorId));
+        var state = await LoadOrInitializeAsync(cancellationToken).ConfigureAwait(false);
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (string.IsNullOrEmpty(state.PendingKeyFile) || state.PendingOperation != "pair")
+            {
+                throw new InvalidOperationException("connectorLifecycleTransitionMissing");
+            }
+            var bound = state with { ConnectorId = connectorId };
+            WriteState(bound);
+            return bound;
         }
         finally
         {

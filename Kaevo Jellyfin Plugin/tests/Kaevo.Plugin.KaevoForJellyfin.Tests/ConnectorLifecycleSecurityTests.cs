@@ -103,7 +103,7 @@ public sealed class ConnectorLifecycleSecurityTests : IDisposable
             "{\"connector_id\":\"connector-1\",\"intent_id\":\"intent-1\",\"pairing_code\":\"ABCD-1234-EF56\"}",
             "{\"connector_id\":\"connector-1\",\"server_id\":\"ignored\",\"credential_version\":1}");
         var client = new KaevoConnectorLifecycleClient(store, new HttpClient(handler));
-        var result = await client.PairAsync(new Uri("https://cloud.example"), "owner-token-value", default);
+        var result = await client.PairAsync(new Uri("https://cloud.example"), "owner-token-value", "profile-1", default);
         Assert.Equal(1, result.CredentialVersion);
         Assert.Equal(new[] { "/v1/home-connectors/pairing/start", "/v2/home-connectors/pairing/exchange" }, handler.Requests.Select(r => r.Path));
         Assert.DoesNotContain(handler.Requests, request => request.Path == "/v1/home-connectors/pairing/exchange");
@@ -112,6 +112,62 @@ public sealed class ConnectorLifecycleSecurityTests : IDisposable
         Assert.Contains("DPoP-Recovery", handler.Requests[0].Headers);
         Assert.Contains("DPoP", handler.Requests[1].Headers);
         Assert.DoesNotContain("connector_token", string.Join(' ', handler.Requests.Select(r => r.Body)), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RestartAfterCloudActivationPromotesOnlyTheAcceptedPendingKey()
+    {
+        var store = Store();
+        await store.LoadOrInitializeAsync();
+        var (_, proposed) = await store.BeginTransitionAsync("pair"); proposed.Dispose();
+        await store.BindPendingConnectorAsync("connector-1");
+        var before = await store.LoadOrInitializeAsync();
+        var handler = new SequenceHandler("{}");
+        var client = new KaevoConnectorLifecycleClient(Store(), new HttpClient(handler));
+
+        var reconciled = await client.ReconcilePendingAsync(new Uri("https://cloud.example"), "profile-1", default);
+
+        Assert.Equal("active", reconciled.State);
+        Assert.Equal(1, reconciled.CredentialVersion);
+        Assert.Equal("connector-1", reconciled.ConnectorId);
+        Assert.Empty(reconciled.PendingKeyFile);
+        Assert.NotEqual(before.PendingKeyFile, reconciled.CurrentKeyFile);
+        Assert.Contains("DPoP", handler.Requests.Single().Headers);
+    }
+
+    [Fact]
+    public async Task RestartBeforeCloudActivationKeepsCurrentKeyAndVersion()
+    {
+        var store = Store();
+        await store.LoadOrInitializeAsync();
+        var (_, pair) = await store.BeginTransitionAsync("pair"); pair.Dispose();
+        var active = await store.CommitTransitionAsync("connector-1", 1);
+        var currentBytes = await File.ReadAllBytesAsync(Path.Combine(store.DirectoryPath, active.CurrentKeyFile));
+        var (_, proposed) = await store.BeginTransitionAsync("rotate"); proposed.Dispose();
+        var handler = new StatusSequenceHandler(HttpStatusCode.Unauthorized, HttpStatusCode.OK);
+        var client = new KaevoConnectorLifecycleClient(Store(), new HttpClient(handler));
+
+        var reconciled = await client.ReconcilePendingAsync(new Uri("https://cloud.example"), "profile-1", default);
+
+        Assert.Equal("active", reconciled.State);
+        Assert.Equal(1, reconciled.CredentialVersion);
+        Assert.Empty(reconciled.PendingKeyFile);
+        Assert.Equal(currentBytes, await File.ReadAllBytesAsync(Path.Combine(store.DirectoryPath, reconciled.CurrentKeyFile)));
+        Assert.Equal(new[] { "2", "1" }, handler.Versions);
+    }
+
+    [Fact]
+    public async Task UnsupportedFutureLifecycleSchemaFailsClosedWithoutErasingState()
+    {
+        var store = Store();
+        var state = await store.LoadOrInitializeAsync();
+        var original = await File.ReadAllTextAsync(store.StatePath);
+        var future = original.Replace("\"schemaVersion\":1", "\"schemaVersion\":2", StringComparison.Ordinal);
+        await File.WriteAllTextAsync(store.StatePath, future);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store().LoadOrInitializeAsync());
+        Assert.Equal(future, await File.ReadAllTextAsync(store.StatePath));
+        Assert.Contains(state.ServerId, future);
     }
 
     [Fact]
@@ -124,7 +180,7 @@ public sealed class ConnectorLifecycleSecurityTests : IDisposable
         var bytes = await File.ReadAllBytesAsync(Path.Combine(store.DirectoryPath, one.CurrentKeyFile));
         var handler = new SequenceHandler("{}") { StatusCode = HttpStatusCode.Unauthorized };
         var client = new KaevoConnectorLifecycleClient(store, new HttpClient(handler));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => client.RotateAsync(new Uri("https://cloud.example"), "owner-token-value", default));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.RotateAsync(new Uri("https://cloud.example"), "owner-token-value", "profile-1", default));
         var restored = await store.LoadOrInitializeAsync();
         Assert.Equal(1, restored.CredentialVersion);
         Assert.Equal(bytes, await File.ReadAllBytesAsync(Path.Combine(store.DirectoryPath, restored.CurrentKeyFile)));
@@ -154,6 +210,18 @@ public sealed class ConnectorLifecycleSecurityTests : IDisposable
             Request = request;
             Body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
+        }
+    }
+
+    private sealed class StatusSequenceHandler(params HttpStatusCode[] statuses) : HttpMessageHandler
+    {
+        private int _index;
+        public List<string> Versions { get; } = new();
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Versions.Add(request.Headers.GetValues("X-Kaevo-Credential-Version").Single());
+            var status = statuses[Math.Min(_index++, statuses.Length - 1)];
+            return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent("{}") });
         }
     }
 
