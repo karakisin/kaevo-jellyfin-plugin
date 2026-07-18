@@ -14,6 +14,7 @@ from .playback_tunnel import PlaybackGrantVerifier, PlaybackNonceStore, Playback
 
 SAFE_RESPONSE_HEADERS = {"content-type", "content-length", "content-range", "accept-ranges", "cache-control"}
 MAX_PLAYLIST_BYTES = 1_048_576
+JELLYFIN_STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
 SendText = Callable[[str], Awaitable[None]]
 SendBytes = Callable[[bytes], Awaitable[None]]
 
@@ -56,7 +57,11 @@ class RelayRequestHandler:
                 range_header=str(message.get("range")) if message.get("range") else None,
             )
             headers = {**resolved.headers, "X-Emby-Token": self.jellyfin_api_key, "Accept": "*/*"}
-            async with httpx.AsyncClient(transport=self.transport, timeout=None, follow_redirects=False) as client:
+            async with httpx.AsyncClient(
+                transport=self.transport,
+                timeout=JELLYFIN_STREAM_TIMEOUT,
+                follow_redirects=False,
+            ) as client:
                 async with client.stream(
                     resolved.method,
                     f"{self.jellyfin_base_url}{resolved.path}",

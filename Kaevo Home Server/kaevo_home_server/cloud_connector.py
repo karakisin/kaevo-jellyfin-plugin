@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from .cloud_commands import CloudCommand, CloudCommandExecutor
+from .connector_identity import ConnectorIdentity
 
 
 class CloudControlPlaneClient:
@@ -16,13 +17,15 @@ class CloudControlPlaneClient:
         base_url: str,
         connector_id: str,
         profile_id: str,
-        connector_token: str,
+        connector_token: str = "",
+        connector_identity: ConnectorIdentity | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.connector_id = connector_id
         self.profile_id = profile_id
-        self.headers = {"Authorization": f"Bearer {connector_token}", "Accept": "application/json"}
+        self.connector_token = connector_token
+        self.connector_identity = connector_identity
         self.transport = transport
 
     @classmethod
@@ -32,19 +35,33 @@ class CloudControlPlaneClient:
         base_url: str,
         connector_id: str,
         pairing_code: str,
+        connector_identity: ConnectorIdentity | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> dict[str, Any]:
         async with httpx.AsyncClient(transport=transport, timeout=15.0, follow_redirects=False) as client:
+            path = "/v2/home-connectors/pairing/exchange" if connector_identity else "/v1/home-connectors/pairing/exchange"
+            url = f"{base_url.rstrip('/')}{path}"
             response = await client.post(
-                f"{base_url.rstrip('/')}/v1/home-connectors/pairing/exchange",
-                json={"connector_id": connector_id, "pairing_code": pairing_code},
+                url,
+                headers={"DPoP": connector_identity.proof("POST", url)} if connector_identity else None,
+                json={
+                    "connector_id": connector_id,
+                    "pairing_code": pairing_code,
+                    **({"public_jwk": connector_identity.public_jwk} if connector_identity else {}),
+                },
             )
         response.raise_for_status()
         return response.json()
 
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        url = f"{self.base_url}{path}"
+        headers = {"Accept": "application/json"}
+        if self.connector_identity:
+            headers["DPoP"] = self.connector_identity.proof("POST", url)
+        elif self.connector_token:
+            headers["Authorization"] = f"Bearer {self.connector_token}"
         async with httpx.AsyncClient(transport=self.transport, timeout=15.0, follow_redirects=False) as client:
-            response = await client.post(f"{self.base_url}{path}", headers=self.headers, json=body)
+            response = await client.post(url, headers=headers, json=body)
         response.raise_for_status()
         return response.json()
 

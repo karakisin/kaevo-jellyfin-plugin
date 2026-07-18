@@ -7,6 +7,7 @@ from typing import Any
 
 from .cloud_commands import CloudCommandExecutor, CommandReceiptStore, LocalProvider
 from .cloud_connector import CloudControlPlaneClient
+from .connector_identity import ConnectorIdentity
 from .playback_tunnel import PlaybackGrantVerifier, PlaybackNonceStore
 from .relay_worker import RelayConnectorWorker, RelayRequestHandler
 
@@ -19,14 +20,17 @@ class CloudRuntime:
             return
         required = {
             "cloud_base_url": os.environ.get("KAEVO_CLOUD_BASE_URL"),
-            "connector_token": os.environ.get("KAEVO_CLOUD_CONNECTOR_TOKEN"),
             "connector_id": os.environ.get("KAEVO_CLOUD_CONNECTOR_ID"),
             "profile_id": os.environ.get("KAEVO_CLOUD_PROFILE_ID"),
             "relay_url": os.environ.get("KAEVO_PLAYBACK_RELAY_WEBSOCKET_URL"),
             "grant_key": os.environ.get("KAEVO_PLAYBACK_CONNECTOR_GRANT_KEY"),
             "jellyfin_user_id": os.environ.get("KAEVO_JELLYFIN_USER_ID"),
         }
+        connector_token = os.environ.get("KAEVO_CLOUD_CONNECTOR_TOKEN")
+        connector_key_path = os.environ.get("KAEVO_CLOUD_CONNECTOR_KEY_PATH")
         missing = [key for key, value in required.items() if not value]
+        if not connector_token and not connector_key_path:
+            missing.append("connector_identity")
         if missing:
             raise RuntimeError(f"cloudRuntimeMissingConfiguration:{','.join(missing)}")
         jellyfin = credential_store.get("jellyfin")
@@ -35,7 +39,8 @@ class CloudRuntime:
         seerr = credential_store.get("seerr")
         self.cloud = CloudControlPlaneClient(
             base_url=required["cloud_base_url"], connector_id=required["connector_id"],
-            profile_id=required["profile_id"], connector_token=required["connector_token"],
+            profile_id=required["profile_id"], connector_token=connector_token or "",
+            connector_identity=ConnectorIdentity.load_or_create(connector_key_path) if connector_key_path else None,
         )
         self.executor = CloudCommandExecutor(
             receipts=CommandReceiptStore(data_dir / "cloud_command_receipts.sqlite3"),

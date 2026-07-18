@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -24,7 +25,8 @@ from .cloud_runtime import CloudRuntime
 
 APP_VERSION = "0.1.0"
 DEFAULT_DATA_DIR = Path(os.environ.get("KAEVO_HOME_SERVER_DATA_DIR", str(Path(__file__).resolve().parents[1] / "data")))
-SECRET_KEY = os.environ.get("KAEVO_HOME_SERVER_SECRET_KEY", "local-development-key").encode("utf-8")
+SECRET_KEY_VALUE = os.environ.get("KAEVO_HOME_SERVER_SECRET_KEY", "")
+SECRET_KEY = SECRET_KEY_VALUE.encode("utf-8")
 IOS_COMMAND_TOKEN = os.environ.get("KAEVO_HOME_SERVER_IOS_TOKEN")
 
 ProviderKind = Literal["seerr", "sonarr", "radarr", "qbittorrent", "sabnzbd", "jellyfin"]
@@ -65,12 +67,40 @@ def error_category(error: Exception) -> str:
 
 
 def xor_secret(data: bytes) -> str:
-    key_stream = hashlib.sha256(SECRET_KEY).digest()
-    encrypted = bytes(byte ^ key_stream[index % len(key_stream)] for index, byte in enumerate(data))
-    return base64.urlsafe_b64encode(encrypted).decode("ascii")
+    """Encrypt provider credentials with authenticated encryption.
+
+    The historical function name is retained so existing callers do not need a
+    storage migration. New values are versioned; legacy unversioned XOR values
+    remain readable only when an explicit local secret is configured.
+    """
+    if not SECRET_KEY:
+        raise RuntimeError("homeServerSecretKeyMissing")
+    nonce = secrets.token_bytes(12)
+    encrypted = AESGCM(hashlib.sha256(SECRET_KEY).digest()).encrypt(
+        nonce,
+        data,
+        b"kaevo-home-server-provider-credentials-v2",
+    )
+    return "v2:" + base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")
 
 
 def unxor_secret(value: str) -> str:
+    if not SECRET_KEY:
+        raise RuntimeError("homeServerSecretKeyMissing")
+    if value.startswith("v2:"):
+        packed = base64.urlsafe_b64decode(value[3:].encode("ascii"))
+        if len(packed) < 29:
+            raise ValueError("providerCredentialCiphertextInvalid")
+        nonce, encrypted = packed[:12], packed[12:]
+        data = AESGCM(hashlib.sha256(SECRET_KEY).digest()).decrypt(
+            nonce,
+            encrypted,
+            b"kaevo-home-server-provider-credentials-v2",
+        )
+        return data.decode("utf-8")
+
+    # Read-only compatibility for installations created before v2. The next
+    # credential save writes authenticated ciphertext.
     encrypted = base64.urlsafe_b64decode(value.encode("ascii"))
     key_stream = hashlib.sha256(SECRET_KEY).digest()
     data = bytes(byte ^ key_stream[index % len(key_stream)] for index, byte in enumerate(encrypted))
@@ -201,7 +231,7 @@ class PermanentConfirmation(BaseModel):
 
 def require_ios_command(request: Request) -> None:
     if not IOS_COMMAND_TOKEN:
-        return
+        raise HTTPException(status_code=503, detail="homeServerAuthenticationNotConfigured")
     supplied = request.headers.get("X-Kaevo-Home-Server-Token")
     if not supplied or not hmac.compare_digest(supplied, IOS_COMMAND_TOKEN):
         raise HTTPException(status_code=401, detail="homeServerAuthenticationFailed")
@@ -769,8 +799,16 @@ operation_store = OperationStore(data_dir / "operations.sqlite3")
 cloud_runtime = CloudRuntime(data_dir=data_dir, app_version=APP_VERSION, credential_store=credential_store)
 
 
+def validate_security_configuration() -> None:
+    if len(SECRET_KEY_VALUE) < 32:
+        raise RuntimeError("KAEVO_HOME_SERVER_SECRET_KEY must contain at least 32 characters")
+    if not IOS_COMMAND_TOKEN or len(IOS_COMMAND_TOKEN) < 32:
+        raise RuntimeError("KAEVO_HOME_SERVER_IOS_TOKEN must contain at least 32 characters")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    validate_security_configuration()
     await cloud_runtime.start()
     try:
         yield
@@ -787,7 +825,8 @@ async def status() -> dict[str, Any]:
 
 
 @app.get("/api/v1/providers")
-async def list_providers() -> list[ProviderConnectionPublic]:
+async def list_providers(request: Request) -> list[ProviderConnectionPublic]:
+    require_ios_command(request)
     return credential_store.list_public()
 
 
@@ -805,7 +844,8 @@ async def delete_provider(kind: ProviderKind, request: Request) -> dict[str, str
 
 
 @app.get("/api/v1/providers/audit")
-async def provider_audit() -> dict[str, ProviderAuditResult]:
+async def provider_audit(request: Request) -> dict[str, ProviderAuditResult]:
+    require_ios_command(request)
     results = {}
     for kind in ["seerr", "sonarr", "radarr", "qbittorrent", "sabnzbd", "jellyfin"]:
         result = await audit_provider(kind)  # real live call when configured
@@ -928,7 +968,8 @@ async def execute_permanent(plan_id: str, confirmation: PermanentConfirmation, r
     if not plan:
         raise HTTPException(status_code=404, detail="planNotFound")
     operation_id = str(uuid.uuid4())
-    if confirmation.token != "DELETE":
+    # Typed safety confirmation, not a credential.
+    if confirmation.token != "DELETE":  # nosec B105
         return ExecuteResult(operationId=operation_id, state="blocked", stepStates={}, sanitizedErrorCategory="confirmationMissing", message="Typed DELETE confirmation is required.")
     if plan.state not in ("complete", "completeNoCurrentDownloaderJob"):
         return ExecuteResult(operationId=operation_id, state="blocked", stepStates={}, sanitizedErrorCategory=plan.sanitizedBlocker or plan.state, message="Plan is not complete; no provider mutation ran.")
@@ -1011,7 +1052,8 @@ async def retry_step(operation_id: str, payload: RetryStepInput, request: Reques
 
 
 @app.get("/api/v1/operations/{operation_id}")
-async def get_operation(operation_id: str) -> OperationResult:
+async def get_operation(operation_id: str, request: Request) -> OperationResult:
+    require_ios_command(request)
     operation = operation_store.get_operation(operation_id)
     if not operation:
         raise HTTPException(status_code=404, detail="operationNotFound")

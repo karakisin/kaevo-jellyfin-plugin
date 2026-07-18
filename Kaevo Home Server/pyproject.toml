@@ -9,6 +9,8 @@ dependencies = [
     "pydantic>=2.7",
     "eval-type-backport>=0.2",
     "uvicorn>=0.30",
+    "cryptography>=43.0",
+    "PyJWT[crypto]>=2.9,<3",
     "websockets>=12,<15",
 ]
 
