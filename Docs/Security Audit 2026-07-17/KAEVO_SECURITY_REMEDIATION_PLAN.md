@@ -45,13 +45,15 @@ Exit: patches are deployed, regression results archived, and rollback remains av
 
 **Target: before closed alpha**
 
-1. Deploy the candidate Cognito JWT authorizer and provision authoritative principal records only in a staged environment first.
-2. Verify the implemented roles: `owner`, `adult`, `child`, `device`, `connector`, `support`; support remains audit/session-disable only.
-3. Prove implemented recent-auth enforcement for parental settings, connector/device changes, optimizer execution, provider mutation, and destructive work.
-4. Migrate to implemented 15-minute DPoP-bound access tokens and rotating refresh families; retire every legacy portable session after a bounded grace window.
-5. Add server-side owner approval for child dynamic-profile recommendations and actionable notifications.
-6. Confirm the implemented production-empty development credential condition in the deployed CloudFormation stack; keep bypasses only in Debug and non-production environments.
-7. Exercise Cognito passkey/MFA enrollment, recovery, recent authentication, role-version invalidation, device removal, and connector re-pairing end to end.
+1. Confirm the Cognito Essentials/Plus feature-plan cost, then deploy the V2 pre-token access-claim issuer and separate enrollment-only client/function only in a freshly derived isolated staging environment.
+2. Enroll a synthetic owner through the atomic bootstrap, obtain a new main-client access token, and prove its six Kaevo claims match the four authoritative identity records. ID tokens must remain unusable for API authorization.
+3. Drill `authz_version`, role, membership, disable, and revoke changes; each already-issued token must fail on the next protected request even though its cryptographic lifetime is 15 minutes.
+4. Verify the implemented human roles `owner`, `adult`, and `child`; machine roles remain P-256/DPoP and support must not inherit household authority.
+5. Prove implemented recent-auth enforcement for parental settings, connector/device changes, optimizer execution, provider mutation, and destructive work.
+6. Migrate to implemented 15-minute DPoP-bound access tokens and rotating refresh families; retire every legacy portable session after a bounded grace window.
+7. Add server-side owner approval for child dynamic-profile recommendations and actionable notifications.
+8. Confirm the implemented production-empty development credential condition in the deployed CloudFormation stack; keep bypasses only in Debug and non-production environments.
+9. Design and exercise adult invitation, child-login promotion, recovery/rebinding, passkey/MFA enrollment, device removal, and connector re-pairing end to end.
 
 Exit: no protected production route relies on a shared secret; copied access/refresh/connector credentials fail from another key; revocation and recovery drills pass.
 

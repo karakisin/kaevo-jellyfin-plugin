@@ -8,6 +8,9 @@ Legend: **PASS** verified this audit; **BLOCKED** requires production architectu
 |---|---|---|---|
 | Cloud | Full API suite | No failures | **PASS — 59** |
 | Cloud | Authoritative roles/capabilities | Child/adult claim escalation and stale role version rejected | **PASS** |
+| Cloud | Cognito V2 access-token claims | Six Kaevo claims come only from a consistent authoritative graph; ID/enrollment tokens receive none | **PASS locally; staged real-token proof MANUAL** |
+| Cloud | Owner identity bootstrap | Server-generated five-record transaction is idempotent and concurrent replay converges on one owner | **PASS locally** |
+| Cloud | Claim issuer denial/privacy | Missing, inconsistent, revoked, wrong-pool/client, unsupported event, and dependency outage fail closed; canaries absent from logs | **PASS locally** |
 | Cloud | Sender-constrained session | Wrong installation key, wrong device, DPoP replay rejected | **PASS** |
 | Cloud | Refresh rotation/reuse | Consumed refresh revokes its entire family | **PASS** |
 | Cloud | Sensitive owner actions | Fresh owner proof required; cross-household target is opaque | **PASS** |
@@ -106,7 +109,7 @@ Legend: **PASS** verified this audit; **BLOCKED** requires production architectu
 | Control | Owner verification |
 |---|---|
 | AWS root/admin MFA, no root keys | MANUAL |
-| Cognito/OIDC production roles and MFA/passkeys | Code/IaC PASS; enrollment/recovery MANUAL |
+| Cognito/OIDC production roles and MFA/passkeys | V2 claim issuer/bootstrap source PASS; Cognito tier/cost decision and staged enrollment/recovery MANUAL |
 | DynamoDB PITR and restore drill | PLANNED |
 | S3 public-access block/versioning/lifecycle | Source PASS; console drift MANUAL |
 | CloudTrail, API/Lambda/relay audit retention and redaction | PLANNED |

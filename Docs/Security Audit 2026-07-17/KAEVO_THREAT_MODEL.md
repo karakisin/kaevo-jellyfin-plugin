@@ -84,6 +84,9 @@ Primary boundaries:
 11. A copied access token without the installation private key is unusable.
 12. Refresh-token reuse revokes the entire session family.
 13. Provider configuration, parental weakening, connector/device ownership, optimizer execution, and destructive actions require authoritative owner capability; ordinary profile sessions are never sufficient.
+14. Cognito custom attributes, client metadata, request bodies, and ID tokens are never household authority; Kaevo claims are issued only into access tokens after the complete DynamoDB identity graph agrees.
+15. A missing principal is never promoted during token generation. Initial owner authority is created only by the throttled, enrollment-client-only, server-generated atomic bootstrap.
+16. Signed-token lifetime does not delay application revocation: every protected human request compares current principal state, relationships, role, and `authz_version` before capabilities are evaluated.
 
 ## Residual architectural decision
 
