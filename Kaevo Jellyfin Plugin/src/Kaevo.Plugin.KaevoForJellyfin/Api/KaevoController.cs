@@ -35,19 +35,31 @@ public sealed class KaevoController : ControllerBase
     private readonly IImageProcessor _imageProcessor;
     private readonly KaevoCloudState _cloudState;
     private readonly KaevoSecretStore _secretStore;
+    private readonly KaevoProviderDestinationPolicy _providerPolicy;
+    private readonly KaevoConnectorLifecycleClient _lifecycleClient;
+    private readonly KaevoConnectorLifecycleStore _lifecycleStore;
+    private readonly KaevoProviderPolicyAuditStore _providerAudit;
 
     public KaevoController(
         ILibraryManager libraryManager,
         IUserManager userManager,
         IImageProcessor imageProcessor,
         KaevoCloudState cloudState,
-        KaevoSecretStore secretStore)
+        KaevoSecretStore secretStore,
+        KaevoProviderDestinationPolicy providerPolicy,
+        KaevoConnectorLifecycleClient lifecycleClient,
+        KaevoConnectorLifecycleStore lifecycleStore,
+        KaevoProviderPolicyAuditStore providerAudit)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
         _imageProcessor = imageProcessor;
         _cloudState = cloudState;
         _secretStore = secretStore;
+        _providerPolicy = providerPolicy;
+        _lifecycleClient = lifecycleClient;
+        _lifecycleStore = lifecycleStore;
+        _providerAudit = providerAudit;
     }
 
     [HttpGet("status")]
@@ -59,7 +71,7 @@ public sealed class KaevoController : ControllerBase
         return Ok(new KaevoStatusResponse(
             "ok",
             "Kaevo",
-            "0.2.35",
+            "0.2.48",
             configuration.CloudConnectorEnabled,
             cloud.Status,
             cloud.LastHeartbeatUtc,
@@ -89,41 +101,36 @@ public sealed class KaevoController : ControllerBase
         [FromBody] KaevoCloudActivationRequest request,
         CancellationToken cancellationToken)
     {
-        KaevoValidatedCloudActivation activation;
-        try
-        {
-            activation = KaevoCloudActivationValidator.Validate(request);
-        }
-        catch (ArgumentException exception)
-        {
-            return BadRequest(new KaevoCloudActivationResponse("invalid", exception.Message));
-        }
+        await Task.CompletedTask;
+        return Conflict(new KaevoCloudActivationResponse("lifecycle_upgrade_required", "Use the lifecycle enrollment action."));
+    }
 
-        // Persist the Jellyfin credential only in the plugin's owner-only secret
-        // file. It is never copied into plugin configuration, logs, or responses.
-        var existingSecrets = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false);
-        await _secretStore.WriteAsync(
-            new KaevoConnectorSecrets(
-                string.Empty,
-                string.Empty,
-                activation.JellyfinAccessToken,
-                existingSecrets?.SonarrBaseUrl ?? string.Empty,
-                existingSecrets?.SonarrApiKey ?? string.Empty,
-                existingSecrets?.Providers),
-            cancellationToken).ConfigureAwait(false);
-
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("cloud/lifecycle/pair")]
+    public async Task<ActionResult<KaevoLifecycleResponse>> PairLifecycle(
+        [FromBody] KaevoLifecyclePairRequest request,
+        [FromHeader(Name = "X-Kaevo-Admin-Action")] string adminAction,
+        CancellationToken cancellationToken)
+    {
+        if (!ValidAdminAction(adminAction) || !TryCloudUri(request.CloudBaseUrl, out var cloud)
+            || !ValidOwnerToken(request.OwnerAccessToken) || string.IsNullOrWhiteSpace(request.ProfileId)
+            || string.IsNullOrWhiteSpace(request.JellyfinAccessToken))
+        {
+            return BadRequest(new KaevoLifecycleResponse("invalid", 0));
+        }
+        var result = await _lifecycleClient.PairAsync(cloud, request.OwnerAccessToken, cancellationToken).ConfigureAwait(false);
+        var existing = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        await _secretStore.WriteAsync(new KaevoConnectorSecrets(
+            string.Empty, string.Empty, request.JellyfinAccessToken,
+            existing?.SonarrBaseUrl ?? string.Empty, existing?.SonarrApiKey ?? string.Empty, existing?.Providers), cancellationToken).ConfigureAwait(false);
         var configuration = KaevoPlugin.Instance?.Configuration;
-        if (configuration is null)
-        {
-            return StatusCode(503, new KaevoCloudActivationResponse("unavailable", "pluginUnavailable"));
-        }
-
-        configuration.CloudBaseUrl = activation.CloudBaseUrl;
-        configuration.ProfileId = activation.ProfileId;
-        configuration.ConnectorId = activation.ConnectorId;
-        configuration.PairingCode = activation.PairingCode;
+        if (configuration is null) return StatusCode(503, new KaevoLifecycleResponse("unavailable", 0));
+        configuration.CloudBaseUrl = cloud.ToString().TrimEnd('/');
+        configuration.ProfileId = request.ProfileId.Trim();
+        configuration.ConnectorId = result.ConnectorId;
+        configuration.PairingCode = string.Empty;
         configuration.LocalJellyfinBaseUrl = "http://127.0.0.1:8096";
-        configuration.JellyfinUserId = activation.JellyfinUserId;
+        configuration.JellyfinUserId = request.JellyfinUserId.Trim();
         configuration.CloudConnectorEnabled = true;
         configuration.RemoteMetadataEnabled = true;
         configuration.RemoteArtworkEnabled = true;
@@ -135,10 +142,64 @@ public sealed class KaevoController : ControllerBase
         KaevoPlugin.Instance?.SaveConfiguration();
         _cloudState.Set("connecting");
         _cloudState.SignalConfigurationChanged();
+        return Ok(new KaevoLifecycleResponse(result.State, result.CredentialVersion));
+    }
 
-        return Accepted(new KaevoCloudActivationResponse(
-            "connecting",
-            "Remote access is being prepared."));
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("cloud/lifecycle/rotate")]
+    public Task<ActionResult<KaevoLifecycleResponse>> RotateLifecycle([FromBody] KaevoLifecycleOwnerRequest request, [FromHeader(Name = "X-Kaevo-Admin-Action")] string action, CancellationToken token) =>
+        RunLifecycleOwnerAction(request, action, (uri, owner) => _lifecycleClient.RotateAsync(uri, owner, token));
+
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("cloud/lifecycle/recover")]
+    public Task<ActionResult<KaevoLifecycleResponse>> RecoverLifecycle([FromBody] KaevoLifecycleOwnerRequest request, [FromHeader(Name = "X-Kaevo-Admin-Action")] string action, CancellationToken token) =>
+        RunLifecycleOwnerAction(request, action, (uri, owner) => _lifecycleClient.RecoverAsync(uri, owner, token));
+
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("cloud/lifecycle/revoke")]
+    public Task<ActionResult<KaevoLifecycleResponse>> RevokeLifecycle([FromBody] KaevoLifecycleOwnerRequest request, [FromHeader(Name = "X-Kaevo-Admin-Action")] string action, CancellationToken token) =>
+        RunLifecycleOwnerAction(request, action, (uri, owner) => _lifecycleClient.RevokeAsync(uri, owner, token));
+
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("cloud/lifecycle/unpair")]
+    public Task<ActionResult<KaevoLifecycleResponse>> UnpairLifecycle([FromBody] KaevoLifecycleOwnerRequest request, [FromHeader(Name = "X-Kaevo-Admin-Action")] string action, CancellationToken token) =>
+        RunLifecycleOwnerAction(request, action, (uri, owner) => _lifecycleClient.UnpairAsync(uri, owner, token));
+
+    private async Task<ActionResult<KaevoLifecycleResponse>> RunLifecycleOwnerAction(
+        KaevoLifecycleOwnerRequest request,
+        string action,
+        Func<Uri, string, Task<KaevoLifecycleResult>> operation)
+    {
+        var baseUrl = KaevoPlugin.Instance?.Configuration.CloudBaseUrl ?? string.Empty;
+        if (!ValidAdminAction(action) || !ValidOwnerToken(request.OwnerAccessToken) || !TryCloudUri(baseUrl, out var cloud))
+        {
+            return BadRequest(new KaevoLifecycleResponse("invalid", 0));
+        }
+        var result = await operation(cloud, request.OwnerAccessToken).ConfigureAwait(false);
+        _cloudState.SignalConfigurationChanged();
+        return Ok(new KaevoLifecycleResponse(result.State, result.CredentialVersion));
+    }
+
+    private static bool ValidAdminAction(string value) => string.Equals(value, "lifecycle", StringComparison.Ordinal);
+    private static bool ValidOwnerToken(string value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 8192 && !value.Any(char.IsWhiteSpace);
+    private static bool TryCloudUri(string value, out Uri uri)
+    {
+        if (Uri.TryCreate(value?.Trim().TrimEnd('/'), UriKind.Absolute, out var parsed)
+            && parsed.Scheme == Uri.UriSchemeHttps && string.IsNullOrEmpty(parsed.UserInfo)
+            && string.IsNullOrEmpty(parsed.Query) && string.IsNullOrEmpty(parsed.Fragment))
+        {
+            if (!string.Equals(parsed.Host, "aneohx5ff6.execute-api.us-west-2.amazonaws.com", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(parsed.Host, "kaevo.app", StringComparison.OrdinalIgnoreCase)
+                && !parsed.Host.EndsWith(".kaevo.app", StringComparison.OrdinalIgnoreCase))
+            {
+                uri = null!;
+                return false;
+            }
+            uri = parsed;
+            return true;
+        }
+        uri = null!;
+        return false;
     }
 
     [Authorize(Policy = "RequiresElevation")]
@@ -182,19 +243,34 @@ public sealed class KaevoController : ControllerBase
         var current = existing.GetProvider(provider);
         var baseUrl = request.BaseUrl?.Trim().TrimEnd('/') ?? string.Empty;
         var apiKey = string.IsNullOrWhiteSpace(request.ApiKey) ? current?.ApiKey ?? string.Empty : request.ApiKey.Trim();
-        if (request.Enabled
-            && (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var baseUri)
-                || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps)
-                || string.IsNullOrWhiteSpace(baseUri.Host)
-                || (definition.RequiresApiKey && string.IsNullOrWhiteSpace(apiKey))))
+        KaevoApprovedDestination? approved = null;
+        try
         {
+            if (request.Enabled)
+            {
+                if (definition.RequiresApiKey && string.IsNullOrWhiteSpace(apiKey))
+                {
+                    throw new ArgumentException("providerCredentialRequired");
+                }
+                approved = await _providerPolicy.ApproveAsync(provider, baseUrl, cancellationToken).ConfigureAwait(false);
+                baseUrl = approved.BaseUri.ToString().TrimEnd('/');
+            }
+        }
+        catch (ArgumentException)
+        {
+            await _providerAudit.RecordAsync(provider, "denied", "prohibited", null, "invalid", cancellationToken).ConfigureAwait(false);
             return BadRequest(new KaevoProviderProvisionResponse("invalid", provider));
         }
 
         var providers = existing.Providers is null
             ? new Dictionary<string, KaevoLocalProviderSecret>(StringComparer.OrdinalIgnoreCase)
             : new Dictionary<string, KaevoLocalProviderSecret>(existing.Providers, StringComparer.OrdinalIgnoreCase);
-        providers[provider] = new KaevoLocalProviderSecret(baseUrl, apiKey, request.Enabled);
+        providers[provider] = new KaevoLocalProviderSecret(
+            baseUrl,
+            apiKey,
+            request.Enabled,
+            approved?.Addresses ?? current?.ApprovedAddresses,
+            approved?.SecurityClass ?? current?.DestinationClass ?? "private");
         await _secretStore.WriteAsync(
             existing with
             {
@@ -204,6 +280,13 @@ public sealed class KaevoController : ControllerBase
                 SonarrApiKey = provider == "sonarr" ? apiKey : existing.SonarrApiKey,
                 Providers = providers
             },
+            cancellationToken).ConfigureAwait(false);
+        await _providerAudit.RecordAsync(
+            provider,
+            "approved",
+            approved?.SecurityClass ?? current?.DestinationClass ?? "private",
+            approved?.BaseUri,
+            "approved",
             cancellationToken).ConfigureAwait(false);
         return Ok(new KaevoProviderProvisionResponse(request.Enabled ? "ready" : "disabled", provider));
     }

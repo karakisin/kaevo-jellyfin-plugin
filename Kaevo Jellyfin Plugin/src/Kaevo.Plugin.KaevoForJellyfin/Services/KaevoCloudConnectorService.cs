@@ -36,24 +36,28 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private readonly ILibraryManager _libraryManager;
     private readonly KaevoOptimizerCoordinator _optimizer;
     private readonly ILogger<KaevoCloudConnectorService> _logger;
-    private readonly HttpClient _cloud = new() { Timeout = TimeSpan.FromSeconds(30) };
+    private readonly KaevoProviderTransport _providerTransport;
+    private readonly KaevoConnectorLifecycleStore _lifecycleStore;
+    private readonly KaevoConnectorLifecycleClient _lifecycleClient;
     private readonly HttpClient _jellyfin = new() { Timeout = TimeSpan.FromSeconds(45) };
-    private readonly HttpClient _provider = new(new HttpClientHandler { AllowAutoRedirect = false })
-    {
-        Timeout = TimeSpan.FromSeconds(30)
-    };
 
     public KaevoCloudConnectorService(
         KaevoSecretStore secretStore,
         KaevoCloudState state,
         ILibraryManager libraryManager,
         KaevoOptimizerCoordinator optimizer,
+        KaevoProviderTransport providerTransport,
+        KaevoConnectorLifecycleStore lifecycleStore,
+        KaevoConnectorLifecycleClient lifecycleClient,
         ILogger<KaevoCloudConnectorService> logger)
     {
         _secretStore = secretStore;
         _state = state;
         _libraryManager = libraryManager;
         _optimizer = optimizer;
+        _providerTransport = providerTransport;
+        _lifecycleStore = lifecycleStore;
+        _lifecycleClient = lifecycleClient;
         _logger = logger;
     }
 
@@ -155,39 +159,21 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var jellyfinCredential = string.IsNullOrWhiteSpace(environmentApiKey)
             ? existing?.JellyfinApiKey ?? string.Empty
             : environmentApiKey;
-        if (existing is not null && existing.ConnectorToken.Length >= 24 && existing.PlaybackGrantKey.Length >= 32)
+        if (existing is not null && !string.IsNullOrWhiteSpace(existing.ConnectorToken))
         {
-            return existing with { JellyfinApiKey = jellyfinCredential };
+            throw new InvalidOperationException("lifecycle_upgrade_required");
         }
-
-        if (string.IsNullOrWhiteSpace(configuration.ConnectorId) || string.IsNullOrWhiteSpace(configuration.PairingCode))
+        var lifecycle = await _lifecycleStore.LoadOrInitializeAsync(cancellationToken).ConfigureAwait(false);
+        if (lifecycle.State != "active" || lifecycle.CredentialVersion < 1 || string.IsNullOrWhiteSpace(lifecycle.ConnectorId))
         {
-            throw new InvalidOperationException("connectorPairingRequired");
+            throw new InvalidOperationException("lifecycle_upgrade_required");
         }
-
-        var response = await SendCloudAsync<PairingExchangeResponse>(
-            configuration,
-            null,
-            HttpMethod.Post,
-            "/v1/home-connectors/pairing/exchange",
-            new PairingExchangeRequest(configuration.ConnectorId.Trim(), configuration.PairingCode.Trim().ToUpperInvariant()),
-            cancellationToken).ConfigureAwait(false);
-        if (response.State != "paired" || response.PlaybackGrantKey.Length < 32)
-        {
-            throw new InvalidOperationException("connectorPairingRejected");
-        }
-
-        var secrets = new KaevoConnectorSecrets(
-            response.ConnectorToken,
-            response.PlaybackGrantKey,
-            jellyfinCredential,
-            existing?.SonarrBaseUrl ?? string.Empty,
-            existing?.SonarrApiKey ?? string.Empty,
-            existing?.Providers);
-        await _secretStore.WriteAsync(secrets, cancellationToken).ConfigureAwait(false);
-        configuration.ConnectorId = response.ConnectorId;
-        configuration.ProfileId = response.ProfileId;
+        configuration.ConnectorId = lifecycle.ConnectorId;
         configuration.PairingCode = string.Empty;
+        configuration.RemotePlaybackEnabled = false;
+        var secrets = existing is null
+            ? new KaevoConnectorSecrets(string.Empty, string.Empty, jellyfinCredential)
+            : existing with { ConnectorToken = string.Empty, PlaybackGrantKey = string.Empty, JellyfinApiKey = jellyfinCredential };
         KaevoPlugin.Instance?.SaveConfiguration();
         return secrets;
     }
@@ -208,7 +194,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 connector_name = "Kaevo Jellyfin Plugin",
                 host_type = "jellyfin_plugin",
-                app_version = "0.2.35",
+                app_version = "0.2.48",
                 capabilities = new[]
                 {
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
@@ -865,7 +851,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             message.Content = new StringContent(JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json");
         }
-        using var response = await _provider.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        using var response = await _providerTransport.SendAsync("sonarr", sonarr, message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         if ((int)response.StatusCode is >= 300 and < 400)
         {
             throw new InvalidOperationException("sonarrRedirectRejected");
@@ -878,8 +864,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             return JsonSerializer.SerializeToElement(new { ok = true }, JsonOptions);
         }
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var bounded = await ReadBoundedAsync(response.Content, 2_000_000, cancellationToken).ConfigureAwait(false);
+        if (bounded.Truncated) throw new InvalidOperationException("sonarrResponseTooLarge");
+        using var document = JsonDocument.Parse(bounded.Data);
         return document.RootElement.Clone();
     }
 
@@ -905,7 +892,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             message.Content = new StringContent(JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json");
         }
-        using var response = await _provider.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        using var response = await _providerTransport.SendAsync("seerr", seerr, message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         if ((int)response.StatusCode is >= 300 and < 400)
         {
             throw new InvalidOperationException("seerrRedirectRejected");
@@ -918,8 +905,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             return JsonSerializer.SerializeToElement(new { ok = true }, JsonOptions);
         }
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var bounded = await ReadBoundedAsync(response.Content, 2_000_000, cancellationToken).ConfigureAwait(false);
+        if (bounded.Truncated) throw new InvalidOperationException("seerrResponseTooLarge");
+        using var document = JsonDocument.Parse(bounded.Data);
         return document.RootElement.Clone();
     }
 
@@ -952,7 +940,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 provider.ApiKey);
         }
 
-        using var response = await _provider.SendAsync(
+        using var response = await _providerTransport.SendAsync(
+            providerName,
+            provider,
             message,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken).ConfigureAwait(false);
@@ -1025,7 +1015,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             message.Headers.TryAddWithoutValidation(providerName == "bazarr" ? "X-API-KEY" : "X-Api-Key", provider.ApiKey);
         }
 
-        using var response = await _provider.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        using var response = await _providerTransport.SendAsync(providerName, provider, message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         if ((int)response.StatusCode is >= 300 and < 400)
         {
             throw new InvalidOperationException($"{providerName}RedirectRejected");
@@ -1040,8 +1030,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             try
             {
-                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-                using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+                var bounded = await ReadBoundedAsync(response.Content, 1_000_000, cancellationToken).ConfigureAwait(false);
+                if (bounded.Truncated) throw new InvalidOperationException($"{providerName}ResponseTooLarge");
+                using var document = JsonDocument.Parse(bounded.Data);
                 if (document.RootElement.ValueKind == JsonValueKind.Object
                     && document.RootElement.TryGetProperty("version", out var versionElement)
                     && versionElement.ValueKind == JsonValueKind.String)
@@ -1326,7 +1317,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         await Task.WhenAll(viewsTask, moviesTask, showsTask, collectionsTask, resumeTask, recentTask).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
-            version = "0.2.35",
+            version = "0.2.48",
             generated_at = DateTimeOffset.UtcNow,
             views = viewsTask.Result.Payload,
             movies = moviesTask.Result.Payload,
@@ -1665,17 +1656,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         object body,
         CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(method, new Uri(new Uri(configuration.CloudBaseUrl.TrimEnd('/') + "/"), path.TrimStart('/')))
-        {
-            Content = new StringContent(JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json")
-        };
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        if (secrets is not null)
-        {
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", secrets.ConnectorToken);
-        }
-
-        using var response = await _cloud.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        if (secrets is null) throw new InvalidOperationException("lifecycle_upgrade_required");
+        using var response = await _lifecycleClient.SendConnectorAsync(
+            new Uri(configuration.CloudBaseUrl, UriKind.Absolute), method, path, body, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException($"cloudHttp{(int)response.StatusCode}");
@@ -1962,7 +1945,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         var result = new Dictionary<string, ProviderReachability>(StringComparer.OrdinalIgnoreCase)
         {
-            ["jellyfin"] = ProviderStatus(true, true, "0.2.35", null)
+            ["jellyfin"] = ProviderStatus(true, true, "0.2.48", null)
         };
         foreach (var providerName in new[] { "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr" })
         {
@@ -1975,7 +1958,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             result[providerName] = ProviderStatus(
                 enabled && configured,
                 configured,
-                "0.2.35",
+                "0.2.48",
                 !configured ? "notConfigured" : enabled ? null : "disabled");
         }
 
@@ -1984,13 +1967,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             result["optimizer"] = ProviderStatus(
                 configuration.OptimizerPlanningEnabled,
                 configuration.OptimizerPlanningEnabled,
-                "0.2.35",
+                "0.2.48",
                 configuration.OptimizerPlanningEnabled ? null : "disabled");
         }
         result["playback_tunnel"] = ProviderStatus(
             configuration.RemotePlaybackEnabled,
             configuration.RemotePlaybackEnabled,
-            "0.2.35",
+            "0.2.48",
             configuration.RemotePlaybackEnabled ? null : "disabled");
         return result;
     }

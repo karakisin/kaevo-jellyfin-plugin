@@ -3,17 +3,6 @@ using System.Text.Json.Serialization;
 
 namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
-internal sealed record PairingExchangeRequest(
-    [property: JsonPropertyName("connector_id")] string ConnectorId,
-    [property: JsonPropertyName("pairing_code")] string PairingCode);
-
-internal sealed record PairingExchangeResponse(
-    [property: JsonPropertyName("state")] string State,
-    [property: JsonPropertyName("connector_id")] string ConnectorId,
-    [property: JsonPropertyName("profile_id")] string ProfileId,
-    [property: JsonPropertyName("connector_token")] string ConnectorToken,
-    [property: JsonPropertyName("playback_grant_key")] string PlaybackGrantKey);
-
 internal sealed record CloudClaimResponse(
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("request")] CloudRequest? Request);

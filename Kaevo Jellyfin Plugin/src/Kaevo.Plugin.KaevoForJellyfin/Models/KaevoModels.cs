@@ -33,6 +33,17 @@ public sealed record KaevoCloudActivationResponse(
     string State,
     string Message);
 
+public sealed record KaevoLifecyclePairRequest(
+    string CloudBaseUrl,
+    string OwnerAccessToken,
+    string ProfileId,
+    string JellyfinUserId,
+    string JellyfinAccessToken);
+
+public sealed record KaevoLifecycleOwnerRequest(string OwnerAccessToken);
+
+public sealed record KaevoLifecycleResponse(string State, int CredentialVersion);
+
 public sealed record KaevoProviderProvisionRequest(
     string BaseUrl,
     string? ApiKey,
