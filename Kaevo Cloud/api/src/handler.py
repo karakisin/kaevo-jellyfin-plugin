@@ -357,7 +357,7 @@ def record_dpop_jti(jti, expires_at):
 def authoritative_identity(event, capability, target=None):
     if principals_table is None:
         raise IdentityError("identity_storage_unavailable", 503)
-    context = IdentityContext.from_gateway_event(event)
+    context = IdentityContext.from_gateway_event(event, now=epoch_now())
     principal = principals_table.get_item(Key={"principal_id": context.subject}, ConsistentRead=True).get("Item")
     if not principal:
         raise IdentityError("identity_not_registered", 401)

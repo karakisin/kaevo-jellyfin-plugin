@@ -25,6 +25,12 @@ Parameters:
     Default: ""
     Description: Public HTTPS origin of the separate long-lived Kaevo playback relay
 
+  CognitoUserPoolTier:
+    Type: String
+    Default: ESSENTIALS
+    AllowedValues: [ESSENTIALS, PLUS]
+    Description: Access-token customization requires Cognito Essentials or Plus. Confirm cost before deployment.
+
 Conditions:
   IsProduction: !Equals [!Ref EnvironmentName, production]
 
@@ -35,24 +41,6 @@ Globals:
     MemorySize: 128
     Architectures:
       - arm64
-    Environment:
-      Variables:
-        KAEVO_ENV: !Ref EnvironmentName
-        DEV_API_KEY: !If [IsProduction, "", !Ref DevApiKey]
-        PROFILE_EVENTS_TABLE: !Ref KaevoProfileEventsTable
-        PROFILE_SETTINGS_TABLE: !Ref KaevoProfileSettingsTable
-        DEVICES_TABLE: !Ref KaevoDevicesTable
-        ENTITLEMENTS_TABLE: !Ref KaevoEntitlementsTable
-        HOME_CONNECTORS_TABLE: !Ref KaevoHomeConnectorsTable
-        REMOTE_REQUESTS_TABLE: !Ref KaevoRemoteRequestsTable
-        REMOTE_PAYLOADS_BUCKET: !Ref KaevoRemotePayloadsBucket
-        PROFILE_AVATARS_BUCKET: !Ref KaevoProfileAvatarsBucket
-        APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
-        PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
-        INSTALLATIONS_TABLE: !Ref KaevoInstallationsTable
-        SECURITY_AUDIT_TABLE: !Ref KaevoSecurityAuditTable
-        PLAYBACK_GRANT_SIGNING_KEY: !Ref PlaybackGrantSigningKey
-        PLAYBACK_RELAY_PUBLIC_URL: !Ref PlaybackRelayPublicUrl
 
 Resources:
   KaevoCloudHttpApi:
@@ -72,6 +60,9 @@ Resources:
         "POST /v1/app-sessions/refresh":
           ThrottlingBurstLimit: 10
           ThrottlingRateLimit: 2
+        "POST /v2/identity/enroll-owner":
+          ThrottlingBurstLimit: 3
+          ThrottlingRateLimit: 1
       Auth:
         Authorizers:
           KaevoOwnerAuthorizer:
@@ -79,6 +70,12 @@ Resources:
               issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
               audience:
                 - !Ref KaevoUserPoolClient
+            IdentitySource: "$request.header.Authorization"
+          KaevoEnrollmentAuthorizer:
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
+              audience:
+                - !Ref KaevoEnrollmentUserPoolClient
             IdentitySource: "$request.header.Authorization"
 
   KaevoProfileEventsTable:
@@ -198,6 +195,63 @@ Resources:
       KeySchema:
         - AttributeName: principal_id
           KeyType: HASH
+
+  KaevoIdentityMembershipsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-identity-memberships
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: principal_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: principal_id
+          KeyType: HASH
+      Tags:
+        - Key: KaevoDataClass
+          Value: identity-authority
+
+  KaevoIdentityHouseholdsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-identity-households
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: household_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: household_id
+          KeyType: HASH
+      Tags:
+        - Key: KaevoDataClass
+          Value: identity-authority
+
+  KaevoIdentityProfilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-identity-profiles
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: profile_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: profile_id
+          KeyType: HASH
+      Tags:
+        - Key: KaevoDataClass
+          Value: identity-authority
 
   KaevoInstallationsTable:
     Type: AWS::DynamoDB::Table
@@ -335,10 +389,64 @@ Resources:
             NoncurrentVersionExpiration:
               NoncurrentDays: 30
 
+  KaevoIdentityClaimIssuerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-identity-claim-issuer
+      CodeUri: ../api/src/
+      Handler: claim_issuer.lambda_handler
+      Timeout: 5
+      MemorySize: 128
+      ReservedConcurrentExecutions: 20
+      Environment:
+        Variables:
+          PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
+          IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
+          IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
+          IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
+          EXPECTED_USER_POOL_NAME: !Sub kaevo-cloud-${EnvironmentName}-users
+          EXPECTED_MAIN_CLIENT_NAME: !Sub kaevo-cloud-${EnvironmentName}-ios-tvos
+          EXPECTED_ENROLLMENT_CLIENT_NAME: !Sub kaevo-cloud-${EnvironmentName}-owner-enrollment
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Sid: ReadAuthoritativeIdentityGraph
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                - !GetAtt KaevoPrincipalsTable.Arn
+                - !GetAtt KaevoIdentityMembershipsTable.Arn
+                - !GetAtt KaevoIdentityHouseholdsTable.Arn
+                - !GetAtt KaevoIdentityProfilesTable.Arn
+            - Sid: ValidateInvokingCognitoPoolAndClient
+              Effect: Allow
+              Action:
+                - cognito-idp:DescribeUserPool
+                - cognito-idp:DescribeUserPoolClient
+              Resource: "*"
+      Tags:
+        KaevoSecurityBoundary: identity-claim-issuer
+
+  KaevoIdentityClaimIssuerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-identity-claim-issuer
+      RetentionInDays: 30
+
   KaevoUserPool:
     Type: AWS::Cognito::UserPool
+    DependsOn:
+      - KaevoIdentityClaimIssuerPermission
     Properties:
       UserPoolName: !Sub kaevo-cloud-${EnvironmentName}-users
+      UserPoolTier: !Ref CognitoUserPoolTier
+      LambdaConfig:
+        PreTokenGenerationConfig:
+          LambdaArn: !GetAtt KaevoIdentityClaimIssuerFunction.Arn
+          LambdaVersion: V2_0
       UsernameAttributes:
         - email
       AutoVerifiedAttributes:
@@ -378,13 +486,124 @@ Resources:
         IdToken: minutes
         RefreshToken: days
       EnableTokenRevocation: true
+      ReadAttributes:
+        - email
+        - email_verified
+      WriteAttributes:
+        - email
+
+  KaevoEnrollmentUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub kaevo-cloud-${EnvironmentName}-owner-enrollment
+      UserPoolId: !Ref KaevoUserPool
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_AUTH
+      AccessTokenValidity: 5
+      IdTokenValidity: 5
+      RefreshTokenValidity: 1
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      EnableTokenRevocation: true
+      ReadAttributes:
+        - email
+        - email_verified
+      WriteAttributes:
+        - email
+
+  KaevoIdentityClaimIssuerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref KaevoIdentityClaimIssuerFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
+
+  KaevoOwnerEnrollmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-owner-enrollment
+      CodeUri: ../api/src/
+      Handler: identity_enrollment.lambda_handler
+      Timeout: 10
+      MemorySize: 128
+      ReservedConcurrentExecutions: 5
+      Environment:
+        Variables:
+          PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
+          IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
+          IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
+          IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
+          SECURITY_AUDIT_TABLE: !Ref KaevoSecurityAuditTable
+          EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
+          EXPECTED_ENROLLMENT_CLIENT_ID: !Ref KaevoEnrollmentUserPoolClient
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Sid: BootstrapAuthoritativeIdentityGraph
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:TransactWriteItems
+              Resource:
+                - !GetAtt KaevoPrincipalsTable.Arn
+                - !GetAtt KaevoIdentityMembershipsTable.Arn
+                - !GetAtt KaevoIdentityHouseholdsTable.Arn
+                - !GetAtt KaevoIdentityProfilesTable.Arn
+                - !GetAtt KaevoSecurityAuditTable.Arn
+      Events:
+        EnrollOwner:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/identity/enroll-owner
+            Method: POST
+            Auth:
+              Authorizer: KaevoEnrollmentAuthorizer
+      Tags:
+        KaevoSecurityBoundary: identity-owner-enrollment
+
+  KaevoOwnerEnrollmentLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-owner-enrollment
+      RetentionInDays: 30
 
   KaevoCloudApiFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: kaevo-cloud-dev-api
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-api
       CodeUri: ../api/src/
       Handler: handler.lambda_handler
+      Environment:
+        Variables:
+          KAEVO_ENV: !Ref EnvironmentName
+          DEV_API_KEY: !If [IsProduction, "", !Ref DevApiKey]
+          PROFILE_EVENTS_TABLE: !Ref KaevoProfileEventsTable
+          PROFILE_SETTINGS_TABLE: !Ref KaevoProfileSettingsTable
+          DEVICES_TABLE: !Ref KaevoDevicesTable
+          ENTITLEMENTS_TABLE: !Ref KaevoEntitlementsTable
+          HOME_CONNECTORS_TABLE: !Ref KaevoHomeConnectorsTable
+          REMOTE_REQUESTS_TABLE: !Ref KaevoRemoteRequestsTable
+          REMOTE_PAYLOADS_BUCKET: !Ref KaevoRemotePayloadsBucket
+          PROFILE_AVATARS_BUCKET: !Ref KaevoProfileAvatarsBucket
+          APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
+          PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
+          INSTALLATIONS_TABLE: !Ref KaevoInstallationsTable
+          SECURITY_AUDIT_TABLE: !Ref KaevoSecurityAuditTable
+          PLAYBACK_GRANT_SIGNING_KEY: !Ref PlaybackGrantSigningKey
+          PLAYBACK_RELAY_PUBLIC_URL: !Ref PlaybackRelayPublicUrl
+          EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
+          EXPECTED_MAIN_CLIENT_ID: !Ref KaevoUserPoolClient
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoProfileEventsTable
@@ -751,6 +970,22 @@ Outputs:
   CognitoUserPoolClientId:
     Description: Kaevo Cognito user pool app client ID
     Value: !Ref KaevoUserPoolClient
+
+  CognitoEnrollmentUserPoolClientId:
+    Description: Short-lived owner enrollment Cognito app client ID
+    Value: !Ref KaevoEnrollmentUserPoolClient
+
+  IdentityMembershipsTableName:
+    Description: Authoritative human principal membership table
+    Value: !Ref KaevoIdentityMembershipsTable
+
+  IdentityHouseholdsTableName:
+    Description: Authoritative Kaevo household identity table
+    Value: !Ref KaevoIdentityHouseholdsTable
+
+  IdentityProfilesTableName:
+    Description: Authoritative Kaevo identity profile table
+    Value: !Ref KaevoIdentityProfilesTable
 
   CognitoIssuer:
     Description: Kaevo Cognito JWT issuer

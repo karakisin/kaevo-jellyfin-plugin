@@ -12,6 +12,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from typing import Any, Callable, Mapping
 
 import jwt
 from cryptography.hazmat.primitives.asymmetric import ec
+
+from identity_authority import AuthorityError, IDENTITY_SCHEMA_VERSION, validate_access_token_claims
 
 
 ACCESS_TOKEN_TTL_SECONDS = 15 * 60
@@ -91,26 +94,53 @@ class IdentityContext:
     role: Role
     authz_version: int
     authentication_time: int
+    identity_schema_version: int = IDENTITY_SCHEMA_VERSION
+    issuer: str = ""
+    client_id: str = ""
+    expires_at: int = 0
+    issued_at: int = 0
+    token_use: str = "access"
 
     @classmethod
-    def from_gateway_event(cls, event: Mapping[str, Any]) -> "IdentityContext":
+    def from_gateway_event(
+        cls,
+        event: Mapping[str, Any],
+        *,
+        expected_issuer: str | None = None,
+        expected_client_id: str | None = None,
+        now: int | None = None,
+    ) -> "IdentityContext":
         claims = gateway_jwt_claims(event)
         try:
+            standard = validate_access_token_claims(
+                claims,
+                expected_issuer=expected_issuer or os.environ.get("EXPECTED_COGNITO_ISSUER", ""),
+                expected_client_id=expected_client_id or os.environ.get("EXPECTED_MAIN_CLIENT_ID", ""),
+                now=now,
+            )
             role = Role(_claim(claims, "role"))
             authz_version = int(_claim(claims, "authz_version"))
-            authentication_time = int(_claim(claims, "auth_time"))
-        except (TypeError, ValueError):
+            schema_version = int(_claim(claims, "identity_schema_version"))
+            if schema_version != IDENTITY_SCHEMA_VERSION or role not in {Role.OWNER, Role.ADULT, Role.CHILD}:
+                raise ValueError("unsupported identity schema or role")
+        except (AuthorityError, TypeError, ValueError):
             raise IdentityError("invalid_identity_claims", 401)
         context = cls(
-            subject=_claim(claims, "sub"),
+            subject=standard["sub"],
             account_id=_claim(claims, "account_id"),
             household_id=_claim(claims, "household_id"),
             profile_id=_claim(claims, "profile_id"),
             role=role,
             authz_version=authz_version,
-            authentication_time=authentication_time,
+            authentication_time=standard["auth_time"],
+            identity_schema_version=schema_version,
+            issuer=standard["iss"],
+            client_id=standard["client_id"],
+            expires_at=standard["exp"],
+            issued_at=standard["iat"],
+            token_use=standard["token_use"],
         )
-        if not all((context.subject, context.account_id, context.household_id)):
+        if not all((context.subject, context.account_id, context.household_id, context.profile_id)):
             raise IdentityError("invalid_identity_claims", 401)
         return context
 
@@ -124,7 +154,8 @@ def authorize(
     now: int | None = None,
 ) -> None:
     """Authorize from server records; client identifiers are never authority."""
-    if authoritative_principal.get("revoked") or authoritative_principal.get("state") != "active":
+    revoked = authoritative_principal.get("revoked")
+    if revoked not in (None, False, 0, "false", "False") or authoritative_principal.get("state") != "active":
         raise IdentityError("identity_revoked", 401)
     expected = {
         "principal_id": context.subject,
@@ -135,9 +166,16 @@ def authorize(
     for key, value in expected.items():
         if not hmac.compare_digest(str(authoritative_principal.get(key) or ""), value):
             raise IdentityError("identity_relationship_mismatch", 403)
-    if int(authoritative_principal.get("authz_version") or -1) != context.authz_version:
+    try:
+        authoritative_version = int(authoritative_principal.get("authz_version"))
+    except (TypeError, ValueError) as error:
+        raise IdentityError("identity_revoked", 401) from error
+    if authoritative_version != context.authz_version:
         raise IdentityError("stale_authorization", 401)
-    permitted_profiles = {str(value) for value in authoritative_principal.get("profile_ids") or []}
+    profile_ids = authoritative_principal.get("profile_ids")
+    if not isinstance(profile_ids, list):
+        raise IdentityError("identity_revoked", 401)
+    permitted_profiles = {str(value) for value in profile_ids}
     if context.profile_id and context.profile_id not in permitted_profiles:
         raise IdentityError("target_not_found", 404)
     if capability not in CAPABILITIES[context.role]:
