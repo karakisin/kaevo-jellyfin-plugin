@@ -15,7 +15,6 @@ import time
 from typing import Any, Mapping
 
 import boto3
-from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
 from identity_authority import AuthorityError, derive_authoritative_claims, validate_access_token_claims
@@ -23,7 +22,6 @@ from identity_authority import AuthorityError, derive_authoritative_claims, vali
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(logging.INFO)
-SERIALIZER = TypeSerializer()
 
 
 def _response(status_code: int, body: Mapping[str, Any]) -> dict[str, Any]:
@@ -72,10 +70,6 @@ def _get_graph(dynamodb: Any, subject: str):
     if str(principal.get("role") or "") != "owner":
         raise AuthorityError("invalid_existing_enrollment")
     return principal
-
-
-def _serialize(item: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: SERIALIZER.serialize(value) for key, value in item.items()}
 
 
 def enroll_owner(event: Mapping[str, Any], *, dynamodb: Any, now: int | None = None) -> dict[str, Any]:
@@ -149,7 +143,7 @@ def enroll_owner(event: Mapping[str, Any], *, dynamodb: Any, now: int | None = N
     transaction = [
         {"Put": {
             "TableName": table,
-            "Item": _serialize(item),
+            "Item": item,
             "ConditionExpression": f"attribute_not_exists({key})",
         }}
         for table, key, item in entries
