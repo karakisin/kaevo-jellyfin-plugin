@@ -51,6 +51,13 @@ byte-range operations required by the selected session. It must reject:
 Artwork and metadata use separate bounded read-only paths; they do not share a
 playback grant.
 
+Connector control-plane authentication is lifecycle-versioned. The Home Server
+generates and persists an environment-scoped server ID, connector P-256 key,
+and separate recovery P-256 key locally. Initial pairing, rotation, and recovery
+use short-lived owner-approved intents. Every connector request carries the
+current credential version and DPoP proof; stale versions and superseded keys
+fail immediately. Private keys never leave the Home Server.
+
 ## Transcoding lifecycle
 
 1. The client requests playback for a selected Jellyfin item.
