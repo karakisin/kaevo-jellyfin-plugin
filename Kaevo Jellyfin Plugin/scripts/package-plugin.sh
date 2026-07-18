@@ -7,7 +7,12 @@ BUILD_DIR="$PROJECT_ROOT/artifacts/build"
 PACKAGE_ROOT="$PROJECT_ROOT/artifacts/package"
 PLUGIN_DIR="$PACKAGE_ROOT/Kaevo"
 ZIP_PATH="$PACKAGE_ROOT/Kaevo.Plugin.KaevoForJellyfin.zip"
-TIMESTAMP="${KAEVO_RELEASE_TIMESTAMP:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
+if [[ -n "${KAEVO_RELEASE_TIMESTAMP:-}" ]]; then
+    TIMESTAMP="$KAEVO_RELEASE_TIMESTAMP"
+else
+    RELEASE_EPOCH="$(git -C "$PROJECT_ROOT" show -s --format=%ct HEAD)"
+    TIMESTAMP="$(date -u -r "$RELEASE_EPOCH" '+%Y-%m-%dT%H:%M:%SZ')"
+fi
 
 test -f "$BUILD_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" || {
     echo "Build output is missing. Run scripts/build-plugin-docker.sh first." >&2
