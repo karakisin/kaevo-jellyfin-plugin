@@ -17,6 +17,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from identity_authority import AuthorityError
 import identity_enrollment
+import security_audit
 from identity_enrollment import enroll_owner
 
 
@@ -76,9 +77,12 @@ def enrollment_environment(monkeypatch):
         "PRINCIPALS_TABLE": "principals", "IDENTITY_MEMBERSHIPS_TABLE": "memberships",
         "IDENTITY_HOUSEHOLDS_TABLE": "households", "IDENTITY_PROFILES_TABLE": "profiles",
         "SECURITY_AUDIT_TABLE": "audit", "EXPECTED_COGNITO_ISSUER": "https://issuer.example/pool",
-        "EXPECTED_ENROLLMENT_CLIENT_ID": "enrollment-client",
+        "EXPECTED_ENROLLMENT_CLIENT_ID": "enrollment-client", "KAEVO_ENV": "test",
+        "AUDIT_REFERENCE_SECRET_ARN": "test-audit-secret",
     }.items():
         monkeypatch.setenv(key, value)
+    security_audit.clear_audit_key_cache()
+    security_audit._secret_cache["test-audit-secret"] = b"T" * 64
 
 
 def event(subject="user-1", *, client_id="enrollment-client", token_use="access", now=1_000, body=None):

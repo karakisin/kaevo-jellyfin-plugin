@@ -18,6 +18,7 @@ os.environ.setdefault("AWS_DEFAULT_REGION", "us-west-2")
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 import identity_enrollment
+import security_audit
 from identity_enrollment import enroll_owner
 
 
@@ -81,6 +82,10 @@ def local_tables(monkeypatch):
         ).wait_until_exists()
     monkeypatch.setenv("EXPECTED_COGNITO_ISSUER", "https://issuer.example/pool")
     monkeypatch.setenv("EXPECTED_ENROLLMENT_CLIENT_ID", "enrollment-client")
+    monkeypatch.setenv("KAEVO_ENV", "test")
+    monkeypatch.setenv("AUDIT_REFERENCE_SECRET_ARN", "test-audit-secret")
+    security_audit.clear_audit_key_cache()
+    security_audit._secret_cache["test-audit-secret"] = b"T" * 64
     try:
         yield dynamo, table_names
     finally:
@@ -107,7 +112,10 @@ def assert_complete_graph(items, subject):
     assert principal["household_id"] == membership["household_id"] == household["household_id"] == profile["household_id"]
     assert principal["profile_ids"] == [membership["profile_id"]]
     assert membership["profile_id"] == profile["profile_id"]
-    assert audit["household_id"] == household["household_id"]
+    assert audit["household_id"] == audit["scope_ref"]
+    assert audit["household_id"] != household["household_id"]
+    assert audit["actor_ref"].startswith("apr1_")
+    assert subject not in json.dumps(audit)
 
 
 def test_real_transaction_commits_five_typed_records_and_replays(local_tables):
