@@ -11,6 +11,7 @@ using Kaevo.Plugin.KaevoForJellyfin.Services;
 namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 
 [ApiController]
+[Authorize]
 [Route("kaevo")]
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase
@@ -140,7 +141,6 @@ public sealed class KaevoController : ControllerBase
             "Remote access is being prepared."));
     }
 
-    [Authorize(Policy = "RequiresElevation")]
     [Authorize(Policy = "RequiresElevation")]
     [HttpGet("providers/status")]
     public async Task<ActionResult<IReadOnlyList<KaevoProviderStatusResponse>>> GetProviderStatus(
