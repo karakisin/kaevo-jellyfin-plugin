@@ -1030,29 +1030,59 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             throw new InvalidOperationException($"{providerName}Http{(int)response.StatusCode}");
         }
 
-        string? version = null;
-        if (response.Content.Headers.ContentLength != 0)
+        var bounded = await ReadBoundedAsync(response.Content, 1_000_000, cancellationToken).ConfigureAwait(false);
+        if (bounded.Truncated) throw new InvalidOperationException($"{providerName}ResponseTooLarge");
+        string? version;
+        try
         {
-            try
-            {
-                var bounded = await ReadBoundedAsync(response.Content, 1_000_000, cancellationToken).ConfigureAwait(false);
-                if (bounded.Truncated) throw new InvalidOperationException($"{providerName}ResponseTooLarge");
-                using var document = JsonDocument.Parse(bounded.Data);
-                if (document.RootElement.ValueKind == JsonValueKind.Object
-                    && document.RootElement.TryGetProperty("version", out var versionElement)
-                    && versionElement.ValueKind == JsonValueKind.String)
-                {
-                    version = versionElement.GetString();
-                }
-            }
-            catch (JsonException)
-            {
-                // A successful HTTP response still proves the local service is
-                // reachable. Never forward its raw body to Kaevo Cloud.
-            }
+            version = ValidateProviderHealthResponse(bounded.Data, response.Content.Headers.ContentType?.MediaType);
+        }
+        catch (JsonException)
+        {
+            throw new InvalidOperationException($"{providerName}ResponseMalformed");
         }
 
         return new { provider = providerName, reachable = true, version };
+    }
+
+    internal static string? ValidateProviderHealthResponse(byte[] data, string? mediaType)
+    {
+        if (data.Length == 0
+            || string.IsNullOrWhiteSpace(mediaType)
+            || !(mediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase)
+                || mediaType.EndsWith("+json", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new JsonException("Provider health response is not JSON.");
+        }
+
+        using var document = JsonDocument.Parse(data);
+        RejectDuplicateProperties(document.RootElement);
+        if (document.RootElement.ValueKind != JsonValueKind.Object)
+        {
+            throw new JsonException("Provider health response root must be an object.");
+        }
+
+        return document.RootElement.TryGetProperty("version", out var versionElement)
+            && versionElement.ValueKind == JsonValueKind.String
+                ? versionElement.GetString()
+                : null;
+    }
+
+    private static void RejectDuplicateProperties(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!names.Add(property.Name)) throw new JsonException("Provider response contains duplicate properties.");
+                RejectDuplicateProperties(property.Value);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray()) RejectDuplicateProperties(item);
+        }
     }
 
     private static string RequireProviderName(IReadOnlyDictionary<string, JsonElement> parameters)

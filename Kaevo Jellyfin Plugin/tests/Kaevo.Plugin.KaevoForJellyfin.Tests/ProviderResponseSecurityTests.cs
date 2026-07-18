@@ -5,6 +5,26 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 
 public sealed class ProviderResponseSecurityTests
 {
+    [Theory]
+    [InlineData("")]
+    [InlineData("{\"version\":\"one\",\"version\":\"two\"}")]
+    public void MalformedProviderHealthJsonIsRejected(string json)
+    {
+        Assert.ThrowsAny<Exception>(() =>
+            KaevoCloudConnectorService.ValidateProviderHealthResponse(
+                System.Text.Encoding.UTF8.GetBytes(json), "application/json"));
+    }
+
+    [Fact]
+    public void BinaryAndUnexpectedContentTypesAreRejected()
+    {
+        Assert.ThrowsAny<Exception>(() =>
+            KaevoCloudConnectorService.ValidateProviderHealthResponse(new byte[] { 0, 1, 2 }, "application/json"));
+        Assert.ThrowsAny<Exception>(() =>
+            KaevoCloudConnectorService.ValidateProviderHealthResponse(
+                System.Text.Encoding.UTF8.GetBytes("{\"version\":\"one\"}"), "text/plain"));
+    }
+
     [Fact]
     public async Task OversizedChunkedBodyStopsAtTheConfiguredBound()
     {
