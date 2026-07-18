@@ -116,3 +116,52 @@ events, dependency failure, log canaries, server-generated atomic enrollment,
 replay, and concurrent enrollment convergence. Operational closure still
 requires staged owner authentication, fresh-token issuance, version/revocation
 drills, and recovery/invitation workflow proof with synthetic identities.
+
+## KSEC-011A enrollment serialization defect
+
+Finding: **KSEC-011A — High**
+
+Classification: **fail-closed launch blocker**
+
+Operational status: **remediated in canonical source; open until corrected real
+staging enrollment succeeds**
+
+The first real staging enrollment reached DynamoDB but did not commit. The
+enrollment function manually converted native records into low-level DynamoDB
+`AttributeValue` dictionaries with `TypeSerializer`, then passed those values
+through `boto3.resource("dynamodb").meta.client.transact_write_items`. The
+resource client applied its own serialization layer, so a string key became a
+nested map instead of `S`. DynamoDB returned a transaction cancellation with a
+validation error for the Principal key. Because the operation was one
+transaction, no Principal, Membership, Household, Identity profile, or audit
+record was partially created, and no authorization bypass occurred.
+
+The original fake transaction unit test decoded already-serialized values and
+therefore modeled the manual serialization as correct. It never exercised the
+resource client's request transformation. Real staging was the first test that
+observed the final DynamoDB wire shape.
+
+The canonical correction keeps the existing boto3 DynamoDB resource, removes
+the manual `TypeSerializer` import, object, and transaction-only helper, and
+passes the same five native Python dictionaries directly to the resource
+client. Identifier generation, transaction order, conditions, authority
+validation, token validation, replay behavior, responses, tables, IAM, schema,
+claims, and logging are unchanged.
+
+Regression coverage now includes:
+
+- a before-send capture of the actual boto3 resource-client request proving
+  string, number, list, and Boolean wire types and rejecting nested `M/S/S`;
+- an isolated in-memory DynamoDB Local transaction creating exactly the five
+  expected records with the expected key types;
+- replay without duplicate authority or audit state;
+- two concurrent enrollment attempts converging on one complete graph;
+- a deliberate condition collision producing the generic client response and
+  zero partial records; and
+- enrollment-client restrictions and log-canary privacy checks.
+
+The affected owner-enrollment Lambda must be repackaged and redeployed to the
+isolated security staging stack. KSEC-011A must not be marked operationally
+closed until a fresh synthetic Cognito identity enrolls successfully there,
+replay and conflict proofs pass, exactly five consistent records are observed,
+and the staging logs remain redacted.

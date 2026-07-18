@@ -9,7 +9,8 @@ Legend: **PASS** verified this audit; **BLOCKED** requires production architectu
 | Cloud | Full API suite | No failures | **PASS — 59** |
 | Cloud | Authoritative roles/capabilities | Child/adult claim escalation and stale role version rejected | **PASS** |
 | Cloud | Cognito V2 access-token claims | Six Kaevo claims come only from a consistent authoritative graph; ID/enrollment tokens receive none | **PASS locally; staged real-token proof MANUAL** |
-| Cloud | Owner identity bootstrap | Server-generated five-record transaction is idempotent and concurrent replay converges on one owner | **PASS locally** |
+| Cloud | Owner identity bootstrap | Server-generated five-record transaction is idempotent and concurrent replay converges on one owner | **PASS locally** through actual boto3 wire capture and DynamoDB Local; corrected staged real-token proof **MANUAL** |
+| Cloud | KSEC-011A condition conflict | Five-record transaction remains atomic, returns a generic response, and leaks no DynamoDB detail | **PASS locally**; corrected staged conflict proof **MANUAL** |
 | Cloud | Claim issuer denial/privacy | Missing, inconsistent, revoked, wrong-pool/client, unsupported event, and dependency outage fail closed; canaries absent from logs | **PASS locally** |
 | Cloud | Sender-constrained session | Wrong installation key, wrong device, DPoP replay rejected | **PASS** |
 | Cloud | Refresh rotation/reuse | Consumed refresh revokes its entire family | **PASS** |
