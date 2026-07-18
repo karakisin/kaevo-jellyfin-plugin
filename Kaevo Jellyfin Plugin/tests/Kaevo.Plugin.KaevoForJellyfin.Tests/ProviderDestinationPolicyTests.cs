@@ -46,6 +46,18 @@ public sealed class ProviderDestinationPolicyTests
     }
 
     [Fact]
+    public async Task ReorderedApprovedDnsSetProducesTheSameDeterministicConnectionOrder()
+    {
+        var secret = new KaevoLocalProviderSecret("http://provider.test:8989", "key", true, new[] { "192.168.40.10", "192.168.40.11" });
+        var first = await new KaevoProviderDestinationPolicy(new FakeDns("192.168.40.11", "192.168.40.10"))
+            .RevalidateAsync("sonarr", secret, new Uri("http://provider.test:8989/api/v3/system/status"), default);
+        var second = await new KaevoProviderDestinationPolicy(new FakeDns("192.168.40.10", "192.168.40.11"))
+            .RevalidateAsync("sonarr", secret, new Uri("http://provider.test:8989/api/v3/system/status"), default);
+        Assert.Equal(first, second);
+        Assert.Equal("192.168.40.10", first[0].ToString());
+    }
+
+    [Fact]
     public async Task MixedDnsResultFailsAndRebindingRequiresReapproval()
     {
         await Assert.ThrowsAnyAsync<ArgumentException>(() =>
@@ -67,6 +79,8 @@ public sealed class ProviderDestinationPolicyTests
         Assert.Throws<InvalidOperationException>(() => policy.ValidateRedirect("sonarr", secret, from, new Uri("https://192.168.40.11/base")));
         Assert.Throws<InvalidOperationException>(() => policy.ValidateRedirect("sonarr", secret, from, new Uri("http://provider.test/base")));
         Assert.Throws<InvalidOperationException>(() => policy.ValidateRedirect("sonarr", secret, from, new Uri("https://provider.test/other")));
+        Assert.Throws<InvalidOperationException>(() => policy.ValidateRedirect("sonarr", secret, from, new Uri("https://provider.test/base/%2e%2e/admin")));
+        Assert.Throws<InvalidOperationException>(() => policy.ValidateRedirect("sonarr", secret, from, new Uri("https://provider.test/base/%2fadmin")));
     }
 
     [Fact]

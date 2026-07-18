@@ -88,6 +88,13 @@ public sealed class KaevoProviderDestinationPolicy
     public Uri ValidateRedirect(string provider, KaevoLocalProviderSecret secret, Uri from, Uri location)
     {
         var target = location.IsAbsoluteUri ? location : new Uri(from, location);
+        var escapedPath = target.GetComponents(UriComponents.Path, UriFormat.UriEscaped);
+        if (escapedPath.Contains("%2e", StringComparison.OrdinalIgnoreCase)
+            || escapedPath.Contains("%2f", StringComparison.OrdinalIgnoreCase)
+            || escapedPath.Contains("%5c", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("providerRedirectRejected");
+        }
         var approved = Normalize(provider, secret.BaseUrl);
         if (!SameOrigin(approved, target) || !IsWithinBasePath(approved, target)
             || (from.Scheme == Uri.UriSchemeHttps && target.Scheme != Uri.UriSchemeHttps))
@@ -168,7 +175,7 @@ public sealed class KaevoProviderDestinationPolicy
         {
             throw new ArgumentException("providerDestinationProhibited");
         }
-        return addresses.Distinct().ToArray();
+        return addresses.Distinct().OrderBy(static value => value.ToString(), StringComparer.Ordinal).ToArray();
     }
 
     private static bool SameOrigin(Uri left, Uri right) =>
