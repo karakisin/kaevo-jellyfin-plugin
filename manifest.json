@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.44.0",
+        "changelog": "Aligns optimization with Kaevo's proven Apple playback profile by converting HEVC to H.264, refreshes Jellyfin media details after replacement, and safely supports re-optimizing a title while retaining its original backup.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.44/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "c732e5031f33cd138a4b3c02f4e6ba08",
+        "timestamp": "2026-07-18T00:45:00Z"
+      },
+      {
         "version": "0.2.43.0",
         "changelog": "Recovers safely from Jellyfin restarts by removing only confirmed interrupted Kaevo partial output, and reports the actual remux, audio, or video optimization action.",
         "targetAbi": "10.11.0.0",
