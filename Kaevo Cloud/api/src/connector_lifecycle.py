@@ -402,8 +402,13 @@ def activate_intent(
         raise LifecycleError("server_binding_invalid")
     binding_updated = dict(binding)
     binding_updated.update({"state": "active", "updated_at": _now_iso(current)})
+    audit_event = {
+        "pair": "connector_paired",
+        "rotate": "connector_rotated",
+        "recover": "connector_recovered",
+    }[operation]
     audit = prepare_audit_item(
-        scope_id=str(connector["household_id"]), event_type=f"connector_{operation}ed",
+        scope_id=str(connector["household_id"]), event_type=audit_event,
         actor_subject=str(connector["connector_id"]), actor_type="connector",
         target_id=str(connector["connector_id"]), target_type="connector",
         request_id=request_id, now=current,

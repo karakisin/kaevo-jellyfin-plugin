@@ -137,6 +137,7 @@ def test_activation_consumes_intent_in_same_transaction():
     writes = client.calls[0]["TransactItems"]
     assert len(writes) == 4
     assert writes[2]["Put"]["Item"]["state"] == "consumed"
+    assert writes[3]["Put"]["Item"]["event_type"] == "connector_rotated"
     assert writes[3]["Put"]["Item"]["actor_ref"].startswith("apr1_")
 
 
