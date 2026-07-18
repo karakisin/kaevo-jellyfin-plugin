@@ -133,3 +133,33 @@ or delete production or staging records.
 The staged proof must verify that fresh records contain only the versioned
 privacy-safe schema and that logs, responses, outputs, metrics, session records,
 and unrelated tables do not receive equivalent raw identifiers.
+
+## Operational closure
+
+KSEC-010B was operationally closed in the isolated
+`kaevo-cloud-security-stage` environment on 2026-07-18. The inspected update
+change set added one environment-specific audit-reference secret, granted exact
+`secretsmanager:GetSecretValue` access only to the API and owner-enrollment
+audit writers, and updated the three Lambdas that share the tagged application
+package. It contained no deletes, replacements, table/index changes, Cognito
+replacement, or live/dev resource references.
+
+The complete real-token suite passed 43/43 and the post-deployment controls
+passed 18/18. Synthetic enrollment, replay, DPoP denial/replay, refresh-token
+reuse, and installation revocation produced only versioned `apr1_` actor
+references. Full serialized audit items, bounded Lambda/API logs, and client
+error states contained no complete synthetic Cognito subject, email, token,
+DPoP proof, or forgery canary. Authentication and authorization behavior was
+unchanged.
+
+After the proof, synthetic Cognito users and all isolated staging table records
+returned to zero. The stack was `UPDATE_COMPLETE`, drift was `IN_SYNC`, and
+termination protection remained enabled. Evidence is retained under
+`/Users/jeffersonsumagang/KaevoSecurity/phase2-security-stage-2026-07-18/evidence-ksec-010b`;
+the final manifest is authoritative for this closure lane.
+
+Canonical audit writers currently cover owner enrollment, installation
+registration and revocation, bound-session issuance, DPoP denial/replay,
+refresh-token reuse, and connector pairing. Other inventoried security-event
+categories do not currently have canonical mutation routes; any future route
+must use the same privacy-safe helper and fail-closed behavior before release.
