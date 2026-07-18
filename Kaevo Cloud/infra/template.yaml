@@ -1,13 +1,18 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Kaevo Cloud dev backend
+Description: Kaevo Cloud backend with production identity and sender-constrained sessions
 
 Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, production]
+
   DevApiKey:
     Type: String
     NoEcho: true
-    MinLength: 16
-    Description: Temporary dev API key for write/test routes
+    Default: ""
+    Description: Non-production migration key. Ignored and omitted from the production function environment.
 
   PlaybackGrantSigningKey:
     Type: String
@@ -20,6 +25,9 @@ Parameters:
     Default: ""
     Description: Public HTTPS origin of the separate long-lived Kaevo playback relay
 
+Conditions:
+  IsProduction: !Equals [!Ref EnvironmentName, production]
+
 Globals:
   Function:
     Runtime: python3.12
@@ -29,8 +37,8 @@ Globals:
       - arm64
     Environment:
       Variables:
-        KAEVO_ENV: dev
-        DEV_API_KEY: !Ref DevApiKey
+        KAEVO_ENV: !Ref EnvironmentName
+        DEV_API_KEY: !If [IsProduction, "", !Ref DevApiKey]
         PROFILE_EVENTS_TABLE: !Ref KaevoProfileEventsTable
         PROFILE_SETTINGS_TABLE: !Ref KaevoProfileSettingsTable
         DEVICES_TABLE: !Ref KaevoDevicesTable
@@ -40,6 +48,9 @@ Globals:
         REMOTE_PAYLOADS_BUCKET: !Ref KaevoRemotePayloadsBucket
         PROFILE_AVATARS_BUCKET: !Ref KaevoProfileAvatarsBucket
         APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
+        PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
+        INSTALLATIONS_TABLE: !Ref KaevoInstallationsTable
+        SECURITY_AUDIT_TABLE: !Ref KaevoSecurityAuditTable
         PLAYBACK_GRANT_SIGNING_KEY: !Ref PlaybackGrantSigningKey
         PLAYBACK_RELAY_PUBLIC_URL: !Ref PlaybackRelayPublicUrl
 
@@ -61,6 +72,14 @@ Resources:
         "POST /v1/app-sessions/refresh":
           ThrottlingBurstLimit: 10
           ThrottlingRateLimit: 2
+      Auth:
+        Authorizers:
+          KaevoOwnerAuthorizer:
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
+              audience:
+                - !Ref KaevoUserPoolClient
+            IdentitySource: "$request.header.Authorization"
 
   KaevoProfileEventsTable:
     Type: AWS::DynamoDB::Table
@@ -138,9 +157,88 @@ Resources:
       AttributeDefinitions:
         - AttributeName: token_hash
           AttributeType: S
+        - AttributeName: family_id
+          AttributeType: S
+        - AttributeName: created_at_epoch
+          AttributeType: N
+        - AttributeName: installation_id
+          AttributeType: S
       KeySchema:
         - AttributeName: token_hash
           KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: family_id-created_at_epoch-index
+          KeySchema:
+            - AttributeName: family_id
+              KeyType: HASH
+            - AttributeName: created_at_epoch
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: installation_id-created_at_epoch-index
+          KeySchema:
+            - AttributeName: installation_id
+              KeyType: HASH
+            - AttributeName: created_at_epoch
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
+  KaevoPrincipalsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-principals
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: principal_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: principal_id
+          KeyType: HASH
+
+  KaevoInstallationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-installations
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: installation_id
+          AttributeType: S
+        - AttributeName: household_id
+          AttributeType: S
+        - AttributeName: created_at_epoch
+          AttributeType: N
+      KeySchema:
+        - AttributeName: installation_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: household_id-created_at_epoch-index
+          KeySchema:
+            - AttributeName: household_id
+              KeyType: HASH
+            - AttributeName: created_at_epoch
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  KaevoSecurityAuditTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-security-audit
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: household_id
+          AttributeType: S
+        - AttributeName: event_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: household_id
+          KeyType: HASH
+        - AttributeName: event_id
+          KeyType: RANGE
       TimeToLiveSpecification:
         AttributeName: expires_at
         Enabled: true
@@ -240,31 +338,46 @@ Resources:
   KaevoUserPool:
     Type: AWS::Cognito::UserPool
     Properties:
-      UserPoolName: kaevo-cloud-dev-users
+      UserPoolName: !Sub kaevo-cloud-${EnvironmentName}-users
       UsernameAttributes:
         - email
       AutoVerifiedAttributes:
         - email
-      MfaConfiguration: "OFF"
+      MfaConfiguration: OPTIONAL
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      WebAuthnUserVerification: required
       Policies:
         PasswordPolicy:
-          MinimumLength: 8
+          MinimumLength: 14
           RequireLowercase: true
           RequireUppercase: true
           RequireNumbers: true
-          RequireSymbols: false
+          RequireSymbols: true
 
   KaevoUserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
-      ClientName: kaevo-cloud-dev-ios-tvos
+      ClientName: !Sub kaevo-cloud-${EnvironmentName}-ios-tvos
       UserPoolId: !Ref KaevoUserPool
       GenerateSecret: false
       PreventUserExistenceErrors: ENABLED
       ExplicitAuthFlows:
-        - ALLOW_USER_PASSWORD_AUTH
         - ALLOW_USER_SRP_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_AUTH
+      AccessTokenValidity: 15
+      IdTokenValidity: 15
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      EnableTokenRevocation: true
 
   KaevoCloudApiFunction:
     Type: AWS::Serverless::Function
@@ -287,6 +400,12 @@ Resources:
             TableName: !Ref KaevoRemoteRequestsTable
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoAppSessionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoPrincipalsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoInstallationsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoSecurityAuditTable
         - S3CrudPolicy:
             BucketName: !Ref KaevoRemotePayloadsBucket
         - S3CrudPolicy:
@@ -425,6 +544,40 @@ Resources:
             Path: /v1/app-sessions/refresh
             Method: POST
 
+        RegisterInstallationV2:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/installations
+            Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
+
+        IssueBoundSessionV2:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/app-sessions
+            Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
+
+        RefreshBoundSessionV2:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/app-sessions/refresh
+            Method: POST
+
+        RevokeInstallationV2:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/installations/{installationId}/revoke
+            Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
+
         AppSessionStatus:
           Type: HttpApi
           Properties:
@@ -451,6 +604,13 @@ Resources:
           Properties:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v1/home-connectors/pairing/exchange
+            Method: POST
+
+        ExchangeHomeConnectorPairingV2:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/home-connectors/pairing/exchange
             Method: POST
 
         RegisterHomeConnector:

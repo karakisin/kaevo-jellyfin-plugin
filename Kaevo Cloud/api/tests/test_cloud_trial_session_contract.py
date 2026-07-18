@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from botocore.exceptions import ClientError
 
 
 os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
@@ -30,6 +31,42 @@ class FakeTable:
         item = self.items.get(Key[self.key_name])
         return {"Item": dict(item)} if item else {}
 
+    def update_item(self, *, Key, ExpressionAttributeValues, ReturnValues, **_):
+        item = self.items.get(Key[self.key_name])
+        if ":awaiting" in ExpressionAttributeValues:
+            valid = bool(
+                item
+                and item.get("record_type") == ExpressionAttributeValues[":record_type"]
+                and item.get("state") == ExpressionAttributeValues[":awaiting"]
+                and int(item.get("expires_at") or 0) >= ExpressionAttributeValues[":now_epoch"]
+            )
+            if not valid:
+                raise ClientError({"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem")
+            item.update({
+                "state": ExpressionAttributeValues[":consumed"],
+                "consumed_at": ExpressionAttributeValues[":now"],
+                "expires_at": ExpressionAttributeValues[":consumed_expiry"],
+            })
+            return {"Attributes": dict(item)}
+        valid = bool(
+            item
+            and item.get("auth_state") == ExpressionAttributeValues[":pairing"]
+            and item.get("pairing_code_hash") == ExpressionAttributeValues[":pairing_hash"]
+            and int(item.get("pairing_expires_at") or 0) >= ExpressionAttributeValues[":now_epoch"]
+        )
+        if not valid:
+            raise ClientError({"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem")
+        item.update({
+            "auth_state": ExpressionAttributeValues[":active"],
+            "connector_token_hash": ExpressionAttributeValues[":token_hash"],
+            "playback_grant_key": ExpressionAttributeValues[":grant_key"],
+            "paired_at": ExpressionAttributeValues[":now"],
+            "updated_at": ExpressionAttributeValues[":now"],
+        })
+        item.pop("pairing_code_hash", None)
+        item.pop("pairing_expires_at", None)
+        return {"Attributes": dict(item)}
+
 
 def event(body: dict | None = None, *, bearer: str | None = None, dev_key: str | None = None):
     headers = {}
@@ -45,10 +82,12 @@ def test_plugin_confirmed_trial_returns_one_time_hashed_app_session(monkeypatch)
     sessions = FakeTable("token_hash")
     entitlements = FakeTable("profile_id")
     remote_requests = FakeTable("request_id")
+    profile_settings = FakeTable("profile_id")
     monkeypatch.setattr(handler, "home_connectors_table", connectors)
     monkeypatch.setattr(handler, "app_sessions_table", sessions)
     monkeypatch.setattr(handler, "entitlements_table", entitlements)
     monkeypatch.setattr(handler, "remote_requests_table", remote_requests)
+    monkeypatch.setattr(handler, "profile_settings_table", profile_settings)
 
     started = handler.start_cloud_trial(event({"installation_id": "ios-installation-1"}))
     started_body = json.loads(started["body"])
@@ -92,6 +131,20 @@ def test_plugin_confirmed_trial_returns_one_time_hashed_app_session(monkeypatch)
         "queryStringParameters": {"profile_id": "another-profile"},
     })
     assert cross_profile["statusCode"] == 401
+
+    ordinary_profile_update = handler.put_profile_settings(event({
+        "settings": {"preferred_home_layout": "compact"},
+    }, bearer=activated_body["session_token"]), f"/v1/profiles/{started_body['profile_id']}/settings")
+    assert ordinary_profile_update["statusCode"] == 200
+
+    parental_policy_bypass = handler.put_profile_settings(event({
+        "settings": {
+            "profile_type": "adult",
+            "parental_controls_sync_enabled": False,
+        },
+    }, bearer=activated_body["session_token"]), f"/v1/profiles/{started_body['profile_id']}/settings")
+    assert parental_policy_bypass["statusCode"] == 503
+    assert json.loads(parental_policy_bypass["body"])["state"] == "identity_storage_unavailable"
 
     assert handler.put_entitlements(event(bearer=activated_body["session_token"]))["statusCode"] == 401
     mutation = handler.create_remote_command(event({
@@ -211,6 +264,6 @@ def test_existing_online_plugin_migrates_and_rotates_session(monkeypatch):
     assert refreshed_body["state"] == "session_refreshed"
     assert refreshed_body["session_token"] != old_token
     assert refreshed_body["session_token"] not in str(sessions.items)
-    assert handler.get_app_session_status(event(bearer=old_token))["statusCode"] == 200
+    assert handler.get_app_session_status(event(bearer=old_token))["statusCode"] == 401
     assert handler.get_app_session_status(event(bearer=refreshed_body["session_token"]))["statusCode"] == 200
     assert handler.put_entitlements(event(bearer=refreshed_body["session_token"]))["statusCode"] == 401

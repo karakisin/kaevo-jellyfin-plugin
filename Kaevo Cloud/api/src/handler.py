@@ -6,14 +6,31 @@ import json
 import os
 import re
 import secrets
+import sys
 import time
 import uuid
 from decimal import Decimal
 from datetime import datetime, timezone
+from pathlib import Path
 
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+
+# SAM loads sibling modules normally. The explicit path also keeps local
+# contract tests that import this file by spec aligned with Lambda packaging.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from security_identity import (
+    IdentityContext,
+    IdentityError,
+    authorize,
+    jwk_thumbprint,
+    new_session_material,
+    rotate_refresh_record,
+    token_hash as production_token_hash,
+    validate_public_jwk,
+    verify_dpop,
+)
 
 
 SERVICE_NAME = "kaevo-cloud"
@@ -28,7 +45,11 @@ REMOTE_REQUESTS_TABLE = os.environ.get("REMOTE_REQUESTS_TABLE")
 REMOTE_PAYLOADS_BUCKET = os.environ.get("REMOTE_PAYLOADS_BUCKET")
 PROFILE_AVATARS_BUCKET = os.environ.get("PROFILE_AVATARS_BUCKET")
 APP_SESSIONS_TABLE = os.environ.get("APP_SESSIONS_TABLE")
+PRINCIPALS_TABLE = os.environ.get("PRINCIPALS_TABLE")
+INSTALLATIONS_TABLE = os.environ.get("INSTALLATIONS_TABLE")
+SECURITY_AUDIT_TABLE = os.environ.get("SECURITY_AUDIT_TABLE")
 DEV_API_KEY = os.environ.get("DEV_API_KEY")
+KAEVO_ENV = os.environ.get("KAEVO_ENV", "dev").strip().lower()
 PLAYBACK_GRANT_SIGNING_KEY = os.environ.get("PLAYBACK_GRANT_SIGNING_KEY", "")
 PLAYBACK_RELAY_PUBLIC_URL = os.environ.get("PLAYBACK_RELAY_PUBLIC_URL", "").rstrip("/")
 
@@ -52,6 +73,9 @@ home_connectors_table = dynamodb.Table(HOME_CONNECTORS_TABLE) if HOME_CONNECTORS
 remote_requests_table = dynamodb.Table(REMOTE_REQUESTS_TABLE) if REMOTE_REQUESTS_TABLE else None
 s3_client = boto3.client("s3") if REMOTE_PAYLOADS_BUCKET or PROFILE_AVATARS_BUCKET else None
 app_sessions_table = dynamodb.Table(APP_SESSIONS_TABLE) if APP_SESSIONS_TABLE else None
+principals_table = dynamodb.Table(PRINCIPALS_TABLE) if PRINCIPALS_TABLE else None
+installations_table = dynamodb.Table(INSTALLATIONS_TABLE) if INSTALLATIONS_TABLE else None
+security_audit_table = dynamodb.Table(SECURITY_AUDIT_TABLE) if SECURITY_AUDIT_TABLE else None
 
 
 DEFAULT_PROFILE_SETTINGS = {
@@ -64,6 +88,17 @@ DEFAULT_PROFILE_SETTINGS = {
     "download_recovery_provider": "disabled",
     "download_recovery_mode": "notify_only",
     "preferred_home_layout": "standard"
+}
+
+# App sessions identify a profile, not an adult account owner. Security-sensitive
+# profile policy must therefore remain immutable until the request carries an
+# owner-scoped credential (the development key is the only such credential in
+# the current pre-production contract).
+OWNER_PROTECTED_PROFILE_SETTING_KEYS = {
+    "profile_type",
+    "parental_controls",
+    "parental_controls_sync_enabled",
+    "parental_controls_updated_at",
 }
 
 DEFAULT_ENTITLEMENTS = {
@@ -239,10 +274,14 @@ def header_value(event, name):
 
 
 def require_dev_key(event):
-    return bool(DEV_API_KEY) and hmac.compare_digest(
+    return KAEVO_ENV in {"dev", "development", "local", "test"} and bool(DEV_API_KEY) and hmac.compare_digest(
         str(header_value(event, "x-kaevo-dev-key") or ""),
         str(DEV_API_KEY)
     )
+
+
+def legacy_app_sessions_allowed():
+    return KAEVO_ENV in {"dev", "development", "local", "test"}
 
 
 def secret_hash(value):
@@ -260,6 +299,29 @@ def authenticated_app_session(event):
     token = app_bearer_token(event)
     if not token or app_sessions_table is None:
         return None
+    item = app_sessions_table.get_item(Key={"token_hash": f"access#{production_token_hash(token)}"}).get("Item")
+    if item and item.get("record_type") == "access":
+        if item.get("state") != "active" or bool_value(item.get("revoked"), False):
+            return None
+        if int(item.get("expires_at") or 0) < epoch_now():
+            return None
+        installation = installations_table.get_item(Key={"installation_id": str(item.get("installation_id") or "")}).get("Item") if installations_table else None
+        if not installation or installation.get("state") != "active" or bool_value(installation.get("revoked"), False):
+            return None
+        try:
+            verify_dpop(
+                str(header_value(event, "dpop") or ""),
+                method=method_for(event),
+                url=request_absolute_url(event),
+                expected_thumbprint=str(item.get("key_thumbprint") or ""),
+                access_token=token,
+                replay_guard=record_dpop_jti,
+            )
+        except IdentityError:
+            return None
+        return item
+    if not legacy_app_sessions_allowed():
+        return None
     item = app_sessions_table.get_item(Key={"token_hash": secret_hash(token)}).get("Item")
     if not item or item.get("record_type") != "app_session":
         return None
@@ -268,6 +330,87 @@ def authenticated_app_session(event):
     if int(item.get("expires_at") or 0) < epoch_now():
         return None
     return item
+
+
+def request_absolute_url(event):
+    forwarded_proto = str(header_value(event, "x-forwarded-proto") or "https").split(",")[0].strip()
+    host = str(header_value(event, "x-forwarded-host") or header_value(event, "host") or "").split(",")[0].strip()
+    path = str(event.get("rawPath") or event.get("path") or "/")
+    return f"{forwarded_proto}://{host}{path}"
+
+
+def record_dpop_jti(jti, expires_at):
+    if app_sessions_table is None:
+        return False
+    try:
+        app_sessions_table.put_item(
+            Item={"token_hash": f"dpop#{secret_hash(jti)}", "record_type": "dpop_replay", "expires_at": expires_at},
+            ConditionExpression="attribute_not_exists(token_hash)",
+        )
+        return True
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def authoritative_identity(event, capability, target=None):
+    if principals_table is None:
+        raise IdentityError("identity_storage_unavailable", 503)
+    context = IdentityContext.from_gateway_event(event)
+    principal = principals_table.get_item(Key={"principal_id": context.subject}, ConsistentRead=True).get("Item")
+    if not principal:
+        raise IdentityError("identity_not_registered", 401)
+    authorize(context, principal, capability, target=target, now=epoch_now())
+    return context, principal
+
+
+def require_owner_capability(event, capability, *, profile_id=""):
+    """Authorize a sensitive household action from authoritative owner records.
+
+    Development credentials are accepted only by ``require_dev_key`` in an
+    explicitly non-production environment. Production callers must present a
+    recently authenticated Gateway-verified owner identity. The requested
+    profile is checked against the principal's server-side membership list.
+    """
+    if require_dev_key(event):
+        return None, None
+    try:
+        context, principal = authoritative_identity(event, capability)
+        if profile_id:
+            authorize(
+                context,
+                principal,
+                capability,
+                target={
+                    "account_id": str(principal.get("account_id") or ""),
+                    "household_id": str(principal.get("household_id") or ""),
+                    "profile_id": profile_id,
+                },
+                now=epoch_now(),
+            )
+        return (context, principal), None
+    except IdentityError as error:
+        return None, identity_error_response(error)
+
+
+def identity_error_response(error):
+    return response(error.status_code, {"state": error.reason})
+
+
+def audit_security_event(household_id, event_type, subject, details=None):
+    if security_audit_table is None or not household_id:
+        return
+    now = epoch_now()
+    security_audit_table.put_item(Item={
+        "household_id": household_id,
+        "event_id": f"{now:010d}#{uuid.uuid4()}",
+        "event_type": event_type,
+        "subject": subject,
+        "details_json": json.dumps(details or {}, separators=(",", ":"), sort_keys=True),
+        "created_at": utc_now_iso(),
+        "expires_at": now + (400 * 24 * 60 * 60),
+    })
 
 
 def require_profile_auth(event, profile_id):
@@ -335,6 +478,21 @@ def require_connector_auth(event, connector_id):
         return False
     item = home_connectors_table.get_item(Key={"connector_id": connector_id}).get("Item")
     if not item or item.get("auth_state") != "active" or bool_value(item.get("revoked"), False):
+        return False
+    expected_thumbprint = str(item.get("key_thumbprint") or "")
+    if expected_thumbprint:
+        try:
+            verify_dpop(
+                str(header_value(event, "dpop") or ""),
+                method=method_for(event),
+                url=request_absolute_url(event),
+                expected_thumbprint=expected_thumbprint,
+                replay_guard=record_dpop_jti,
+            )
+            return True
+        except IdentityError:
+            return False
+    if KAEVO_ENV not in {"dev", "development", "local", "test"}:
         return False
     supplied = connector_bearer_token(event)
     expected = str(item.get("connector_token_hash") or "")
@@ -597,9 +755,6 @@ def put_profile_settings(event, path):
 
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "profileId is required"})
-    if not require_profile_auth(event, profile_id):
-        return response(401, {"state": "unauthorized"})
-
     body = parse_json_body(event)
 
     if body is None:
@@ -609,6 +764,18 @@ def put_profile_settings(event, path):
 
     if not isinstance(incoming_settings, dict):
         return response(400, {"state": "bad_request", "message": "settings must be an object"})
+
+    protected_updates = OWNER_PROTECTED_PROFILE_SETTING_KEYS.intersection(incoming_settings)
+    if protected_updates:
+        _, owner_error = require_owner_capability(
+            event,
+            "manage_parental_policy",
+            profile_id=profile_id,
+        )
+        if owner_error:
+            return owner_error
+    elif not require_profile_auth(event, profile_id):
+        return response(401, {"state": "unauthorized"})
 
     current_settings, current_item = load_full_profile_settings(profile_id)
 
@@ -674,8 +841,13 @@ def put_provider_settings(event):
 
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "profile_id query parameter is required"})
-    if not require_profile_auth(event, profile_id):
-        return response(401, {"state": "unauthorized"})
+    _, owner_error = require_owner_capability(
+        event,
+        "configure_providers",
+        profile_id=profile_id,
+    )
+    if owner_error:
+        return owner_error
 
     if profile_settings_table is None:
         return response(500, {"state": "server_error", "message": "profile settings table is not configured"})
@@ -753,9 +925,13 @@ def register_device(event):
         return response(401, {"state": "unauthorized"})
 
     device_id = str(body.get("device_id") or uuid.uuid4()).strip()
+    if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(device_id):
+        return response(400, {"state": "bad_request", "message": "valid device_id is required"})
     now = utc_now_iso()
 
     existing = devices_table.get_item(Key={"device_id": device_id}).get("Item")
+    if existing and not hmac.compare_digest(str(existing.get("profile_id") or ""), profile_id):
+        return response(409, {"state": "device_already_registered"})
     created_at = existing.get("created_at") if existing else now
 
     item = {
@@ -1101,7 +1277,7 @@ def public_connector_item(item):
     }
 
 
-def create_pairing_record(profile_id, connector_name):
+def create_pairing_record(profile_id, connector_name, *, account_id="", household_id=""):
     connector_id = str(uuid.uuid4())
     pairing_code = "-".join([
         secrets.token_hex(2).upper(),
@@ -1113,6 +1289,8 @@ def create_pairing_record(profile_id, connector_name):
     home_connectors_table.put_item(Item={
         "connector_id": connector_id,
         "profile_id": profile_id,
+        "account_id": account_id,
+        "household_id": household_id,
         "connector_name": str(connector_name or "Kaevo Jellyfin Plugin")[:80],
         "host_type": "jellyfin_plugin",
         "app_version": "",
@@ -1131,6 +1309,8 @@ def create_pairing_record(profile_id, connector_name):
 
 
 def start_cloud_trial(event):
+    if not legacy_app_sessions_allowed():
+        return response(410, {"state": "legacy_session_flow_disabled"})
     if home_connectors_table is None or app_sessions_table is None:
         return response(500, {"state": "server_error", "message": "Cloud trial storage is not configured"})
     body = parse_json_body(event)
@@ -1171,6 +1351,8 @@ def start_cloud_trial(event):
 
 
 def activate_cloud_trial(event):
+    if not legacy_app_sessions_allowed():
+        return response(410, {"state": "legacy_session_flow_disabled"})
     if home_connectors_table is None or app_sessions_table is None or entitlements_table is None:
         return response(500, {"state": "server_error", "message": "Cloud trial storage is not configured"})
     body = parse_json_body(event)
@@ -1198,6 +1380,31 @@ def activate_cloud_trial(event):
         return response(409, {"state": "plugin_pending", "message": "Kaevo Plugin activation is still in progress."})
 
     now_epoch = epoch_now()
+    now = utc_now_iso()
+    try:
+        activation = app_sessions_table.update_item(
+            Key={"token_hash": activation_hash},
+            ConditionExpression=(
+                "record_type = :record_type AND #state = :awaiting "
+                "AND expires_at >= :now_epoch"
+            ),
+            UpdateExpression="SET #state = :consumed, consumed_at = :now, expires_at = :consumed_expiry",
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":record_type": "trial_activation",
+                ":awaiting": "awaiting_plugin",
+                ":consumed": "consumed",
+                ":now": now,
+                ":now_epoch": now_epoch,
+                ":consumed_expiry": now_epoch + 60 * 60,
+            },
+            ReturnValues="ALL_NEW",
+        ).get("Attributes", {})
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return response(401, {"state": "activation_invalid"})
+        raise
+
     trial_expires_at = now_epoch + TRIAL_DURATION_SECONDS
     session_token = issue_app_session(
         profile_id,
@@ -1206,10 +1413,6 @@ def activate_cloud_trial(event):
         trial_expires_at,
         "plugin_confirmed_trial"
     )
-    activation["state"] = "consumed"
-    activation["consumed_at"] = utc_now_iso()
-    activation["expires_at"] = now_epoch + 60 * 60
-    app_sessions_table.put_item(Item=activation)
 
     entitlement = {
         **DEFAULT_ENTITLEMENTS,
@@ -1242,6 +1445,8 @@ def activate_cloud_trial(event):
 
 
 def issue_app_session(profile_id, connector_id, installation_id_hash, expires_at, source):
+    if not legacy_app_sessions_allowed():
+        raise RuntimeError("portable app sessions are disabled outside non-production environments")
     session_token = secrets.token_urlsafe(48)
     now = utc_now_iso()
     app_sessions_table.put_item(Item={
@@ -1270,6 +1475,211 @@ def app_session_expiration(entitlement):
     except (TypeError, ValueError):
         return maximum
     return min(maximum, entitlement_expiration)
+
+
+def register_installation_v2(event):
+    if installations_table is None:
+        return response(503, {"state": "installation_storage_unavailable"})
+    try:
+        identity, _ = authoritative_identity(event, "register_device")
+    except IdentityError as error:
+        return identity_error_response(error)
+    body = parse_json_body(event)
+    if body is None:
+        return response(400, {"state": "bad_request"})
+    installation_id = str(body.get("installation_id") or "").strip()
+    device_id = str(body.get("device_id") or "").strip()
+    if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(installation_id) or not SAFE_PLAYBACK_IDENTIFIER.fullmatch(device_id):
+        return response(400, {"state": "invalid_installation"})
+    try:
+        public_jwk = validate_public_jwk(body.get("public_jwk") or {})
+        thumbprint = jwk_thumbprint(public_jwk)
+        verify_dpop(
+            str(header_value(event, "dpop") or ""),
+            method=method_for(event),
+            url=request_absolute_url(event),
+            expected_thumbprint=thumbprint,
+            replay_guard=record_dpop_jti,
+        )
+    except IdentityError as error:
+        return identity_error_response(error)
+    now = epoch_now()
+    item = {
+        "installation_id": installation_id,
+        "device_id": device_id,
+        "principal_id": identity.subject,
+        "account_id": identity.account_id,
+        "household_id": identity.household_id,
+        "public_jwk_json": json.dumps(public_jwk, separators=(",", ":"), sort_keys=True),
+        "key_thumbprint": thumbprint,
+        "state": "active",
+        "revoked": False,
+        "created_at_epoch": now,
+        "created_at": utc_now_iso(),
+        "last_seen_at": utc_now_iso(),
+    }
+    try:
+        installations_table.put_item(Item=item, ConditionExpression="attribute_not_exists(installation_id)")
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        existing = installations_table.get_item(Key={"installation_id": installation_id}, ConsistentRead=True).get("Item")
+        same_binding = bool(existing) and all(
+            hmac.compare_digest(str(existing.get(key) or ""), str(item.get(key) or ""))
+            for key in ("principal_id", "account_id", "household_id", "device_id", "key_thumbprint")
+        )
+        if not same_binding or existing.get("state") != "active":
+            return response(409, {"state": "installation_binding_conflict"})
+        item = existing
+    audit_security_event(identity.household_id, "installation_registered", identity.subject, {"installation_id": installation_id})
+    return response(201, {
+        "state": "installation_registered",
+        "installation_id": installation_id,
+        "device_id": device_id,
+        "key_thumbprint": thumbprint,
+    })
+
+
+def issue_bound_session_v2(event):
+    if app_sessions_table is None or installations_table is None:
+        return response(503, {"state": "session_storage_unavailable"})
+    try:
+        identity, _ = authoritative_identity(event, "browse")
+    except IdentityError as error:
+        return identity_error_response(error)
+    body = parse_json_body(event)
+    installation_id = str((body or {}).get("installation_id") or "").strip()
+    installation = installations_table.get_item(Key={"installation_id": installation_id}, ConsistentRead=True).get("Item")
+    if not installation or installation.get("state") != "active" or bool_value(installation.get("revoked"), False):
+        return response(404, {"state": "installation_not_found"})
+    if not all(hmac.compare_digest(str(installation.get(key) or ""), expected) for key, expected in (
+        ("principal_id", identity.subject), ("account_id", identity.account_id), ("household_id", identity.household_id)
+    )):
+        return response(404, {"state": "installation_not_found"})
+    try:
+        verify_dpop(
+            str(header_value(event, "dpop") or ""),
+            method=method_for(event),
+            url=request_absolute_url(event),
+            expected_thumbprint=str(installation.get("key_thumbprint") or ""),
+            replay_guard=record_dpop_jti,
+        )
+    except IdentityError as error:
+        return identity_error_response(error)
+    access, refresh, access_token, refresh_token = new_session_material(identity, installation)
+    app_sessions_table.put_item(Item=access)
+    app_sessions_table.put_item(Item=refresh)
+    audit_security_event(identity.household_id, "session_issued", identity.subject, {
+        "family_id": access["family_id"], "installation_id": installation_id
+    })
+    return response(201, {
+        "state": "session_issued",
+        # OAuth token_type protocol label, not a credential.
+        "token_type": "DPoP",  # nosec B105
+        "access_token": access_token,
+        "access_expires_at": access["expires_at"],
+        "refresh_token": refresh_token,
+        "refresh_expires_at": refresh["expires_at"],
+        "installation_id": installation_id,
+    })
+
+
+def revoke_session_family(family_id, reason):
+    if app_sessions_table is None or not family_id:
+        return 0
+    records = app_sessions_table.query(
+        IndexName="family_id-created_at_epoch-index",
+        KeyConditionExpression=Key("family_id").eq(family_id),
+    ).get("Items", [])
+    now = epoch_now()
+    for item in records:
+        item["state"] = "revoked"
+        item["revoked"] = True
+        item["revoked_reason"] = reason
+        item["revoked_at_epoch"] = now
+        item["expires_at"] = min(int(item.get("expires_at") or now), now)
+        app_sessions_table.put_item(Item=item)
+    return len(records)
+
+
+def refresh_bound_session_v2(event):
+    if app_sessions_table is None or installations_table is None:
+        return response(503, {"state": "session_storage_unavailable"})
+    body = parse_json_body(event)
+    refresh_token = str((body or {}).get("refresh_token") or "").strip()
+    if not refresh_token:
+        return response(400, {"state": "refresh_token_required"})
+    key = f"refresh#{production_token_hash(refresh_token)}"
+    record = app_sessions_table.get_item(Key={"token_hash": key}, ConsistentRead=True).get("Item")
+    if not record:
+        return response(401, {"state": "invalid_refresh"})
+    if record.get("state") != "active":
+        revoke_session_family(str(record.get("family_id") or ""), "refresh_token_reuse")
+        audit_security_event(str(record.get("household_id") or ""), "refresh_reuse_detected", str(record.get("principal_id") or ""), {
+            "family_id": str(record.get("family_id") or ""), "installation_id": str(record.get("installation_id") or "")
+        })
+        return response(401, {"state": "session_family_revoked"})
+    installation_id = str(record.get("installation_id") or "")
+    installation = installations_table.get_item(Key={"installation_id": installation_id}, ConsistentRead=True).get("Item")
+    if not installation or installation.get("state") != "active" or bool_value(installation.get("revoked"), False):
+        revoke_session_family(str(record.get("family_id") or ""), "installation_revoked")
+        return response(401, {"state": "installation_revoked"})
+    try:
+        verify_dpop(
+            str(header_value(event, "dpop") or ""),
+            method=method_for(event),
+            url=request_absolute_url(event),
+            expected_thumbprint=str(record.get("key_thumbprint") or ""),
+            replay_guard=record_dpop_jti,
+        )
+        access, next_refresh, access_token, next_refresh_token, consumed = rotate_refresh_record(record)
+        app_sessions_table.put_item(
+            Item=consumed,
+            ConditionExpression="#state = :active",
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={":active": "active"},
+        )
+    except IdentityError as error:
+        return identity_error_response(error)
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            revoke_session_family(str(record.get("family_id") or ""), "refresh_token_reuse")
+            return response(401, {"state": "session_family_revoked"})
+        raise
+    app_sessions_table.put_item(Item=access)
+    app_sessions_table.put_item(Item=next_refresh)
+    return response(200, {
+        "state": "session_refreshed",
+        # OAuth token_type protocol label, not a credential.
+        "token_type": "DPoP",  # nosec B105
+        "access_token": access_token,
+        "access_expires_at": access["expires_at"],
+        "refresh_token": next_refresh_token,
+        "refresh_expires_at": next_refresh["expires_at"],
+    })
+
+
+def revoke_installation_v2(event, path):
+    installation_id = path.removeprefix("/v2/installations/").removesuffix("/revoke").strip("/")
+    try:
+        identity, _ = authoritative_identity(event, "revoke_device")
+    except IdentityError as error:
+        return identity_error_response(error)
+    installation = installations_table.get_item(Key={"installation_id": installation_id}, ConsistentRead=True).get("Item") if installations_table else None
+    if not installation or not hmac.compare_digest(str(installation.get("household_id") or ""), identity.household_id):
+        return response(404, {"state": "installation_not_found"})
+    installation["state"] = "revoked"
+    installation["revoked"] = True
+    installation["revoked_at"] = utc_now_iso()
+    installations_table.put_item(Item=installation)
+    records = app_sessions_table.query(
+        IndexName="installation_id-created_at_epoch-index",
+        KeyConditionExpression=Key("installation_id").eq(installation_id),
+    ).get("Items", []) if app_sessions_table else []
+    for family_id in {str(item.get("family_id") or "") for item in records}:
+        revoke_session_family(family_id, "installation_revoked")
+    audit_security_event(identity.household_id, "installation_revoked", identity.subject, {"installation_id": installation_id})
+    return response(200, {"state": "installation_revoked", "installation_id": installation_id})
 
 
 def migrate_existing_app_session(event):
@@ -1327,6 +1737,8 @@ def migrate_existing_app_session(event):
 
 
 def refresh_app_session(event):
+    if not legacy_app_sessions_allowed():
+        return response(410, {"state": "legacy_session_flow_disabled"})
     session = authenticated_app_session(event)
     if not session:
         return response(401, {"state": "unauthorized"})
@@ -1346,7 +1758,9 @@ def refresh_app_session(event):
         "session_rotation"
     )
     session["rotated_at"] = utc_now_iso()
-    session["expires_at"] = min(int(session.get("expires_at") or expires_at), epoch_now() + 24 * 60 * 60)
+    session["state"] = "rotated"
+    session["revoked"] = True
+    session["expires_at"] = epoch_now()
     app_sessions_table.put_item(Item=session)
     return response(200, {
         "state": "session_refreshed",
@@ -1387,25 +1801,97 @@ def revoke_app_session(event):
 
 
 def start_connector_pairing(event):
+    identity = None
     if not require_dev_key(event):
-        return response(401, {"state": "unauthorized"})
+        try:
+            identity, _ = authoritative_identity(event, "pair_connector")
+        except IdentityError as error:
+            return identity_error_response(error)
     if home_connectors_table is None:
         return response(500, {"state": "server_error", "message": "home connectors table is not configured"})
     body = parse_json_body(event)
     if body is None:
         return response(400, {"state": "bad_request", "message": "invalid JSON body"})
-    profile_id = str(body.get("profile_id") or "").strip()
+    profile_id = identity.profile_id if identity else str(body.get("profile_id") or "").strip()
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "profile_id is required"})
     connector_id, pairing_code, expires_at = create_pairing_record(
         profile_id,
-        body.get("connector_name")
+        body.get("connector_name"),
+        account_id=identity.account_id if identity else "",
+        household_id=identity.household_id if identity else "",
     )
     return response(201, {
         "state": "pairing_created",
         "connector_id": connector_id,
         "pairing_code": pairing_code,
         "expires_at": expires_at
+    })
+
+
+def exchange_connector_pairing_v2(event):
+    if home_connectors_table is None:
+        return response(503, {"state": "connector_storage_unavailable"})
+    body = parse_json_body(event)
+    connector_id = str((body or {}).get("connector_id") or "").strip()
+    pairing_code = str((body or {}).get("pairing_code") or "").strip().upper()
+    if not connector_id or not pairing_code:
+        return response(400, {"state": "bad_request"})
+    try:
+        public_jwk = validate_public_jwk((body or {}).get("public_jwk") or {})
+        thumbprint = jwk_thumbprint(public_jwk)
+        verify_dpop(
+            str(header_value(event, "dpop") or ""),
+            method=method_for(event),
+            url=request_absolute_url(event),
+            expected_thumbprint=thumbprint,
+            replay_guard=record_dpop_jti,
+        )
+    except IdentityError as error:
+        return identity_error_response(error)
+    playback_grant_key = secrets.token_urlsafe(32)
+    now = utc_now_iso()
+    try:
+        item = home_connectors_table.update_item(
+            Key={"connector_id": connector_id},
+            ConditionExpression=(
+                "auth_state = :pairing AND pairing_code_hash = :pairing_hash "
+                "AND pairing_expires_at >= :now_epoch AND attribute_not_exists(key_thumbprint)"
+            ),
+            UpdateExpression=(
+                "SET auth_state = :active, public_jwk_json = :public_jwk, "
+                "key_thumbprint = :thumbprint, credential_version = :credential_version, "
+                "playback_grant_key = :grant_key, paired_at = :now, updated_at = :now "
+                "REMOVE pairing_code_hash, pairing_expires_at, connector_token_hash"
+            ),
+            ExpressionAttributeValues={
+                ":pairing": "pairing",
+                ":pairing_hash": secret_hash(pairing_code),
+                ":now_epoch": epoch_now(),
+                ":active": "active",
+                ":public_jwk": json.dumps(public_jwk, separators=(",", ":"), sort_keys=True),
+                ":thumbprint": thumbprint,
+                ":credential_version": 1,
+                ":grant_key": playback_grant_key,
+                ":now": now,
+            },
+            ReturnValues="ALL_NEW",
+        ).get("Attributes", {})
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return response(401, {"state": "pairing_invalid"})
+        raise
+    audit_security_event(str(item.get("household_id") or item.get("profile_id") or ""), "connector_paired", str(item.get("profile_id") or ""), {
+        "connector_id": connector_id, "credential_version": 1
+    })
+    return response(200, {
+        "state": "paired",
+        "connector_id": connector_id,
+        "profile_id": item.get("profile_id"),
+        "credential_type": "ES256_DPOP",
+        "credential_version": 1,
+        "key_thumbprint": thumbprint,
+        "playback_grant_key": playback_grant_key,
     })
 
 
@@ -1419,26 +1905,38 @@ def exchange_connector_pairing(event):
     pairing_code = str(body.get("pairing_code") or "").strip().upper()
     if not connector_id or not pairing_code:
         return response(400, {"state": "bad_request", "message": "connector_id and pairing_code are required"})
-    item = home_connectors_table.get_item(Key={"connector_id": connector_id}).get("Item")
-    valid = (
-        item
-        and item.get("auth_state") == "pairing"
-        and int(item.get("pairing_expires_at") or 0) >= epoch_now()
-        and hmac.compare_digest(secret_hash(pairing_code), str(item.get("pairing_code_hash") or ""))
-    )
-    if not valid:
-        return response(401, {"state": "pairing_invalid"})
     connector_token = secrets.token_urlsafe(32)
     playback_grant_key = secrets.token_urlsafe(32)
     now = utc_now_iso()
-    item["auth_state"] = "active"
-    item["connector_token_hash"] = secret_hash(connector_token)
-    item["playback_grant_key"] = playback_grant_key
-    item["paired_at"] = now
-    item["updated_at"] = now
-    item.pop("pairing_code_hash", None)
-    item.pop("pairing_expires_at", None)
-    home_connectors_table.put_item(Item=item)
+    try:
+        item = home_connectors_table.update_item(
+            Key={"connector_id": connector_id},
+            ConditionExpression=(
+                "auth_state = :pairing AND pairing_code_hash = :pairing_hash "
+                "AND pairing_expires_at >= :now_epoch"
+            ),
+            UpdateExpression=(
+                "SET auth_state = :active, connector_token_hash = :token_hash, "
+                "playback_grant_key = :grant_key, paired_at = :now, updated_at = :now "
+                "REMOVE pairing_code_hash, pairing_expires_at"
+            ),
+            ExpressionAttributeValues={
+                ":pairing": "pairing",
+                ":pairing_hash": secret_hash(pairing_code),
+                ":now_epoch": epoch_now(),
+                ":active": "active",
+                ":token_hash": secret_hash(connector_token),
+                ":grant_key": playback_grant_key,
+                ":now": now,
+            },
+            ReturnValues="ALL_NEW",
+        ).get("Attributes", {})
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return response(401, {"state": "pairing_invalid"})
+        raise
+    if not item:
+        return response(401, {"state": "pairing_invalid"})
     return response(200, {
         "state": "paired",
         "connector_id": connector_id,
@@ -1449,16 +1947,24 @@ def exchange_connector_pairing(event):
 
 
 def revoke_home_connector(event, path):
+    identity = None
     if not require_dev_key(event):
-        return response(401, {"state": "unauthorized"})
+        try:
+            identity, _ = authoritative_identity(event, "revoke_connector")
+        except IdentityError as error:
+            return identity_error_response(error)
     connector_id = path.removeprefix("/v1/home-connectors/").removesuffix("/revoke").strip("/")
     item = home_connectors_table.get_item(Key={"connector_id": connector_id}).get("Item") if home_connectors_table else None
     if not item:
+        return response(404, {"state": "not_found"})
+    if identity and not hmac.compare_digest(str(item.get("profile_id") or ""), identity.profile_id):
         return response(404, {"state": "not_found"})
     item["revoked"] = True
     item["auth_state"] = "revoked"
     item["updated_at"] = utc_now_iso()
     item.pop("connector_token_hash", None)
+    item.pop("public_jwk_json", None)
+    item.pop("key_thumbprint", None)
     home_connectors_table.put_item(Item=item)
     return response(200, {"state": "revoked", "connector_id": connector_id})
 
@@ -1484,6 +1990,8 @@ def register_home_connector(event):
     now_epoch = epoch_now()
 
     existing = home_connectors_table.get_item(Key={"connector_id": connector_id}).get("Item")
+    if not existing or not hmac.compare_digest(str(existing.get("profile_id") or ""), profile_id):
+        return response(403, {"state": "connector_profile_mismatch"})
     created_at = existing.get("created_at") if existing else now
 
     capabilities = body.get("capabilities") if isinstance(body.get("capabilities"), list) else [
@@ -1551,7 +2059,11 @@ def heartbeat_home_connector(event, path):
 
     existing = home_connectors_table.get_item(Key={"connector_id": connector_id}).get("Item")
 
-    profile_id = str(body.get("profile_id") or (existing or {}).get("profile_id") or "").strip()
+    bound_profile_id = str((existing or {}).get("profile_id") or "").strip()
+    requested_profile_id = str(body.get("profile_id") or bound_profile_id).strip()
+    if not bound_profile_id or not hmac.compare_digest(bound_profile_id, requested_profile_id):
+        return response(403, {"state": "connector_profile_mismatch"})
+    profile_id = bound_profile_id
 
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "profile_id is required for first heartbeat"})
@@ -2382,28 +2894,12 @@ def create_remote_command(event):
         "jellyfin.playback_started",
         "jellyfin.playback_progress",
         "jellyfin.playback_stopped",
-        "jellyfin.mark_played",
-        "jellyfin.mark_unplayed",
-        "jellyfin.favorite",
-        "jellyfin.unfavorite",
-        "jellyfin.delete_item",
         "provider.health",
         "optimizer.scan",
         "optimizer.plan_remux",
-        "optimizer.execute_remux",
         "optimizer.job_status",
         "optimizer.jobs",
-        "optimizer.reorder_job",
-        "optimizer.cancel_job",
-        "optimizer.cleanup_interrupted",
-        "optimizer.pause_job",
-        "optimizer.resume_job",
-        "seerr.create_request",
-        "seerr.cancel_request",
         "sonarr.episode_inventory",
-        "sonarr.search_episodes",
-        "sonarr.cancel_episodes",
-        "sonarr.remove_episode_files"
     }
     if not require_dev_key(event):
         if operation not in profile_authorized_operations or not require_profile_auth(event, profile_id):
@@ -2471,10 +2967,23 @@ def create_playback_grant(event):
     mode = str(body.get("mode") or "").strip().lower()
     if not profile_id or not SAFE_PLAYBACK_IDENTIFIER.fullmatch(profile_id):
         return response(400, {"state": "bad_request", "message": "invalid profile_id"})
-    if not require_profile_auth(event, profile_id):
-        return response(401, {"state": "unauthorized"})
+    app_session = None
+    if not require_dev_key(event):
+        app_session = authenticated_app_session(event)
+        if not (
+            app_session
+            and hmac.compare_digest(str(app_session.get("profile_id") or ""), profile_id)
+        ):
+            return response(401, {"state": "unauthorized"})
     if not device_id or not SAFE_PLAYBACK_IDENTIFIER.fullmatch(device_id):
         return response(400, {"state": "bad_request", "message": "invalid device_id"})
+    if (
+        app_session
+        and app_session.get("record_type") == "access"
+        and not hmac.compare_digest(str(app_session.get("device_id") or ""), device_id)
+    ):
+        # Deliberately opaque: do not reveal whether another installation exists.
+        return response(404, {"state": "target_not_found"})
     if not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
         return response(400, {"state": "bad_request", "message": "invalid item_id"})
     if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(media_source_id):
@@ -2580,11 +3089,13 @@ def claim_remote_request(event):
         return response(200, {"state": "empty"})
 
     for candidate in items:
+        if int(candidate.get("expires_at") or 0) < epoch_now():
+            continue
         now = utc_now_iso()
         try:
             claimed = remote_requests_table.update_item(
                 Key={"request_id": candidate["request_id"]},
-                ConditionExpression="#status = :pending",
+                ConditionExpression="#status = :pending AND expires_at >= :now_epoch",
                 UpdateExpression=(
                     "SET #status = :in_progress, claimed_at = :now, updated_at = :now, "
                     "status_created_at = :status_created_at"
@@ -2594,6 +3105,7 @@ def claim_remote_request(event):
                     ":pending": "pending",
                     ":in_progress": "in_progress",
                     ":now": now,
+                    ":now_epoch": epoch_now(),
                     ":status_created_at": status_sort_key("in_progress", now, candidate["request_id"]),
                 },
                 ReturnValues="ALL_NEW",
@@ -2639,6 +3151,28 @@ def complete_remote_request(event, path):
         return response(403, {"state": "forbidden", "message": "connector_id mismatch"})
 
     now = utc_now_iso()
+    try:
+        item = remote_requests_table.update_item(
+            Key={"request_id": request_id},
+            ConditionExpression="#status = :in_progress",
+            UpdateExpression=(
+                "SET #status = :completing, updated_at = :now, "
+                "status_created_at = :status_created_at"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":in_progress": "in_progress",
+                ":completing": "completing",
+                ":now": now,
+                ":status_created_at": status_sort_key("completing", now, request_id),
+            },
+            ReturnValues="ALL_NEW",
+        ).get("Attributes", {})
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return response(409, {"state": "request_not_in_progress", "request_id": request_id})
+        raise
+
     item["status"] = "completed"
     item["completed_at"] = now
     item["updated_at"] = now
@@ -2684,7 +3218,17 @@ def complete_remote_request(event, path):
         item.pop("response_s3_key", None)
         item.pop("response_encoding", None)
 
-    remote_requests_table.put_item(Item=item)
+    try:
+        remote_requests_table.put_item(
+            Item=item,
+            ConditionExpression="#status = :completing",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={":completing": "completing"},
+        )
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return response(409, {"state": "request_not_completing", "request_id": request_id})
+        raise
 
     return response(200, {
         "state": "completed",
@@ -2719,16 +3263,32 @@ def fail_remote_request(event, path):
         return response(403, {"state": "forbidden", "message": "connector_id mismatch"})
 
     now = utc_now_iso()
-    item["status"] = "failed"
-    item["failed_at"] = now
-    item["updated_at"] = now
-    item["status_created_at"] = status_sort_key("failed", now, request_id)
-    item["error_json"] = json.dumps({
+    error_json = json.dumps({
         "message": str(body.get("message") or "remote request failed"),
         "details": body.get("details") if isinstance(body.get("details"), dict) else {}
     }, separators=(",", ":"))
-
-    remote_requests_table.put_item(Item=item)
+    try:
+        item = remote_requests_table.update_item(
+            Key={"request_id": request_id},
+            ConditionExpression="#status = :in_progress",
+            UpdateExpression=(
+                "SET #status = :failed, failed_at = :now, updated_at = :now, "
+                "status_created_at = :status_created_at, error_json = :error_json"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":in_progress": "in_progress",
+                ":failed": "failed",
+                ":now": now,
+                ":status_created_at": status_sort_key("failed", now, request_id),
+                ":error_json": error_json,
+            },
+            ReturnValues="ALL_NEW",
+        ).get("Attributes", {})
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return response(409, {"state": "request_not_in_progress", "request_id": request_id})
+        raise
 
     return response(200, {
         "state": "failed",
@@ -2899,6 +3459,10 @@ def lambda_handler(event, context):
                 "/v1/app-sessions/refresh",
                 "/v1/app-sessions/status",
                 "/v1/app-sessions/revoke",
+                "/v2/installations",
+                "/v2/installations/{installationId}/revoke",
+                "/v2/app-sessions",
+                "/v2/app-sessions/refresh",
                 "/v1/home-connectors/pairing/start",
                 "/v1/home-connectors/pairing/exchange",
                 "/v1/home-connectors/register",
@@ -2942,6 +3506,18 @@ def lambda_handler(event, context):
 
     if method == "POST" and path == "/v1/app-sessions/revoke":
         return revoke_app_session(event)
+
+    if method == "POST" and path == "/v2/installations":
+        return register_installation_v2(event)
+
+    if method == "POST" and path.startswith("/v2/installations/") and path.endswith("/revoke"):
+        return revoke_installation_v2(event, path)
+
+    if method == "POST" and path == "/v2/app-sessions":
+        return issue_bound_session_v2(event)
+
+    if method == "POST" and path == "/v2/app-sessions/refresh":
+        return refresh_bound_session_v2(event)
 
     if method == "POST" and path == "/v1/events":
         return save_event(event)
@@ -2993,6 +3569,9 @@ def lambda_handler(event, context):
 
     if method == "POST" and path == "/v1/home-connectors/pairing/exchange":
         return exchange_connector_pairing(event)
+
+    if method == "POST" and path == "/v2/home-connectors/pairing/exchange":
+        return exchange_connector_pairing_v2(event)
 
     if method == "POST" and path.startswith("/v1/home-connectors/") and path.endswith("/revoke"):
         return revoke_home_connector(event, path)

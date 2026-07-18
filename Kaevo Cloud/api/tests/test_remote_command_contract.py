@@ -372,7 +372,8 @@ def test_playback_progress_is_identifier_and_position_bound():
 
 def test_remote_command_route_is_declared_in_sam_template():
     template = (HANDLER_PATH.parents[2] / "infra" / "template.yaml").read_text()
-    assert "DEV_API_KEY: !Ref DevApiKey" in template
+    assert 'DEV_API_KEY: !If [IsProduction, "", !Ref DevApiKey]' in template
+    assert "KaevoOwnerAuthorizer:" in template
     assert "Path: /v1/remote-commands" in template
     route_block = template.split("Path: /v1/remote-commands", 1)[1].split("\n\n", 1)[0]
     assert "Method: POST" in route_block

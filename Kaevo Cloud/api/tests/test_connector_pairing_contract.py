@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from botocore.exceptions import ClientError
 
 
 os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
@@ -28,6 +29,27 @@ class FakeTable:
     def get_item(self, *, Key):
         item = self.items.get(Key["connector_id"])
         return {"Item": dict(item)} if item else {}
+
+    def update_item(self, *, Key, ExpressionAttributeValues, ReturnValues, **_):
+        item = self.items.get(Key["connector_id"])
+        valid = bool(
+            item
+            and item.get("auth_state") == ExpressionAttributeValues[":pairing"]
+            and item.get("pairing_code_hash") == ExpressionAttributeValues[":pairing_hash"]
+            and int(item.get("pairing_expires_at") or 0) >= ExpressionAttributeValues[":now_epoch"]
+        )
+        if not valid:
+            raise ClientError({"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem")
+        item.update({
+            "auth_state": ExpressionAttributeValues[":active"],
+            "connector_token_hash": ExpressionAttributeValues[":token_hash"],
+            "playback_grant_key": ExpressionAttributeValues[":grant_key"],
+            "paired_at": ExpressionAttributeValues[":now"],
+            "updated_at": ExpressionAttributeValues[":now"],
+        })
+        item.pop("pairing_code_hash", None)
+        item.pop("pairing_expires_at", None)
+        return {"Attributes": dict(item)}
 
 
 def event(body: dict, *, dev_key: str | None = None, connector_token: str | None = None):
@@ -88,3 +110,66 @@ def test_wrong_token_and_revoked_connector_are_rejected(monkeypatch):
     )
     assert revoked["statusCode"] == 200
     assert not handler.require_connector_auth(event({}, connector_token="correct-token"), connector_id)
+
+
+def test_legacy_connector_bearer_is_rejected_in_production(monkeypatch):
+    table = FakeTable()
+    monkeypatch.setattr(handler, "home_connectors_table", table)
+    monkeypatch.setattr(handler, "KAEVO_ENV", "production")
+    connector_id = "legacy-connector"
+    table.put_item(Item={
+        "connector_id": connector_id,
+        "profile_id": "profile-1",
+        "auth_state": "active",
+        "revoked": False,
+        "connector_token_hash": handler.secret_hash("portable-connector-token"),
+    })
+    assert not handler.require_connector_auth(
+        event({}, connector_token="portable-connector-token"),
+        connector_id,
+    )
+
+
+def test_pairing_exchange_is_atomic_under_replay(monkeypatch):
+    table = FakeTable()
+    monkeypatch.setattr(handler, "home_connectors_table", table)
+    connector_id = "connector-race"
+    code = "AAAA-BBBB-CCCC"
+    table.put_item(Item={
+        "connector_id": connector_id,
+        "profile_id": "profile-1",
+        "auth_state": "pairing",
+        "pairing_code_hash": handler.secret_hash(code),
+        "pairing_expires_at": handler.epoch_now() + 60,
+    })
+    first = handler.exchange_connector_pairing(event({"connector_id": connector_id, "pairing_code": code}))
+    second = handler.exchange_connector_pairing(event({"connector_id": connector_id, "pairing_code": code}))
+    assert first["statusCode"] == 200
+    assert second["statusCode"] == 401
+
+
+def test_paired_connector_cannot_rebind_to_another_profile(monkeypatch):
+    table = FakeTable()
+    monkeypatch.setattr(handler, "home_connectors_table", table)
+    connector_id = "connector-bound"
+    connector_token = "correct-token"
+    table.put_item(Item={
+        "connector_id": connector_id,
+        "profile_id": "profile-1",
+        "auth_state": "active",
+        "revoked": False,
+        "connector_token_hash": handler.secret_hash(connector_token),
+    })
+
+    registration = handler.register_home_connector(event({
+        "connector_id": connector_id,
+        "profile_id": "profile-2",
+    }, connector_token=connector_token))
+    assert registration["statusCode"] == 403
+
+    heartbeat = handler.heartbeat_home_connector(event({
+        "connector_id": connector_id,
+        "profile_id": "profile-2",
+    }, connector_token=connector_token), f"/v1/home-connectors/{connector_id}/heartbeat")
+    assert heartbeat["statusCode"] == 403
+    assert table.items[connector_id]["profile_id"] == "profile-1"
