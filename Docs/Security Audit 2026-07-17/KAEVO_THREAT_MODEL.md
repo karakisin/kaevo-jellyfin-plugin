@@ -87,6 +87,7 @@ Primary boundaries:
 14. Cognito custom attributes, client metadata, request bodies, and ID tokens are never household authority; Kaevo claims are issued only into access tokens after the complete DynamoDB identity graph agrees.
 15. A missing principal is never promoted during token generation. Initial owner authority is created only by the throttled, enrollment-client-only, server-generated atomic bootstrap.
 16. Signed-token lifetime does not delay application revocation: every protected human request compares current principal state, relationships, role, and `authz_version` before capabilities are evaluated.
+17. A Home server is immutably bound to one environment/account/household/connector until a recent owner completes explicit destructive unpair; rotation and recovery can only advance the accepted P-256 credential version and can never move the server or restore an old key.
 
 ## Residual architectural decision
 

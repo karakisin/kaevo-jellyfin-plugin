@@ -79,6 +79,22 @@ not silently upgraded. Non-development environments return
 `lifecycle_upgrade_required`; a recently authenticated owner must perform a new
 lifecycle enrollment. No production migration is authorized by this candidate.
 
-KSEC-012A remains open until the tagged candidate passes isolated AWS staging,
-including pairing, rotation, old-key rejection, recovery, revocation, atomic
-audit inspection, cross-tenant denial, restart recovery, and complete cleanup.
+## Isolated staged proof and closure
+
+Candidate `kaevo-security-candidate-2026-07-18-connector-lifecycle-v2`
+(`7933a14dee1d151c2a20afa9cda7631c995fa679`) passed the isolated
+`kaevo-cloud-security-stage` lifecycle proof on 2026-07-18. All 26 checks
+passed: initial pairing, one-time intent consumption, immutable binding,
+rotation, immediate stale-key/version denial, owner-plus-local recovery,
+cross-household denial, sender-constrained typed command claim/completion,
+terminal replay denial, revocation, destructive unpair, privacy-safe atomic
+audit evidence, and cleanup.
+
+After cleanup, all 13 staging tables and the Cognito user pool contained zero
+synthetic records, the stack was `UPDATE_COMPLETE`, drift was `IN_SYNC`, and
+termination protection remained enabled. No live Home Server, provider, media,
+production stack, or existing environment was used or changed.
+
+KSEC-012A is operationally closed for this isolated staged milestone. Production
+migration, legacy credential retirement, Plugin installation, and physical-iPhone
+connection remain separately gated.

@@ -60,6 +60,7 @@ Legend: **PASS** verified this audit; **BLOCKED** requires production architectu
 | Stolen access token from another device | Wrong DPoP key/device rejected | **PASS locally** |
 | Reused refresh token | Entire token family revoked | **PASS locally** |
 | Revoked connector/app session | Every protected route rejects immediately | **PASS for identity/connector contracts; staged route sweep MANUAL** |
+| Connector pairing, rotation, recovery, revocation, and unpair | Immutable binding, monotonic versions, current-key-only access, atomic privacy-safe audit | **PASS in isolated AWS staging: 26/26; cleanup zero** |
 | Development key in production | Deployment/build gate fails | **PASS by Release scan, code, IaC, and adversarial test; console drift MANUAL** |
 
 ## Network, relay, and SSRF gates
