@@ -32,6 +32,30 @@ public sealed class ProviderResponseSecurityTests
             KaevoCloudConnectorService.ReadBoundedAsync(new StreamContent(new StalledStream()), 1024, cancellation.Token));
     }
 
+    [Fact]
+    public async Task StalledBodyHonorsIndependentIdleDeadline()
+    {
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            KaevoCloudConnectorService.ReadBoundedAsync(
+                new StreamContent(new StalledStream()),
+                1024,
+                default,
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromMilliseconds(25)));
+    }
+
+    [Fact]
+    public async Task EndlessSlowBodyHonorsIndependentTotalDeadline()
+    {
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            KaevoCloudConnectorService.ReadBoundedAsync(
+                new StreamContent(new SlowByteStream()),
+                1024,
+                default,
+                TimeSpan.FromMilliseconds(60),
+                TimeSpan.FromMilliseconds(40)));
+    }
+
     private sealed class ChunkStream(int chunks, int chunkSize) : Stream
     {
         private int _remaining = chunks;
@@ -64,6 +88,26 @@ public sealed class ProviderResponseSecurityTests
         public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); return 0; }
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class SlowByteStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(20, cancellationToken);
+            buffer.Span[0] = 0x41;
+            return 1;
+        }
         public override void Flush() => throw new NotSupportedException();
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();

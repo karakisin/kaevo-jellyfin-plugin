@@ -31,7 +31,7 @@ This candidate remediates KSEC-027 and KSEC-028 in the Kaevo Jellyfin Plugin wit
 - Automatic redirects are disabled. Explicit redirects are limited, GET/HEAD-only, and must retain scheme, origin, approved base path, and validated destination set. HTTPS downgrade and origin escape fail.
 - Encoded dot segments and encoded path separators are rejected before redirect dispatch.
 - Credentials are attached only after configuration approval and can never cross an accepted redirect to a new origin.
-- Responses and connection/DNS operations are bounded.
+- Responses and connection/DNS operations are bounded. Provider body reads have independent 30-second total and 5-second idle deadlines after response headers, and each validated origin is capped at eight concurrent connections.
 - Security-stage allows only exact mock-service names declared for the disposable isolated network; this is not a production default.
 - Provider policy audit records contain provider type, outcome, security class, a truncated SHA-256 destination reference, and a generic reason. They contain no URL, host, IP, query, credential, or response body.
 

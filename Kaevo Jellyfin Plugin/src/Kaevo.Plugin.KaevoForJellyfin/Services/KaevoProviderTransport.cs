@@ -60,6 +60,8 @@ public sealed class KaevoProviderTransport : IDisposable
         {
             AllowAutoRedirect = false,
             ConnectTimeout = TimeSpan.FromSeconds(5),
+            MaxConnectionsPerServer = 8,
+            PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30),
             PooledConnectionLifetime = TimeSpan.FromMinutes(1),
             ConnectCallback = async (context, token) =>
             {

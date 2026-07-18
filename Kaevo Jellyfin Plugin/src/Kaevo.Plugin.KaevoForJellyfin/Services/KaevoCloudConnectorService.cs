@@ -1845,19 +1845,28 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     internal static async Task<(byte[] Data, bool Truncated)> ReadBoundedAsync(
         HttpContent content,
         int maximum,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? totalTimeout = null,
+        TimeSpan? idleTimeout = null)
     {
-        await using var input = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using var total = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        total.CancelAfter(totalTimeout ?? TimeSpan.FromSeconds(30));
+        using var idle = CancellationTokenSource.CreateLinkedTokenSource(total.Token);
+        var idleBudget = idleTimeout ?? TimeSpan.FromSeconds(5);
+        idle.CancelAfter(idleBudget);
+        await using var input = await content.ReadAsStreamAsync(idle.Token).ConfigureAwait(false);
         await using var output = new MemoryStream();
         var buffer = new byte[64 * 1024];
         var truncated = false;
         while (true)
         {
-            var count = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            var count = await input.ReadAsync(buffer, idle.Token).ConfigureAwait(false);
             if (count == 0)
             {
                 break;
             }
+
+            idle.CancelAfter(idleBudget);
 
             var remaining = maximum - checked((int)output.Length);
             if (remaining <= 0)
@@ -1866,7 +1875,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 break;
             }
 
-            await output.WriteAsync(buffer.AsMemory(0, Math.Min(count, remaining)), cancellationToken).ConfigureAwait(false);
+            await output.WriteAsync(buffer.AsMemory(0, Math.Min(count, remaining)), idle.Token).ConfigureAwait(false);
             if (count > remaining)
             {
                 truncated = true;
