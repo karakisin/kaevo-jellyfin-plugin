@@ -25,6 +25,15 @@ def principal(role=Role.OWNER):
     return {"state": "active", "principal_id": "user-1", "account_id": "account-1", "household_id": "household-1", "role": role.value, "authz_version": 7, "profile_ids": ["profile-1"]}
 
 
+def gateway_event(*, now=1_000, token_use="access", issuer="https://issuer.example/pool", client_id="main-client", schema="1"):
+    return {"requestContext": {"authorizer": {"jwt": {"claims": {
+        "sub": "user-1", "iss": issuer, "client_id": client_id, "token_use": token_use,
+        "iat": str(now), "exp": str(now + 900), "auth_time": str(now),
+        "account_id": "account-1", "household_id": "household-1", "profile_id": "profile-1",
+        "role": "owner", "authz_version": "7", "identity_schema_version": schema,
+    }}}}}
+
+
 def key_and_jwk():
     key = ec.generate_private_key(ec.SECP256R1())
     numbers = key.public_key().public_numbers()
@@ -72,6 +81,42 @@ def test_role_version_change_immediately_invalidates_stale_claim():
     changed = {**principal(), "authz_version": 8}
     with pytest.raises(IdentityError, match="stale_authorization"):
         authorize(identity(), changed, "browse", now=1_050)
+
+
+def test_role_change_and_membership_removal_invalidate_issued_token():
+    changed_role = {**principal(Role.ADULT), "role": "adult"}
+    with pytest.raises(IdentityError, match="identity_relationship_mismatch"):
+        authorize(identity(Role.OWNER), changed_role, "browse", now=1_050)
+    removed_profile = {**principal(), "profile_ids": []}
+    with pytest.raises(IdentityError, match="target_not_found"):
+        authorize(identity(), removed_profile, "browse", now=1_050)
+
+
+def test_gateway_context_requires_verified_access_token_standard_claims():
+    context = IdentityContext.from_gateway_event(
+        gateway_event(), expected_issuer="https://issuer.example/pool", expected_client_id="main-client", now=1_000,
+    )
+    assert context.token_use == "access"
+    assert context.identity_schema_version == 1
+
+
+@pytest.mark.parametrize("change", [
+    {"token_use": "id"}, {"issuer": "https://attacker.example/pool"},
+    {"client_id": "enrollment-client"}, {"schema": "2"},
+])
+def test_id_token_wrong_issuer_client_and_schema_are_rejected(change):
+    with pytest.raises(IdentityError, match="invalid_identity_claims"):
+        IdentityContext.from_gateway_event(
+            gateway_event(**change), expected_issuer="https://issuer.example/pool", expected_client_id="main-client", now=1_000,
+        )
+
+
+def test_expired_and_future_access_tokens_are_rejected():
+    expired = gateway_event(now=1_000)
+    with pytest.raises(IdentityError, match="invalid_identity_claims"):
+        IdentityContext.from_gateway_event(
+            expired, expected_issuer="https://issuer.example/pool", expected_client_id="main-client", now=2_000,
+        )
 
 
 def test_stolen_access_token_fails_with_another_installation_key():

@@ -33,6 +33,7 @@ class FakeTable:
 
 
 def identity_event(*, role="owner", profile_id="profile-1", auth_time=None, body=None, query=None):
+    now = int(time.time())
     claims = {
         "sub": "owner-1",
         "custom:account_id": "account-1",
@@ -40,7 +41,13 @@ def identity_event(*, role="owner", profile_id="profile-1", auth_time=None, body
         "custom:profile_id": profile_id,
         "custom:role": role,
         "custom:authz_version": "7",
-        "auth_time": str(auth_time if auth_time is not None else int(time.time())),
+        "custom:identity_schema_version": "1",
+        "auth_time": str(auth_time if auth_time is not None else now),
+        "iss": "https://issuer.example/pool",
+        "client_id": "main-client",
+        "token_use": "access",
+        "iat": str(now),
+        "exp": str(now + 900),
     }
     return {
         "requestContext": {"authorizer": {"jwt": {"claims": claims}}},
@@ -71,6 +78,8 @@ def install_identity_tables(monkeypatch, *, role="owner"):
     monkeypatch.setattr(handler, "profile_settings_table", settings)
     monkeypatch.setattr(handler, "KAEVO_ENV", "production")
     monkeypatch.setattr(handler, "DEV_API_KEY", "must-not-work-in-production")
+    monkeypatch.setenv("EXPECTED_COGNITO_ISSUER", "https://issuer.example/pool")
+    monkeypatch.setenv("EXPECTED_MAIN_CLIENT_ID", "main-client")
     return settings
 
 
