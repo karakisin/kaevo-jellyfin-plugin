@@ -8,6 +8,7 @@ internal static partial class KaevoPlaybackPlaylistRewriter
         string playlist,
         string grantToken,
         string itemId,
+        string mediaSourceId,
         string sourcePath)
     {
         if (string.IsNullOrWhiteSpace(grantToken)
@@ -36,7 +37,7 @@ internal static partial class KaevoPlaybackPlaylistRewriter
             {
                 lines[index] = UriAttributeRegex().Replace(line, match =>
                 {
-                    var rewritten = RewriteUri(match.Groups[1].Value, baseUri, relayPrefix, itemId);
+                    var rewritten = RewriteUri(match.Groups[1].Value, baseUri, relayPrefix, itemId, mediaSourceId);
                     return $"URI=\"{rewritten}\"";
                 });
                 continue;
@@ -46,7 +47,7 @@ internal static partial class KaevoPlaybackPlaylistRewriter
             var trailingLength = line.Length - line.TrimEnd().Length;
             var leading = leadingLength == 0 ? string.Empty : line[..leadingLength];
             var trailing = trailingLength == 0 ? string.Empty : line[^trailingLength..];
-            lines[index] = leading + RewriteUri(line.Trim(), baseUri, relayPrefix, itemId) + trailing;
+            lines[index] = leading + RewriteUri(line.Trim(), baseUri, relayPrefix, itemId, mediaSourceId) + trailing;
         }
 
         var rewrittenPlaylist = string.Join('\n', lines);
@@ -57,7 +58,7 @@ internal static partial class KaevoPlaybackPlaylistRewriter
         return rewrittenPlaylist;
     }
 
-    private static string RewriteUri(string value, Uri baseUri, string relayPrefix, string itemId)
+    private static string RewriteUri(string value, Uri baseUri, string relayPrefix, string itemId, string mediaSourceId)
     {
         if (string.IsNullOrWhiteSpace(value)
             || value.StartsWith("//", StringComparison.Ordinal)
@@ -72,12 +73,42 @@ internal static partial class KaevoPlaybackPlaylistRewriter
         }
 
         var path = Uri.UnescapeDataString(resolved.AbsolutePath);
-        if (!KaevoPlaybackSecurity.IsHlsSessionResourcePath(path, itemId))
+        if (!KaevoPlaybackSecurity.IsHlsSessionResourcePath(path, itemId, mediaSourceId))
         {
             throw new InvalidOperationException("playlistUriNotAllowed");
         }
 
-        return relayPrefix + resolved.PathAndQuery;
+        var safeQuery = resolved.Query
+            .TrimStart('?')
+            .Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Where(pair => !IsAuthenticationQuery(pair))
+            .ToArray();
+        var querySuffix = safeQuery.Length == 0 ? string.Empty : $"?{string.Join('&', safeQuery)}";
+
+        // Jellyfin normally emits child playlists and segments relative to the
+        // current manifest. Preserve that safe relative form after validation
+        // and credential stripping. AVPlayer will resolve it beneath the same
+        // signed relay URL, avoiding thousands of repeated grant tokens in a
+        // long VOD playlist. Root-relative Jellyfin URIs still need an explicit
+        // relay prefix so they cannot escape the signed playback route.
+        if (!value.StartsWith('/'))
+        {
+            var relativePath = value.Split('?', 2)[0];
+            return relativePath + querySuffix;
+        }
+
+        return relayPrefix + resolved.AbsolutePath + querySuffix;
+    }
+
+    private static bool IsAuthenticationQuery(string pair)
+    {
+        var separator = pair.IndexOf('=');
+        var encodedKey = separator < 0 ? pair : pair[..separator];
+        var key = Uri.UnescapeDataString(encodedKey);
+        return key.Equals("api_key", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("apikey", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("access_token", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("token", StringComparison.OrdinalIgnoreCase);
     }
 
     [GeneratedRegex("URI=\"([^\"]+)\"", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

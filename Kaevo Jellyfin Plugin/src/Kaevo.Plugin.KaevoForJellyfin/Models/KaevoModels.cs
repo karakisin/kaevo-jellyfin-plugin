@@ -13,6 +13,7 @@ public sealed record KaevoStatusResponse(
     string PlaybackRelayStatus,
     DateTimeOffset? LastPlaybackRelayConnectedUtc,
     int PlaybackRelayChannels,
+    string PlaybackRelayProtocol,
     bool OptimizerExecution);
 
 public sealed record KaevoCloudPairingStatus(
@@ -31,6 +32,23 @@ public sealed record KaevoCloudActivationRequest(
 public sealed record KaevoCloudActivationResponse(
     string State,
     string Message);
+
+public sealed record KaevoProviderProvisionRequest(
+    string BaseUrl,
+    string? ApiKey,
+    bool Enabled = true);
+
+public sealed record KaevoProviderProvisionResponse(
+    string State,
+    string Provider);
+
+public sealed record KaevoProviderStatusResponse(
+    string Provider,
+    string DisplayName,
+    bool Enabled,
+    bool Configured,
+    string BaseUrl,
+    bool RequiresApiKey);
 
 public sealed record KaevoMediaScanResponse(
     int Libraries,

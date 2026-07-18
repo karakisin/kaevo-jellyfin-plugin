@@ -1,0 +1,5 @@
+fastapi>=0.111
+httpx>=0.27
+pydantic>=2.7
+eval-type-backport>=0.2
+uvicorn>=0.30

@@ -1,0 +1,63 @@
+{
+  "travelDownloads": {
+    "enabled": true,
+    "defaultQualityMode": "smart",
+    "useLastSetup": true,
+    "askEveryTime": false,
+    "issueHandlingMode": "kaevoAssist",
+    "notifyIssues": true,
+    "suggestLowerQualityOnFailure": "askFirst",
+    "maxRetryCount": 3,
+    "allowCellularDownloads": false,
+    "lastSetup": {
+      "quality": "p720",
+      "sourceQuality": "p1080",
+      "issueHandlingMode": "kaevoAssist",
+      "notifyIssues": true,
+      "usedAt": "2026-07-08T00:00:00Z"
+    }
+  },
+  "enums": {
+    "quality": [
+      "smart",
+      "p480",
+      "p720",
+      "p1080",
+      "original",
+      "askEveryTime"
+    ],
+    "issueHandlingMode": [
+      "kaevoAssist",
+      "askBeforeFixing",
+      "manual",
+      "askEveryTime"
+    ],
+    "suggestLowerQualityOnFailure": [
+      "askFirst",
+      "never"
+    ],
+    "jobStatus": [
+      "queued",
+      "preparing",
+      "readyToDownload",
+      "downloading",
+      "paused",
+      "completed",
+      "failed",
+      "cancelled",
+      "expired"
+    ],
+    "failureReason": [
+      "serverOffline",
+      "insufficientPhoneStorage",
+      "insufficientServerStorage",
+      "prepareFailed",
+      "downloadInterrupted",
+      "networkTooSlow",
+      "fileValidationFailed",
+      "unsupportedSource",
+      "permissionDenied",
+      "unknown"
+    ]
+  }
+}

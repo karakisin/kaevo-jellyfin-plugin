@@ -1758,8 +1758,7 @@ def normalize_remote_command(operation, parameters):
         "jellyfin.mark_unplayed",
         "jellyfin.favorite",
         "jellyfin.unfavorite",
-        "jellyfin.delete_item",
-        "optimizer.plan_remux"
+        "jellyfin.delete_item"
     }:
         item_id = str(parameters.get("item_id") or "").strip()
         if not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
@@ -1770,6 +1769,19 @@ def normalize_remote_command(operation, parameters):
             "path": f"/commands/{operation}",
             "query": {},
             "body": {"item_id": item_id.lower()}
+        }, ""
+
+    if operation == "optimizer.plan_remux":
+        item_id = str(parameters.get("item_id") or "").strip()
+        if not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
+            return None, "item_id must be a 32-character Jellyfin id"
+        strategy = str(parameters.get("strategy") or "automatic").strip()
+        if strategy not in {"automatic", "full_video_conversion"}:
+            return None, "optimizer strategy is invalid"
+        return {
+            "provider": "home_server", "method": "COMMAND",
+            "path": "/commands/optimizer.plan_remux", "query": {},
+            "body": {"item_id": item_id.lower(), "strategy": strategy}
         }, ""
 
     if operation == "jellyfin.prepare_playback":
@@ -1849,12 +1861,15 @@ def normalize_remote_command(operation, parameters):
         limit = positive_int(parameters.get("limit") or 50, maximum=100)
         if limit is None:
             return None, "optimizer scan limit must be between 1 and 100"
+        start_index = non_negative_int(parameters.get("start_index") or 0, maximum=1_000_000)
+        if start_index is None:
+            return None, "optimizer scan start_index must be between 0 and 1000000"
         return {
             "provider": "home_server",
             "method": "COMMAND",
             "path": "/commands/optimizer.scan",
             "query": {},
-            "body": {"limit": limit}
+            "body": {"limit": limit, "start_index": start_index}
         }, ""
 
     if operation == "optimizer.execute_remux":
@@ -1879,6 +1894,96 @@ def normalize_remote_command(operation, parameters):
                 "approval_token": approval_token,
                 "confirmation": confirmation
             }
+        }, ""
+
+    if operation == "optimizer.job_status":
+        job_id = str(parameters.get("job_id") or "").strip()
+        try:
+            normalized_job_id = str(uuid.UUID(job_id))
+        except (ValueError, TypeError, AttributeError):
+            return None, "job_id must be a UUID"
+        return {
+            "provider": "home_server",
+            "method": "COMMAND",
+            "path": "/commands/optimizer.job_status",
+            "query": {},
+            "body": {"job_id": normalized_job_id}
+        }, ""
+
+    if operation == "optimizer.jobs":
+        return {
+            "provider": "home_server", "method": "COMMAND",
+            "path": "/commands/optimizer.jobs", "query": {}, "body": {}
+        }, ""
+
+    if operation == "optimizer.reorder_job":
+        job_id = str(parameters.get("job_id") or "").strip()
+        try:
+            normalized_job_id = str(uuid.UUID(job_id))
+        except (ValueError, TypeError, AttributeError):
+            return None, "job_id must be a UUID"
+        priority_index = non_negative_int(parameters.get("priority_index"), maximum=10_000)
+        if priority_index is None:
+            return None, "priority_index must be between 0 and 10000"
+        return {
+            "provider": "home_server", "method": "COMMAND",
+            "path": "/commands/optimizer.reorder_job", "query": {},
+            "body": {"job_id": normalized_job_id, "priority_index": priority_index}
+        }, ""
+
+    if operation == "optimizer.cancel_job":
+        job_id = str(parameters.get("job_id") or "").strip()
+        try:
+            normalized_job_id = str(uuid.UUID(job_id))
+        except (ValueError, TypeError, AttributeError):
+            return None, "job_id must be a UUID"
+        confirmation = str(parameters.get("confirmation") or "")
+        if confirmation != "YES_CANCEL_OPTIMIZATION":
+            return None, "explicit optimization cancellation confirmation is required"
+        return {
+            "provider": "home_server", "method": "COMMAND",
+            "path": "/commands/optimizer.cancel_job", "query": {},
+            "body": {"job_id": normalized_job_id, "confirmation": confirmation}
+        }, ""
+
+    if operation == "optimizer.cleanup_interrupted":
+        item_id = str(parameters.get("item_id") or "").strip()
+        if not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
+            return None, "item_id must be a 32-character Jellyfin id"
+        confirmation = str(parameters.get("confirmation") or "")
+        if confirmation != "YES_REMOVE_KAEVO_PARTIAL":
+            return None, "explicit interrupted-output cleanup confirmation is required"
+        return {
+            "provider": "home_server", "method": "COMMAND",
+            "path": "/commands/optimizer.cleanup_interrupted", "query": {},
+            "body": {"item_id": item_id.lower(), "confirmation": confirmation}
+        }, ""
+
+    if operation == "optimizer.pause_job":
+        job_id = str(parameters.get("job_id") or "").strip()
+        try:
+            normalized_job_id = str(uuid.UUID(job_id))
+        except (ValueError, TypeError, AttributeError):
+            return None, "job_id must be a UUID"
+        duration_minutes = non_negative_int(parameters.get("duration_minutes"), maximum=720)
+        if duration_minutes not in {0, 60, 360, 720}:
+            return None, "duration_minutes must be 0, 60, 360, or 720"
+        return {
+            "provider": "home_server", "method": "COMMAND",
+            "path": "/commands/optimizer.pause_job", "query": {},
+            "body": {"job_id": normalized_job_id, "duration_minutes": duration_minutes}
+        }, ""
+
+    if operation == "optimizer.resume_job":
+        job_id = str(parameters.get("job_id") or "").strip()
+        try:
+            normalized_job_id = str(uuid.UUID(job_id))
+        except (ValueError, TypeError, AttributeError):
+            return None, "job_id must be a UUID"
+        return {
+            "provider": "home_server", "method": "COMMAND",
+            "path": "/commands/optimizer.resume_job", "query": {},
+            "body": {"job_id": normalized_job_id}
         }, ""
 
     if operation == "seerr.create_request":
@@ -2283,6 +2388,16 @@ def create_remote_command(event):
         "jellyfin.unfavorite",
         "jellyfin.delete_item",
         "provider.health",
+        "optimizer.scan",
+        "optimizer.plan_remux",
+        "optimizer.execute_remux",
+        "optimizer.job_status",
+        "optimizer.jobs",
+        "optimizer.reorder_job",
+        "optimizer.cancel_job",
+        "optimizer.cleanup_interrupted",
+        "optimizer.pause_job",
+        "optimizer.resume_job",
         "seerr.create_request",
         "seerr.cancel_request",
         "sonarr.episode_inventory",

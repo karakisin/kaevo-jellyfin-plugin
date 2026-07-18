@@ -1,6 +1,6 @@
 [project]
 name = "kaevo-playback-relay"
-version = "0.2.6"
+version = "0.2.12"
 requires-python = ">=3.11"
 dependencies = ["fastapi>=0.111", "uvicorn[standard]>=0.30"]
 

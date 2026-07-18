@@ -1,6 +1,6 @@
 # Kaevo Current Status
 
-Updated: 2026-07-15
+Updated: 2026-07-16 (PiP complete; season cards and crash-safe local resume)
 
 This is the authoritative cross-project status. Older implementation plans and
 historical project logs remain useful evidence but do not override this product
@@ -36,7 +36,46 @@ own media library feel calm, polished, and easy to use.
 
 - iOS can sign in to Jellyfin and keep the access token in Keychain.
 - iOS checks `/kaevo/status` and shows dynamic install or installed wording.
-- Current physical checkpoint: Kaevo `1.0 (3)` on Jefferson's iPhone.
+- Current physical checkpoint: Kaevo `1.0 (26)` is signed and installed on
+  Jefferson's iPhone.
+- Jefferson physically confirmed Picture in Picture complete.
+- Season Selector behavior is complete. Its episode cards now match the approved
+  dark-card reference with functional Play, Details, overflow, and watched
+  actions, plus a thumbnail watched icon and the same progress indicator used by
+  Home Continue Watching. Physical visual verification of this refinement is
+  still pending.
+- Local Kaevo resume persistence is now the shipping default. Eligible playback
+  is atomically checkpointed every five seconds before remote reporting so an
+  unexpected termination can recover near the last playhead position. Jellyfin
+  progress writes and watched/completed provider mutations remain separately
+  gated.
+- When multiple selected household profiles have different valid saved watch
+  times, Kaevo asks where everyone should start and lists each eligible profile
+  with its timestamp. Identical timestamps continue without an unnecessary
+  prompt. Jefferson physically verified this flow on iPhone; the household
+  resume picker is complete.
+- Series More Options now includes a confirmed `Rewatch Series` action. It clears
+  episode progress for the active Kaevo profile, clears the connected Jellyfin
+  account's watched state for that series, and begins again from Season 1 Episode
+  1. Other Kaevo profiles and unrelated series are preserved. Physical
+  verification is pending.
+- Playback is presented by a UIKit-owned full-screen hosting controller that
+  explicitly supports portrait and both landscape orientations.
+- Build 19's detail-owned zero-size presentation anchor was rejected after it
+  caused immediate player teardown and a clipped warning overlay. Build 20 owns
+  the transient playback descriptor and presenter at the persistent app root
+  and presents from the real window controller.
+- Playback requests Apple-compatible H.264/HEVC + AAC HLS. Jellyfin remuxes
+  compatible video, converts unsupported audio to AAC, and software-transcodes
+  video when the source cannot be safely played by AVPlayer.
+- Multi-language audio choices now rebuild the approved HLS route with the
+  selected Jellyfin audio stream while preserving the playhead and play state.
+- Text captions use a grant-bound WebVTT overlay and do not replace or restart
+  the active video session. Rewinding while captions
+  are off temporarily enables the preferred caption track until the amount
+  rewound has replayed, plus five additional seconds.
+- Library restores its last selected filter set instead of preselecting
+  Trending on every new screen instance.
 - Home pull-to-refresh has visible `Refreshing…` and `Updated` feedback and a
   queued forced refresh survives SwiftUI gesture cancellation.
 - Recently Added uses the plugin's authoritative feed, collapses episode batches
@@ -48,7 +87,10 @@ own media library feel calm, polished, and easy to use.
 ### Kaevo Jellyfin Plugin
 
 - Foundation baseline: `0.1.0`.
-- Current built, published, installed, and locally verified version: `0.2.13`.
+- Current built, packaged, published, and active server version: `0.2.28`.
+- Plugin `0.2.28` securely relays media-source-bound WebVTT captions without
+  restarting HLS playback and leaves Jellyfin transcoding available as the
+  compatibility fallback.
 - Target: Jellyfin `10.11.x`, .NET `net8.0`.
 - Supported current product scope: bounded metadata, artwork, Cloud control
   requests, and remote playback routing. Remote writes remain disabled.
@@ -59,8 +101,11 @@ own media library feel calm, polished, and easy to use.
 
 ### Kaevo Cloud
 
-- Version `0.0.26` is live with plugin-backed metadata, artwork, and playback
+- Version `0.0.29` is live with plugin-backed metadata, artwork, and playback
   request routing.
+- Playback relay `0.2.12` is live and publicly healthy. It uses bounded response
+  queues, waits for available capacity, and automatically removes expired HLS
+  requests so abandoned AVPlayer work cannot permanently block new playback.
 - iOS has physically verified **Remote Access Ready** over cellular.
 - Plugin-confirmed Cloud trials and revocable, profile-bound app sessions are
   live.
@@ -68,6 +113,8 @@ own media library feel calm, polished, and easy to use.
   retired app credential and public migration route are disabled.
 - Live health, guarded session routes, existing app compatibility, and the
   existing plugin connector passed after deployment.
+- The post-deployment signed-stream gate passed the master playlist, child
+  playlist, a real 4.67 MB segment, and `10/10` rapid starts.
 - Playback and interactive metadata requests are prioritized over artwork.
 - Remote playback is enabled for controlled iPhone testing. Remote mutations
   remain disabled.
@@ -84,3 +131,8 @@ own media library feel calm, polished, and easy to use.
 - Physically validate the new-user Cloud trial flow with a fresh profile.
 
 See [KAEVO_NEXT_PHASES.md](KAEVO_NEXT_PHASES.md) for the phased plan.
+
+See
+[KAEVO_CLOUD_PLAYBACK_HANDOFF_2026-07-15.md](KAEVO_CLOUD_PLAYBACK_HANDOFF_2026-07-15.md)
+for the exact implementation, validation evidence, artifacts, and next physical
+test.

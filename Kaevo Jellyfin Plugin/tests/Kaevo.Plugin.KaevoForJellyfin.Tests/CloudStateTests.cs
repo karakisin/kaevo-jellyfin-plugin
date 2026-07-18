@@ -37,4 +37,16 @@ public sealed class CloudStateTests
         Assert.Equal("online", relay.Status);
         Assert.Equal("relayDisconnected", relay.LastError);
     }
+
+    [Fact]
+    public void ConfigurationChangeCancelsCurrentConnectorAndCreatesFreshSignal()
+    {
+        var state = new KaevoCloudState();
+        var current = state.ConfigurationChangedToken();
+
+        state.SignalConfigurationChanged();
+
+        Assert.True(current.IsCancellationRequested);
+        Assert.False(state.ConfigurationChangedToken().IsCancellationRequested);
+    }
 }

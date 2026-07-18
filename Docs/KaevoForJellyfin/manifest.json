@@ -1,0 +1,30 @@
+{
+  "feature": "Kaevo for Jellyfin",
+  "version": "0.1.0-foundation",
+  "status": "planning",
+  "primary_goal": "One installable Jellyfin plugin for Kaevo setup, pairing, library/user mapping, and safe local bridge behavior.",
+  "phase_1_scope": [
+    "Plugin skeleton",
+    "Setup page placeholder",
+    "Status endpoint",
+    "Pairing placeholder",
+    "Users read placeholder",
+    "Libraries read placeholder",
+    "Read-only scan placeholder",
+    "Provider health placeholders",
+    "Security boundaries",
+    "Tests"
+  ],
+  "phase_1_forbidden": [
+    "FFmpeg",
+    "Transcoding",
+    "MKV to MP4 conversion",
+    "Media file writes",
+    "Media deletion",
+    "Real downloads",
+    "Sonarr/Radarr write actions",
+    "Seerr request actions",
+    "Cloud media storage",
+    "Apple app provider secrets"
+  ]
+}

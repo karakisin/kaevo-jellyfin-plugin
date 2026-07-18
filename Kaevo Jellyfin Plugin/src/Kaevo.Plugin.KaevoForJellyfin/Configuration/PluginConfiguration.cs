@@ -28,11 +28,13 @@ public sealed class PluginConfiguration : BasePluginConfiguration
 
     public bool RemoteWritesEnabled { get; set; }
 
+    public bool RemoteMediaDeletionEnabled { get; set; }
+
     public bool RemotePlaybackEnabled { get; set; }
 
     public bool MediaScanEnabled { get; set; } = true;
 
-    public bool OptimizerPlanningEnabled { get; set; }
+    public bool OptimizerPlanningEnabled { get; set; } = true;
 
     public bool OptimizerExecutionEnabled { get; set; }
 

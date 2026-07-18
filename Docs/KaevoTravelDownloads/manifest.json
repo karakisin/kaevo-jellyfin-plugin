@@ -1,0 +1,18 @@
+{
+  "name": "Kaevo Travel Downloads Foundation Pack",
+  "generatedAt": "2026-07-08",
+  "files": [
+    "01_PRODUCT_SPEC.md",
+    "02_UX_COPY_AND_FLOWS.md",
+    "03_SETTINGS_SCHEMA.json",
+    "04_KAEVO_CLOUD_API_CONTRACT.md",
+    "05_LOCAL_BRIDGE_CONTRACT.md",
+    "06_SWIFT_MODELS_AND_LOGIC.swift",
+    "07_SWIFT_TESTS.swift",
+    "08_RETRY_AND_SAFETY_POLICY.md",
+    "09_PHASED_IMPLEMENTATION_CHECKLIST.md",
+    "10_CODEX_PROMPT.md",
+    "README.md"
+  ],
+  "architectureRule": "Kaevo Cloud stores metadata only; media work happens on user's home server."
+}

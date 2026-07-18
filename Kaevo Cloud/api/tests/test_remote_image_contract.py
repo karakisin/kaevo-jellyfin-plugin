@@ -50,3 +50,23 @@ def test_remote_image_defaults_remain_bounded():
     assert query["max_width"] == "600"
     assert query["max_height"] == "900"
     assert query["quality"] == "90"
+
+
+def test_remote_image_payload_allows_high_resolution_artwork():
+    assert handler.REMOTE_IMAGE_MAX_BYTES == 3_500_000
+    assert handler.REMOTE_IMAGE_POLL_INTERVAL_SECONDS <= 0.25
+
+
+def test_binary_image_response_encodes_bytes_without_request_context():
+    result = handler.binary_response(
+        200,
+        "image/jpeg",
+        b"\xff\xd8\xff\xd9",
+        {"X-Kaevo-Image-Proxy": "home-connector"},
+    )
+
+    assert result["statusCode"] == 200
+    assert result["isBase64Encoded"] is True
+    assert result["headers"]["Content-Type"] == "image/jpeg"
+    assert result["headers"]["X-Kaevo-Image-Proxy"] == "home-connector"
+    assert result["body"] == "/9j/2Q=="

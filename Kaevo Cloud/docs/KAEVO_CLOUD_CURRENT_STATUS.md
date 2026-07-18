@@ -1,6 +1,9 @@
 # Kaevo Cloud Current Status
 
-Updated: 2026-07-14
+Updated: 2026-07-15
+
+> Current detailed handoff:
+> `../../docs/KAEVO_CLOUD_PLAYBACK_HANDOFF_2026-07-15.md`
 
 ## Decision
 
@@ -10,8 +13,8 @@ the retired standalone Home Connector is not supported.
 
 ## Current implementation
 
-- Live Cloud API version: `0.0.19`
-- Kaevo Jellyfin Plugin version: `0.2.1`
+- Live Cloud API version: `0.0.29`
+- Built, packaged, and published Kaevo Jellyfin Plugin version: `0.2.22`
 - Pairing exchange and hashed connector-token storage are implemented.
 - Authenticated outbound plugin registration and status are implemented.
 - Bounded remote metadata requests are implemented.
@@ -36,9 +39,25 @@ the retired standalone Home Connector is not supported.
 App sessions cannot edit entitlements, create remote commands, request
 playback grants, or read another profile.
 
+## Current playback work
+
+- Playback preparation and codec-aware local transcoding are implemented.
+- Unsupported audio requests local AAC transcoding.
+- Compatible video remains stream-copied when possible.
+- Multi-language audio and subtitle track metadata now stays bounded inside the
+  plugin response; text captions are delivered as native HLS renditions.
+- Playback relay `0.2.12` is live. It recovered the physical iPhone failure
+  where abandoned AVPlayer requests filled all three channels and new streams
+  returned `429 connectorBusy`. Each channel now has adequate Apple-player
+  concurrency, waits briefly for capacity, and prunes expired HLS work.
+- Profile-authorized started, progress, and stopped commands are deployed.
+- Cloud request coalescing and priority controls protect interactive metadata
+  and playback from artwork bursts.
+- Final two-way playback reporting validation remains separate from the
+  audio/caption playback pass.
+
 ## Deferred
 
-- Remote playback
 - Remote mutations
 - Optimizer execution
 - tvOS Cloud UI
@@ -46,13 +65,15 @@ playback grants, or read another profile.
 
 ## Validation
 
-- API and relay tests: `16 passed`
+- Relay transport/security tests: `20 passed`
 - Python compilation: passed
 - SAM validation and build: passed
 - Physical iPhone build: passed
 - Live deployment: passed
 - Live health and guarded-route checks: passed
 - Existing app and plugin connector compatibility: passed
+- Live signed HLS gate: master playlist, child playlist, real media segment,
+  and `10/10` rapid new starts passed after relay `0.2.12` deployment.
 - Existing-device session migration and post-retirement launch: passed
 
 ## Safety

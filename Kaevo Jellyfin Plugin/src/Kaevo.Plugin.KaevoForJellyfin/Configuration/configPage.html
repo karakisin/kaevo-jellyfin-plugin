@@ -5,7 +5,7 @@
     <title>Kaevo</title>
 </head>
 <body>
-    <div id="KaevoConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button">
+    <div id="KaevoConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
         <div data-role="content">
             <div class="content-primary">
                 <form id="KaevoConfigForm">
@@ -22,23 +22,89 @@
                         <input id="SnapshotItemLimit" name="SnapshotItemLimit" type="number" is="emby-input" min="1" max="100" />
                         <div class="fieldDescription">Limits the number of movies, shows, collections, and Continue Watching items Kaevo reads at once.</div>
                     </div>
+                    <h3>Media Management</h3>
+                    <label style="display:flex;gap:.65em;align-items:flex-start;margin:1em 0">
+                        <input id="RemoteMediaDeletionEnabled" type="checkbox" is="emby-checkbox" />
+                        <span>
+                            Allow Kaevo to delete media
+                            <span class="fieldDescription" style="display:block">Kaevo still requires an in-app confirmation before deleting a movie or episode.</span>
+                        </span>
+                    </label>
                     <button is="emby-button" type="submit" class="raised button-submit block emby-button">
                         <span>Save</span>
                     </button>
                 </form>
+
+                <div style="margin-top:2.5em">
+                    <h3>Media Services</h3>
+                    <p>Connect services running on this home server. Each connection stays here and can be turned on or off independently.</p>
+                    <div id="KaevoProviderList"></div>
+                </div>
             </div>
         </div>
         <script type="text/javascript">
             var KaevoConfig = {
-                pluginUniqueId: '80c77b84-7f2d-4b52-84c7-7dfe68cd95ae'
+                pluginUniqueId: '80c77b84-7f2d-4b52-84c7-7dfe68cd95ae',
+                providers: []
             };
+
+            function providerValue(provider, suffix) {
+                return document.querySelector('#KaevoProvider-' + provider + '-' + suffix);
+            }
+
+            function escapeHtml(value) {
+                return String(value || '').replace(/[&<>'"]/g, function (character) {
+                    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[character];
+                });
+            }
+
+            function renderProviders(providers) {
+                providers = providers.map(function (raw) {
+                    return {
+                        Provider: raw.Provider || raw.provider,
+                        DisplayName: raw.DisplayName || raw.displayName,
+                        Enabled: raw.Enabled === true || raw.enabled === true,
+                        Configured: raw.Configured === true || raw.configured === true,
+                        BaseUrl: raw.BaseUrl || raw.baseUrl || '',
+                        RequiresApiKey: raw.RequiresApiKey === true || raw.requiresApiKey === true
+                    };
+                });
+                KaevoConfig.providers = providers;
+                document.querySelector('#KaevoProviderList').innerHTML = providers.map(function (provider) {
+                    var keyField = provider.RequiresApiKey
+                        ? '<div class="inputContainer"><label class="inputLabel inputLabelUnfocused">API key</label>'
+                            + '<input id="KaevoProvider-' + provider.Provider + '-key" type="password" is="emby-input" autocomplete="new-password" placeholder="Leave blank to keep the saved key" /></div>'
+                        : '';
+                    var connected = provider.Enabled && provider.Configured;
+                    return '<section style="padding:1em;margin:1em 0;border:1px solid rgba(255,255,255,.12);border-radius:12px">'
+                        + '<h4 style="margin-top:0">' + provider.DisplayName + '</h4>'
+                        + '<div class="fieldDescription">Status: <strong id="KaevoProvider-' + provider.Provider + '-status">'
+                        + (connected ? 'Connected' : provider.Configured ? 'Off' : 'Not Connected') + '</strong></div>'
+                        + '<label style="display:flex;gap:.65em;align-items:center;margin:1em 0"><input id="KaevoProvider-' + provider.Provider + '-enabled" type="checkbox" '
+                        + (provider.Enabled ? 'checked' : '') + ' /><span>Use ' + provider.DisplayName + '</span></label>'
+                        + '<div class="inputContainer"><label class="inputLabel inputLabelUnfocused">Local address</label>'
+                        + '<input id="KaevoProvider-' + provider.Provider + '-url" type="url" is="emby-input" value="' + escapeHtml(provider.BaseUrl) + '" placeholder="http://192.168.1.10:port" /></div>'
+                        + keyField
+                        + '<button is="emby-button" type="button" class="raised emby-button" data-save-provider="' + provider.Provider + '"><span>Save ' + provider.DisplayName + '</span></button>'
+                        + '</section>';
+                }).join('');
+            }
+
+            function loadProviders() {
+                return ApiClient.getJSON(ApiClient.getUrl('kaevo/providers/status')).then(renderProviders);
+            }
 
             document.querySelector('#KaevoConfigPage').addEventListener('pageshow', function () {
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
                     document.querySelector('#SnapshotItemLimit').value = config.SnapshotItemLimit || 50;
-                    return ApiClient.getJSON(ApiClient.getUrl('kaevo/cloud/status'));
+                    document.querySelector('#RemoteMediaDeletionEnabled').checked = config.RemoteMediaDeletionEnabled === true;
+                    return Promise.all([
+                        ApiClient.getJSON(ApiClient.getUrl('kaevo/cloud/status')),
+                        loadProviders()
+                    ]);
                 }).then(function (status) {
+                    status = status[0];
                     var ready = status.State === 'online' || status.state === 'online';
                     document.querySelector('#CloudConnectorStatus').textContent = ready ? 'Remote Access Ready' : 'Not Connected';
                     document.querySelector('#CloudSetupMessage').textContent = ready
@@ -51,12 +117,39 @@
                 });
             });
 
+            document.querySelector('#KaevoProviderList').addEventListener('click', function (event) {
+                var button = event.target.closest('[data-save-provider]');
+                if (!button) return;
+                var provider = button.getAttribute('data-save-provider');
+                var keyInput = providerValue(provider, 'key');
+                Dashboard.showLoadingMsg();
+                ApiClient.ajax({
+                    type: 'POST',
+                    url: ApiClient.getUrl('kaevo/providers/' + provider),
+                    contentType: 'application/json',
+                    data: JSON.stringify({
+                        BaseUrl: providerValue(provider, 'url').value.trim(),
+                        ApiKey: keyInput ? keyInput.value.trim() : '',
+                        Enabled: providerValue(provider, 'enabled').checked
+                    })
+                }).then(function () {
+                    return loadProviders();
+                }).then(function () {
+                    Dashboard.alert('Connection saved.');
+                }).catch(function () {
+                    Dashboard.alert('Kaevo could not save this connection. Check the local address and API key.');
+                }).finally(function () {
+                    Dashboard.hideLoadingMsg();
+                });
+            });
+
             document.querySelector('#KaevoConfigForm').addEventListener('submit', function (event) {
                 event.preventDefault();
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
                     var value = parseInt(document.querySelector('#SnapshotItemLimit').value, 10);
                     config.SnapshotItemLimit = Math.max(1, Math.min(100, value || 50));
+                    config.RemoteMediaDeletionEnabled = document.querySelector('#RemoteMediaDeletionEnabled').checked;
                     config.OptimizerExecutionEnabled = false;
                     return ApiClient.updatePluginConfiguration(KaevoConfig.pluginUniqueId, config);
                 }).then(function (result) {

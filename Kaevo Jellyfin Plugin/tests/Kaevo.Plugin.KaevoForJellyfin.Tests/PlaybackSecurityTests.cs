@@ -91,7 +91,7 @@ public sealed class PlaybackSecurityTests
                 ["audioCodec"] = JsonSerializer.SerializeToElement("aac"),
                 ["allowVideoStreamCopy"] = JsonSerializer.SerializeToElement(true),
                 ["allowAudioStreamCopy"] = JsonSerializer.SerializeToElement(false),
-                ["enableAutoStreamCopy"] = JsonSerializer.SerializeToElement(true),
+                ["enableAutoStreamCopy"] = JsonSerializer.SerializeToElement(false),
                 ["segmentContainer"] = JsonSerializer.SerializeToElement("ts")
             },
             null);
@@ -165,6 +165,70 @@ public sealed class PlaybackSecurityTests
             null));
         Assert.Throws<InvalidOperationException>(() => KaevoPlaybackSecurity.Resolve(
             grant, "GET", $"/Videos/{ItemId}/hls1/main/0.ts", null, "bytes=0-1,4-5"));
+    }
+
+    [Fact]
+    public void SubtitleHlsRoutesAreBoundToGrantedMediaSource()
+    {
+        KaevoPlaybackSecurity.ResetActiveGrantsForTests();
+        var grant = KaevoPlaybackSecurity.VerifyGrant(Token(mode: "transcode"), GrantKey, ConnectorId);
+        var request = KaevoPlaybackSecurity.Resolve(
+            grant,
+            "GET",
+            $"/Videos/{ItemId}/source-1/Subtitles/4/subtitles.m3u8",
+            new Dictionary<string, JsonElement> { ["SegmentLength"] = JsonSerializer.SerializeToElement(30) },
+            null);
+
+        Assert.Contains("SegmentLength=30", request.PathAndQuery, StringComparison.Ordinal);
+        Assert.Throws<InvalidOperationException>(() => KaevoPlaybackSecurity.Resolve(
+            grant,
+            "GET",
+            $"/Videos/{ItemId}/source-2/Subtitles/4/subtitles.m3u8",
+            null,
+            null));
+    }
+
+    [Fact]
+    public void WebVttSubtitleRouteIsBoundToGrantedMediaSource()
+    {
+        KaevoPlaybackSecurity.ResetActiveGrantsForTests();
+        var grant = KaevoPlaybackSecurity.VerifyGrant(Token(mode: "transcode"), GrantKey, ConnectorId);
+
+        var request = KaevoPlaybackSecurity.Resolve(
+            grant,
+            "GET",
+            $"/Videos/{ItemId}/source-1/Subtitles/4/Stream.vtt",
+            null,
+            null);
+
+        Assert.StartsWith($"/Videos/{ItemId}/source-1/Subtitles/4/Stream.vtt?", request.PathAndQuery, StringComparison.Ordinal);
+        Assert.Contains("mediaSourceId=source-1", request.PathAndQuery, StringComparison.Ordinal);
+        Assert.Throws<InvalidOperationException>(() => KaevoPlaybackSecurity.Resolve(
+            grant,
+            "GET",
+            $"/Videos/{ItemId}/source-2/Subtitles/4/Stream.vtt",
+            null,
+            null));
+    }
+
+    [Theory]
+    [InlineData("tiles.m3u8")]
+    [InlineData("0.jpg")]
+    [InlineData("42.jpg")]
+    public void TrickplayRoutesStayInsideGrantedItem(string fileName)
+    {
+        KaevoPlaybackSecurity.ResetActiveGrantsForTests();
+        var grant = KaevoPlaybackSecurity.VerifyGrant(Token(mode: "transcode"), GrantKey, ConnectorId);
+
+        var request = KaevoPlaybackSecurity.Resolve(
+            grant,
+            "GET",
+            $"/Videos/{ItemId}/Trickplay/320/{fileName}",
+            new Dictionary<string, JsonElement> { ["MediaSourceId"] = JsonSerializer.SerializeToElement("source-1") },
+            null);
+
+        Assert.Contains($"/Videos/{ItemId}/Trickplay/320/{fileName}", request.PathAndQuery, StringComparison.Ordinal);
+        Assert.Contains("mediaSourceId=source-1", request.PathAndQuery, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

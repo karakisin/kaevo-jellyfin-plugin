@@ -15,6 +15,18 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase
 {
+    private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey)> SupportedProviders =
+        new Dictionary<string, (string DisplayName, bool RequiresApiKey)>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["sonarr"] = ("Sonarr", true),
+            ["radarr"] = ("Radarr", true),
+            ["seerr"] = ("Seerr", true),
+            ["lidarr"] = ("Lidarr", true),
+            ["readarr"] = ("Readarr", true),
+            ["prowlarr"] = ("Prowlarr", true),
+            ["bazarr"] = ("Bazarr", true),
+            ["tdarr"] = ("Tdarr", false)
+        };
     private const int DefaultItemLimit = 50;
     private const int MaximumItemLimit = 100;
     private readonly ILibraryManager _libraryManager;
@@ -46,7 +58,7 @@ public sealed class KaevoController : ControllerBase
         return Ok(new KaevoStatusResponse(
             "ok",
             "Kaevo",
-            "0.2.13",
+            "0.2.35",
             configuration.CloudConnectorEnabled,
             cloud.Status,
             cloud.LastHeartbeatUtc,
@@ -56,6 +68,7 @@ public sealed class KaevoController : ControllerBase
             relay.Status,
             relay.LastConnectedUtc,
             relay.ConnectedChannels,
+            "hls-bounded-buffer-v3",
             configuration.OptimizerExecutionEnabled));
     }
 
@@ -87,8 +100,15 @@ public sealed class KaevoController : ControllerBase
 
         // Persist the Jellyfin credential only in the plugin's owner-only secret
         // file. It is never copied into plugin configuration, logs, or responses.
+        var existingSecrets = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false);
         await _secretStore.WriteAsync(
-            new KaevoConnectorSecrets(string.Empty, string.Empty, activation.JellyfinAccessToken),
+            new KaevoConnectorSecrets(
+                string.Empty,
+                string.Empty,
+                activation.JellyfinAccessToken,
+                existingSecrets?.SonarrBaseUrl ?? string.Empty,
+                existingSecrets?.SonarrApiKey ?? string.Empty,
+                existingSecrets?.Providers),
             cancellationToken).ConfigureAwait(false);
 
         var configuration = KaevoPlugin.Instance?.Configuration;
@@ -106,15 +126,86 @@ public sealed class KaevoController : ControllerBase
         configuration.CloudConnectorEnabled = true;
         configuration.RemoteMetadataEnabled = true;
         configuration.RemoteArtworkEnabled = true;
-        configuration.RemoteWritesEnabled = false;
+        configuration.RemoteWritesEnabled = true;
+        configuration.RemoteMediaDeletionEnabled = false;
         configuration.RemotePlaybackEnabled = false;
+        configuration.OptimizerPlanningEnabled = true;
         configuration.OptimizerExecutionEnabled = false;
         KaevoPlugin.Instance?.SaveConfiguration();
         _cloudState.Set("connecting");
+        _cloudState.SignalConfigurationChanged();
 
         return Accepted(new KaevoCloudActivationResponse(
             "connecting",
             "Remote access is being prepared."));
+    }
+
+    [Authorize(Policy = "RequiresElevation")]
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpGet("providers/status")]
+    public async Task<ActionResult<IReadOnlyList<KaevoProviderStatusResponse>>> GetProviderStatus(
+        CancellationToken cancellationToken)
+    {
+        var secrets = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        var response = SupportedProviders.Select(entry =>
+        {
+            var provider = secrets?.GetProvider(entry.Key);
+            var configured = provider is not null
+                && !string.IsNullOrWhiteSpace(provider.BaseUrl)
+                && (!entry.Value.RequiresApiKey || !string.IsNullOrWhiteSpace(provider.ApiKey));
+            return new KaevoProviderStatusResponse(
+                entry.Key,
+                entry.Value.DisplayName,
+                provider?.Enabled == true,
+                configured,
+                provider?.BaseUrl ?? string.Empty,
+                entry.Value.RequiresApiKey);
+        }).ToArray();
+        return Ok(response);
+    }
+
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("providers/{providerName}")]
+    public async Task<ActionResult<KaevoProviderProvisionResponse>> ProvisionProvider(
+        string providerName,
+        [FromBody] KaevoProviderProvisionRequest request,
+        CancellationToken cancellationToken)
+    {
+        var provider = providerName.Trim().ToLowerInvariant();
+        if (!SupportedProviders.TryGetValue(provider, out var definition))
+        {
+            return NotFound(new KaevoProviderProvisionResponse("unsupported", provider));
+        }
+
+        var existing = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ?? new KaevoConnectorSecrets(string.Empty, string.Empty, string.Empty);
+        var current = existing.GetProvider(provider);
+        var baseUrl = request.BaseUrl?.Trim().TrimEnd('/') ?? string.Empty;
+        var apiKey = string.IsNullOrWhiteSpace(request.ApiKey) ? current?.ApiKey ?? string.Empty : request.ApiKey.Trim();
+        if (request.Enabled
+            && (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var baseUri)
+                || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps)
+                || string.IsNullOrWhiteSpace(baseUri.Host)
+                || (definition.RequiresApiKey && string.IsNullOrWhiteSpace(apiKey))))
+        {
+            return BadRequest(new KaevoProviderProvisionResponse("invalid", provider));
+        }
+
+        var providers = existing.Providers is null
+            ? new Dictionary<string, KaevoLocalProviderSecret>(StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, KaevoLocalProviderSecret>(existing.Providers, StringComparer.OrdinalIgnoreCase);
+        providers[provider] = new KaevoLocalProviderSecret(baseUrl, apiKey, request.Enabled);
+        await _secretStore.WriteAsync(
+            existing with
+            {
+                // Preserve the legacy fields until every installed plugin has
+                // migrated its protected secret file.
+                SonarrBaseUrl = provider == "sonarr" ? baseUrl : existing.SonarrBaseUrl,
+                SonarrApiKey = provider == "sonarr" ? apiKey : existing.SonarrApiKey,
+                Providers = providers
+            },
+            cancellationToken).ConfigureAwait(false);
+        return Ok(new KaevoProviderProvisionResponse(request.Enabled ? "ready" : "disabled", provider));
     }
 
     [HttpGet("media-scan")]

@@ -11,6 +11,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddSingleton<KaevoCloudState>();
         serviceCollection.AddSingleton<KaevoSecretStore>();
+        serviceCollection.AddSingleton<KaevoOptimizerCoordinator>();
         serviceCollection.AddHostedService<KaevoCloudConnectorService>();
     }
 }
