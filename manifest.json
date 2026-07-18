@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.47.0",
+        "changelog": "Lets paused titles yield the optimizer lane without losing priority and safely rebuilds silent optimized audio from the protected original.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.47/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "2028078c0e61300e105c590bf511385c",
+        "timestamp": "2026-07-18T02:05:00Z"
+      },
+      {
         "version": "0.2.46.0",
         "changelog": "Targets verified stereo AAC for silent multichannel audio fixes, speeds up full Apple H.264 conversion, and reports progress across Jellyfin FFmpeg variants.",
         "targetAbi": "10.11.0.0",
