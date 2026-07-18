@@ -64,7 +64,7 @@ The highest-impact practical chain was: obtain a reusable Kaevo app/development 
 | KSEC-015 | Medium | Home relay | Jellyfin relay HTTP client had no bounded timeout. | **Patched locally** with connect/read/write/pool limits. |
 | KSEC-016 | Medium | Workstation secrets | Ignored local Cloud credential files were mode `0644`. | **Fixed locally** to `0600`; contents were never printed or copied. |
 | KSEC-017 | Medium | Cloud recovery | IaC does not declare DynamoDB point-in-time recovery, explicit API access logs, or bounded Lambda log retention. | **Open**; operational/cost decision required before deployment. |
-| KSEC-018 | Medium | Provider provisioning | Elevated users can provision arbitrary LAN provider URLs; explicit link-local/metadata-address SSRF denial and DNS-rebinding protection are incomplete. | **Open**; private RFC1918 targets are legitimate, so validation must be purpose-built. |
+| KSEC-018 | Medium | Provider provisioning | Elevated users can provision arbitrary LAN provider URLs; explicit link-local/metadata-address SSRF denial and DNS-rebinding protection are incomplete. | **Plugin path remediated by KSEC-028 candidate; operational staging proof pending.** Other provider consumers remain separately scoped. |
 | KSEC-019 | Medium | Updates | GitHub/catalog packages have checksums but no independent signed release metadata or pinned publisher trust root. | **Open**; add signing and verification before auto-update. |
 | KSEC-020 | Medium | Relay privacy | Playback grants are transported in URL path components. They are short-lived and scoped, but can appear in intermediary/client logs. | **Open**; redact paths and disable access logging of grant-bearing URLs. |
 | KSEC-021 | Medium | Abuse controls | API Gateway has baseline throttles, but expensive remote image, pairing, avatar, and remote-command flows lack per-identity quotas/WAF policy. | **Open**. |
@@ -73,6 +73,8 @@ The highest-impact practical chain was: obtain a reusable Kaevo app/development 
 | KSEC-024 | Low | Home status | Public `/status` leaks basic service existence/version on the LAN. | Accepted for discovery; keep payload minimal. |
 | KSEC-025 | Low | Dependency process | Vulnerability scans are manual and not enforced in CI with an SBOM/provenance gate. | Open. |
 | KSEC-026 | Informational | Tdarr | The Tdarr lane is isolated and marked Coming Soon; it must not receive live-library deletion/replacement authority yet. | Correct current posture. |
+| KSEC-027 | High | Jellyfin Plugin connector identity | The Plugin used the retired v1 pairing exchange and portable connector bearer credentials instead of the completed KSEC-012A lifecycle. | **Canonical remediation implemented; operational staging proof pending** on the Plugin lifecycle/network-policy candidate. Legacy state fails closed with `lifecycle_upgrade_required`; no bearer fallback remains. |
+| KSEC-028 | High | Jellyfin Plugin provider network policy | Provider provisioning accepted arbitrary HTTP(S) destinations without address-class enforcement, DNS-rebinding prevention, request pinning, or redirect containment. | **Canonical remediation implemented; operational staging proof pending** on the Plugin lifecycle/network-policy candidate. Configuration-time and request-time checks share one policy. |
 
 ## Validation evidence
 

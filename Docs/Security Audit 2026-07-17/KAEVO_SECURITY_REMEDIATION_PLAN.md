@@ -75,7 +75,7 @@ Exit: security events are detectable, attributable, retained, and recoverable.
 
 **Target: before public beta**
 
-1. Implement provider URL policy: allowed schemes/ports, no userinfo, explicit denial of loopback/link-local/metadata/multicast/unspecified destinations, DNS resolution revalidation, redirect restrictions, bounded responses/timeouts.
+1. Complete disposable staging proof for the implemented Plugin provider policy: provider-specific ports, no userinfo, public/special-address denial, exact DNS-set reapproval, pinned connections, same-origin/base-path redirects, bounded responses, and timeouts. Keep non-Plugin provider consumers separately gated.
 2. Split the monolithic Lambda/IAM role by public onboarding, profile data, connector control, and playback functions.
 3. Add optional Tailscale Private Direct mode with a generated least-privilege grants policy.
 4. Review TrueNAS, router, Docker, GitHub, Apple Developer, AWS root/administrators, and secrets-manager controls with MFA and least privilege.
