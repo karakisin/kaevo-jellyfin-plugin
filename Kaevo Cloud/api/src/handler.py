@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 # SAM loads sibling modules normally. The explicit path also keeps local
@@ -1560,8 +1560,14 @@ def register_installation_v2(event):
         return response(400, {"state": "bad_request"})
     installation_id = str(body.get("installation_id") or "").strip()
     device_id = str(body.get("device_id") or "").strip()
+    device_label = str(body.get("device_label") or "Kaevo device").strip()[:64]
+    device_class = str(body.get("device_class") or "mobile").strip().lower()[:32]
     if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(installation_id) or not SAFE_PLAYBACK_IDENTIFIER.fullmatch(device_id):
         return response(400, {"state": "invalid_installation"})
+    if not device_label or not re.fullmatch(r"[A-Za-z0-9 ._'()-]{1,64}", device_label):
+        return response(400, {"state": "invalid_device_label"})
+    if device_class not in {"mobile", "tablet", "desktop", "browser", "other"}:
+        return response(400, {"state": "invalid_device_class"})
     try:
         public_jwk = validate_public_jwk(body.get("public_jwk") or {})
         thumbprint = jwk_thumbprint(public_jwk)
@@ -1591,6 +1597,9 @@ def register_installation_v2(event):
     item = {
         "installation_id": installation_id,
         "device_id": device_id,
+        "management_handle": secrets.token_urlsafe(24),
+        "device_label": device_label,
+        "device_class": device_class,
         "principal_id": identity.subject,
         "account_id": identity.account_id,
         "household_id": identity.household_id,
@@ -1772,18 +1781,59 @@ def refresh_bound_session_v2(event):
     })
 
 
+def owner_bound_session(event):
+    session = authenticated_app_session(event)
+    if not session:
+        return None, response(401, {"state": "owner_session_required"})
+    if session.get("role") != "owner":
+        return None, response(403, {"state": "owner_required"})
+    return session, None
+
+
+def list_owner_installations_v2(event):
+    session, error_response = owner_bound_session(event)
+    if error_response:
+        return error_response
+    records = installations_table.scan(
+        FilterExpression=Attr("household_id").eq(str(session.get("household_id") or "")),
+    ).get("Items", []) if installations_table else []
+    devices = []
+    for item in records:
+        if not hmac.compare_digest(str(item.get("principal_id") or ""), str(session.get("principal_id") or "")):
+            continue
+        handle = str(item.get("management_handle") or "")
+        if not handle:
+            continue
+        devices.append({
+            "device_handle": handle,
+            "device_label": str(item.get("device_label") or "Kaevo device"),
+            "device_class": str(item.get("device_class") or "other"),
+            "created_at": str(item.get("created_at") or ""),
+            "last_seen_at": str(item.get("last_seen_at") or item.get("created_at") or ""),
+            "is_current": hmac.compare_digest(str(item.get("installation_id") or ""), str(session.get("installation_id") or "")),
+            "state": "revoked" if bool_value(item.get("revoked"), False) else "active",
+        })
+    devices.sort(key=lambda item: (not item["is_current"], item["device_label"], item["created_at"]))
+    return response(200, {"state": "installations_listed", "devices": devices})
+
+
 def revoke_installation_v2(event, path):
-    installation_id = path.removeprefix("/v2/installations/").removesuffix("/revoke").strip("/")
-    try:
-        identity, _ = authoritative_identity(event, "revoke_device")
-    except IdentityError as error:
-        return identity_error_response(error)
-    installation = installations_table.get_item(Key={"installation_id": installation_id}, ConsistentRead=True).get("Item") if installations_table else None
-    if not installation or not hmac.compare_digest(str(installation.get("household_id") or ""), identity.household_id):
+    device_handle = path.removeprefix("/v2/installations/").removesuffix("/revoke").strip("/")
+    session, error_response = owner_bound_session(event)
+    if error_response:
+        return error_response
+    records = installations_table.scan(
+        FilterExpression=Attr("household_id").eq(str(session.get("household_id") or "")),
+    ).get("Items", []) if installations_table else []
+    installation = next((item for item in records if hmac.compare_digest(str(item.get("management_handle") or ""), device_handle)), None)
+    if not installation or not hmac.compare_digest(str(installation.get("principal_id") or ""), str(session.get("principal_id") or "")):
         return response(404, {"state": "installation_not_found"})
+    installation_id = str(installation.get("installation_id") or "")
+    if bool_value(installation.get("revoked"), False):
+        return response(200, {"state": "installation_revoked"})
     try:
         audit = prepare_security_audit(
-            event, identity.household_id, "installation_revoked", identity.subject,
+            event, str(session.get("household_id") or ""), "installation_revoked", str(session.get("principal_id") or ""),
             target_id=installation_id, target_type="installation",
         )
     except AuditReferenceError:
@@ -1799,7 +1849,7 @@ def revoke_installation_v2(event, path):
     for family_id in {str(item.get("family_id") or "") for item in records}:
         revoke_session_family(family_id, "installation_revoked")
     commit_security_audit(audit)
-    return response(200, {"state": "installation_revoked", "installation_id": installation_id})
+    return response(200, {"state": "installation_revoked"})
 
 
 def migrate_existing_app_session(event):
@@ -3854,9 +3904,14 @@ def lambda_handler(event, context):
         return refresh_app_session(event)
 
     if method == "GET" and path == "/v1/app-sessions/status":
+        if app_bearer_token(event) and not legacy_app_sessions_allowed():
+            return list_owner_installations_v2(event)
         return get_app_session_status(event)
 
     if method == "POST" and path == "/v1/app-sessions/revoke":
+        body = parse_json_body(event) or {}
+        if body.get("device_handle") and not legacy_app_sessions_allowed():
+            return revoke_installation_v2(event, f"/v2/installations/{body['device_handle']}/revoke")
         return revoke_app_session(event)
 
     if method == "POST" and path == "/v2/installations":
