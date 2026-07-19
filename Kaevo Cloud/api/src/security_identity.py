@@ -112,10 +112,13 @@ class IdentityContext:
     ) -> "IdentityContext":
         claims = gateway_jwt_claims(event)
         try:
+            configured_client_id = expected_client_id or os.environ.get("EXPECTED_MAIN_CLIENT_ID", "")
+            additional_client_ids = () if expected_client_id is not None else (os.environ.get("EXPECTED_NATIVE_CLIENT_ID", ""),)
             standard = validate_access_token_claims(
                 claims,
                 expected_issuer=expected_issuer or os.environ.get("EXPECTED_COGNITO_ISSUER", ""),
-                expected_client_id=expected_client_id or os.environ.get("EXPECTED_MAIN_CLIENT_ID", ""),
+                expected_client_id=configured_client_id,
+                additional_expected_client_ids=additional_client_ids,
                 now=now,
             )
             role = Role(_claim(claims, "role"))

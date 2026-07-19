@@ -33,6 +33,7 @@ Parameters:
 
 Conditions:
   IsProduction: !Equals [!Ref EnvironmentName, production]
+  IsSecurityStage: !Equals [!Ref EnvironmentName, security-stage]
 
 Globals:
   Function:
@@ -70,6 +71,7 @@ Resources:
               issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
               audience:
                 - !Ref KaevoUserPoolClient
+                - !If [IsSecurityStage, !Ref KaevoSecurityStageNativeOidcClient, !Ref AWS::NoValue]
             IdentitySource: "$request.header.Authorization"
           KaevoEnrollmentAuthorizer:
             JwtConfiguration:
@@ -421,6 +423,7 @@ Resources:
           EXPECTED_USER_POOL_NAME: !Sub kaevo-cloud-${EnvironmentName}-users
           EXPECTED_MAIN_CLIENT_NAME: !Sub kaevo-cloud-${EnvironmentName}-ios-tvos
           EXPECTED_ENROLLMENT_CLIENT_NAME: !Sub kaevo-cloud-${EnvironmentName}-owner-enrollment
+          EXPECTED_NATIVE_CLIENT_NAME: !If [IsSecurityStage, kaevo-security-stage-native-oidc, ""]
       Policies:
         - AWSLambdaBasicExecutionRole
         - Statement:
@@ -530,6 +533,54 @@ Resources:
       WriteAttributes:
         - email
 
+  KaevoSecurityStageNativeOidcClient:
+    Type: AWS::Cognito::UserPoolClient
+    Condition: IsSecurityStage
+    Properties:
+      ClientName: kaevo-security-stage-native-oidc
+      UserPoolId: !Ref KaevoUserPool
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - kaevo-security-stage://oauth/callback
+      LogoutURLs:
+        - kaevo-security-stage://oauth/logout
+      DefaultRedirectURI: kaevo-security-stage://oauth/callback
+      AccessTokenValidity: 5
+      IdTokenValidity: 5
+      RefreshTokenValidity: 1
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      EnableTokenRevocation: true
+
+  KaevoSecurityStageUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Condition: IsSecurityStage
+    Properties:
+      UserPoolId: !Ref KaevoUserPool
+      Domain: kaevo-security-stage-48c1664d38f4
+      ManagedLoginVersion: 2
+
+  KaevoSecurityStageManagedLoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    Condition: IsSecurityStage
+    DependsOn: KaevoSecurityStageUserPoolDomain
+    Properties:
+      UserPoolId: !Ref KaevoUserPool
+      ClientId: !Ref KaevoSecurityStageNativeOidcClient
+      UseCognitoProvidedValues: true
+
   KaevoIdentityClaimIssuerPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -626,6 +677,7 @@ Resources:
           PLAYBACK_RELAY_PUBLIC_URL: !Ref PlaybackRelayPublicUrl
           EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
           EXPECTED_MAIN_CLIENT_ID: !Ref KaevoUserPoolClient
+          EXPECTED_NATIVE_CLIENT_ID: !If [IsSecurityStage, !Ref KaevoSecurityStageNativeOidcClient, ""]
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoProfileEventsTable
@@ -1065,6 +1117,56 @@ Outputs:
   CognitoEnrollmentUserPoolClientId:
     Description: Short-lived owner enrollment Cognito app client ID
     Value: !Ref KaevoEnrollmentUserPoolClient
+
+  SecurityStageNativeOidcClientId:
+    Condition: IsSecurityStage
+    Description: Public native OIDC client ID for the isolated Security Stage app
+    Value: !Ref KaevoSecurityStageNativeOidcClient
+
+  SecurityStageCognitoDomain:
+    Condition: IsSecurityStage
+    Description: Cognito prefix domain for isolated Security Stage managed login
+    Value: kaevo-security-stage-48c1664d38f4
+
+  SecurityStageAuthorizationEndpoint:
+    Condition: IsSecurityStage
+    Description: Authorization endpoint for isolated Security Stage managed login
+    Value: https://kaevo-security-stage-48c1664d38f4.auth.us-west-2.amazoncognito.com/oauth2/authorize
+
+  SecurityStageTokenEndpoint:
+    Condition: IsSecurityStage
+    Description: Token endpoint for isolated Security Stage managed login
+    Value: https://kaevo-security-stage-48c1664d38f4.auth.us-west-2.amazoncognito.com/oauth2/token
+
+  SecurityStageLogoutEndpoint:
+    Condition: IsSecurityStage
+    Description: Logout endpoint for isolated Security Stage managed login
+    Value: https://kaevo-security-stage-48c1664d38f4.auth.us-west-2.amazoncognito.com/logout
+
+  SecurityStageIssuer:
+    Condition: IsSecurityStage
+    Description: Issuer for the isolated Security Stage user pool
+    Value: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
+
+  SecurityStageCallbackUri:
+    Condition: IsSecurityStage
+    Description: Exact registered callback URI for the isolated Security Stage app
+    Value: kaevo-security-stage://oauth/callback
+
+  SecurityStageLogoutUri:
+    Condition: IsSecurityStage
+    Description: Exact registered logout URI for the isolated Security Stage app
+    Value: kaevo-security-stage://oauth/logout
+
+  SecurityStageRegion:
+    Condition: IsSecurityStage
+    Description: AWS region for the isolated Security Stage identity contract
+    Value: !Ref AWS::Region
+
+  SecurityStageUserPoolId:
+    Condition: IsSecurityStage
+    Description: User-pool ID for the isolated Security Stage identity contract
+    Value: !Ref KaevoUserPool
 
   IdentityMembershipsTableName:
     Description: Authoritative human principal membership table

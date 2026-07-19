@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 import boto3
@@ -21,10 +22,54 @@ SUPPORTED_TRIGGERS = frozenset({
     "TokenGeneration_AuthenticateDevice",
     "TokenGeneration_RefreshTokens",
 })
+NATIVE_TRIGGERS = frozenset({"TokenGeneration_HostedAuth"})
 KAEVO_CLAIMS = [
     "account_id", "household_id", "profile_id", "role",
     "authz_version", "identity_schema_version",
 ]
+
+
+@dataclass(frozen=True)
+class ClientPolicy:
+    kind: str
+    expected_name: str
+    permitted_triggers: frozenset[str]
+    authentication_purpose: str
+    issues_human_claims: bool
+    permits_refresh_claims: bool
+    stage_only: bool
+
+
+def _configured_policies() -> tuple[ClientPolicy, ...]:
+    return (
+        ClientPolicy(
+            kind="main",
+            expected_name=os.environ.get("EXPECTED_MAIN_CLIENT_NAME", ""),
+            permitted_triggers=SUPPORTED_TRIGGERS,
+            authentication_purpose="existing_human_authentication",
+            issues_human_claims=True,
+            permits_refresh_claims=True,
+            stage_only=False,
+        ),
+        ClientPolicy(
+            kind="enrollment",
+            expected_name=os.environ.get("EXPECTED_ENROLLMENT_CLIENT_NAME", ""),
+            permitted_triggers=SUPPORTED_TRIGGERS,
+            authentication_purpose="owner_enrollment",
+            issues_human_claims=False,
+            permits_refresh_claims=True,
+            stage_only=False,
+        ),
+        ClientPolicy(
+            kind="native",
+            expected_name=os.environ.get("EXPECTED_NATIVE_CLIENT_NAME", ""),
+            permitted_triggers=NATIVE_TRIGGERS,
+            authentication_purpose="security_stage_managed_login",
+            issues_human_claims=True,
+            permits_refresh_claims=False,
+            stage_only=True,
+        ),
+    )
 
 
 def _deny(reason: str, event: Mapping[str, Any], started: float) -> None:
@@ -47,32 +92,59 @@ def _table(resource: Any, environment_name: str):
     return resource.Table(name)
 
 
-def _client_kind(event: Mapping[str, Any], cognito: Any) -> str:
+def _validate_native_configuration(client: Mapping[str, Any]) -> None:
+    required = {
+        "AllowedOAuthFlowsUserPoolClient": True,
+        "EnableTokenRevocation": True,
+    }
+    if "ClientSecret" in client or any(client.get(key) is not value for key, value in required.items()):
+        raise AuthorityError("unexpected_native_client_configuration")
+    exact_lists = {
+        "AllowedOAuthFlows": ["code"],
+        "AllowedOAuthScopes": ["openid"],
+        "SupportedIdentityProviders": ["COGNITO"],
+        "CallbackURLs": ["kaevo-security-stage://oauth/callback"],
+        "LogoutURLs": ["kaevo-security-stage://oauth/logout"],
+        "ExplicitAuthFlows": ["ALLOW_REFRESH_TOKEN_AUTH"],
+    }
+    if any(client.get(key) != value for key, value in exact_lists.items()):
+        raise AuthorityError("unexpected_native_client_configuration")
+    if client.get("DefaultRedirectURI") != "kaevo-security-stage://oauth/callback":
+        raise AuthorityError("unexpected_native_client_configuration")
+
+
+def _client_policy(event: Mapping[str, Any], cognito: Any) -> ClientPolicy:
     pool_id = require_identifier(event.get("userPoolId"), "user_pool_id")
     client_id = require_identifier((event.get("callerContext") or {}).get("clientId"), "client_id")
     pool = cognito.describe_user_pool(UserPoolId=pool_id).get("UserPool") or {}
-    if str(pool.get("Name") or "") != os.environ.get("EXPECTED_USER_POOL_NAME", ""):
+    if pool.get("Id") != pool_id or str(pool.get("Name") or "") != os.environ.get("EXPECTED_USER_POOL_NAME", ""):
         raise AuthorityError("unexpected_user_pool")
     client = cognito.describe_user_pool_client(UserPoolId=pool_id, ClientId=client_id).get("UserPoolClient") or {}
+    if client.get("ClientId") != client_id or client.get("UserPoolId") != pool_id:
+        raise AuthorityError("unexpected_user_pool_client")
     client_name = str(client.get("ClientName") or "")
-    if client_name == os.environ.get("EXPECTED_MAIN_CLIENT_NAME", ""):
-        return "main"
-    if client_name == os.environ.get("EXPECTED_ENROLLMENT_CLIENT_NAME", ""):
-        return "enrollment"
+    trigger = str(event.get("triggerSource") or "")
+    for policy in _configured_policies():
+        if policy.expected_name and client_name == policy.expected_name:
+            if trigger not in policy.permitted_triggers:
+                raise AuthorityError("unsupported_client_trigger")
+            if policy.stage_only:
+                _validate_native_configuration(client)
+            return policy
     raise AuthorityError("unexpected_user_pool_client")
 
 
 def issue_claims(event: Mapping[str, Any], *, dynamodb: Any, cognito: Any) -> dict[str, Any]:
-    if str(event.get("version") or "") != "2" or event.get("triggerSource") not in SUPPORTED_TRIGGERS:
+    if str(event.get("version") or "") != "2":
         raise AuthorityError("unsupported_token_event")
-    kind = _client_kind(event, cognito)
+    policy = _client_policy(event, cognito)
     response = dict(event)
     response["response"] = dict(response.get("response") or {})
     overrides: dict[str, Any] = {
         "idTokenGeneration": {"claimsToSuppress": KAEVO_CLAIMS},
         "accessTokenGeneration": {"claimsToSuppress": KAEVO_CLAIMS},
     }
-    if kind == "enrollment":
+    if not policy.issues_human_claims:
         response["response"]["claimsAndScopeOverrideDetails"] = overrides
         return response
 

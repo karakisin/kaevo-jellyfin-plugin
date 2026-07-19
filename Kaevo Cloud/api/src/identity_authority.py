@@ -145,6 +145,7 @@ def validate_access_token_claims(
     *,
     expected_issuer: str,
     expected_client_id: str,
+    additional_expected_client_ids: tuple[str, ...] = (),
     now: int | None = None,
 ) -> dict[str, Any]:
     """Validate standard claims after API Gateway has verified the JWT."""
@@ -156,7 +157,8 @@ def validate_access_token_claims(
     token_use = str(claims.get("token_use") or "")
     if not expected_issuer or not _same(issuer, expected_issuer):
         raise AuthorityError("invalid_access_token")
-    if not expected_client_id or not _same(client_id, expected_client_id):
+    expected_clients = tuple(value for value in (expected_client_id, *additional_expected_client_ids) if value)
+    if not expected_clients or not any(_same(client_id, value) for value in expected_clients):
         raise AuthorityError("invalid_access_token")
     # This is the OAuth token-type discriminator, not a password or credential.
     if token_use != "access":  # nosec B105

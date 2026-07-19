@@ -100,6 +100,30 @@ def test_gateway_context_requires_verified_access_token_standard_claims():
     assert context.identity_schema_version == 1
 
 
+def test_configured_native_client_is_accepted_without_weakening_explicit_client_checks(monkeypatch):
+    monkeypatch.setenv("EXPECTED_COGNITO_ISSUER", "https://issuer.example/pool")
+    monkeypatch.setenv("EXPECTED_MAIN_CLIENT_ID", "main-client")
+    monkeypatch.setenv("EXPECTED_NATIVE_CLIENT_ID", "native-client")
+    native = IdentityContext.from_gateway_event(gateway_event(client_id="native-client"), now=1_000)
+    assert native.client_id == "native-client"
+    with pytest.raises(IdentityError, match="invalid_identity_claims"):
+        IdentityContext.from_gateway_event(
+            gateway_event(client_id="native-client"),
+            expected_issuer="https://issuer.example/pool",
+            expected_client_id="enrollment-client",
+            now=1_000,
+        )
+
+
+@pytest.mark.parametrize("client_id", ["unknown-client", "production-client", "development-client"])
+def test_unconfigured_clients_remain_rejected(monkeypatch, client_id):
+    monkeypatch.setenv("EXPECTED_COGNITO_ISSUER", "https://issuer.example/pool")
+    monkeypatch.setenv("EXPECTED_MAIN_CLIENT_ID", "main-client")
+    monkeypatch.setenv("EXPECTED_NATIVE_CLIENT_ID", "native-client")
+    with pytest.raises(IdentityError, match="invalid_identity_claims"):
+        IdentityContext.from_gateway_event(gateway_event(client_id=client_id), now=1_000)
+
+
 @pytest.mark.parametrize("change", [
     {"token_use": "id"}, {"issuer": "https://attacker.example/pool"},
     {"client_id": "enrollment-client"}, {"schema": "2"},

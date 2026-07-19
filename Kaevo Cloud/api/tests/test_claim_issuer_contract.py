@@ -37,15 +37,18 @@ class FakeDynamo:
 
 
 class FakeCognito:
-    def __init__(self, *, pool_name="kaevo-test-users", client_name="kaevo-test-ios-tvos"):
+    def __init__(self, *, pool_name="kaevo-test-users", client_name="kaevo-test-ios-tvos", client_overrides=None):
         self.pool_name = pool_name
         self.client_name = client_name
+        self.client_overrides = client_overrides or {}
 
     def describe_user_pool(self, *, UserPoolId):
         return {"UserPool": {"Id": UserPoolId, "Name": self.pool_name}}
 
     def describe_user_pool_client(self, *, UserPoolId, ClientId):
-        return {"UserPoolClient": {"ClientName": self.client_name, "ClientId": ClientId, "UserPoolId": UserPoolId}}
+        client = {"ClientName": self.client_name, "ClientId": ClientId, "UserPoolId": UserPoolId}
+        client.update(self.client_overrides)
+        return {"UserPoolClient": client}
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +61,7 @@ def issuer_environment(monkeypatch):
         "EXPECTED_USER_POOL_NAME": "kaevo-test-users",
         "EXPECTED_MAIN_CLIENT_NAME": "kaevo-test-ios-tvos",
         "EXPECTED_ENROLLMENT_CLIENT_NAME": "kaevo-test-owner-enrollment",
+        "EXPECTED_NATIVE_CLIENT_NAME": "kaevo-security-stage-native-oidc",
     }
     for key, value in values.items():
         monkeypatch.setenv(key, value)
@@ -110,6 +114,28 @@ def event(**overrides):
     return value
 
 
+def native_cognito(**overrides):
+    configuration = {
+        "AllowedOAuthFlowsUserPoolClient": True,
+        "EnableTokenRevocation": True,
+        "AllowedOAuthFlows": ["code"],
+        "AllowedOAuthScopes": ["openid"],
+        "SupportedIdentityProviders": ["COGNITO"],
+        "CallbackURLs": ["kaevo-security-stage://oauth/callback"],
+        "LogoutURLs": ["kaevo-security-stage://oauth/logout"],
+        "ExplicitAuthFlows": ["ALLOW_REFRESH_TOKEN_AUTH"],
+        "DefaultRedirectURI": "kaevo-security-stage://oauth/callback",
+    }
+    configuration.update(overrides)
+    return FakeCognito(client_name="kaevo-security-stage-native-oidc", client_overrides=configuration)
+
+
+def native_event(**overrides):
+    values = {"triggerSource": "TokenGeneration_HostedAuth", "callerContext": {"clientId": "native-client"}}
+    values.update(overrides)
+    return event(**values)
+
+
 def test_issuer_uses_only_authoritative_records_and_access_token():
     dynamo, _ = graph()
     result = issue_claims(event(), dynamodb=dynamo, cognito=FakeCognito())
@@ -129,6 +155,63 @@ def test_enrollment_client_never_receives_kaevo_authority_claims():
     access = result["response"]["claimsAndScopeOverrideDetails"]["accessTokenGeneration"]
     assert "claimsToAddOrOverride" not in access
     assert "account_id" in access["claimsToSuppress"]
+
+
+def test_native_hosted_auth_receives_equivalent_authoritative_claims():
+    dynamo, _ = graph()
+    main = issue_claims(event(), dynamodb=dynamo, cognito=FakeCognito())
+    native = issue_claims(native_event(), dynamodb=dynamo, cognito=native_cognito())
+    assert native["response"]["claimsAndScopeOverrideDetails"] == main["response"]["claimsAndScopeOverrideDetails"]
+
+
+@pytest.mark.parametrize("trigger", [
+    "TokenGeneration_Authentication",
+    "TokenGeneration_NewPasswordChallenge",
+    "TokenGeneration_AuthenticateDevice",
+    "TokenGeneration_RefreshTokens",
+    "TokenGeneration_ClientCredentials",
+])
+def test_native_rejects_every_non_hosted_auth_trigger(trigger):
+    dynamo, _ = graph()
+    with pytest.raises(AuthorityError):
+        issue_claims(native_event(triggerSource=trigger), dynamodb=dynamo, cognito=native_cognito())
+
+
+@pytest.mark.parametrize("client_name", [
+    "kaevo-security-stage-native-oidc-lookalike",
+    "prefix-kaevo-security-stage-native-oidc",
+    "Kaevo-security-stage-native-oidc",
+])
+def test_native_client_name_matching_is_exact_and_case_sensitive(client_name):
+    dynamo, _ = graph()
+    with pytest.raises(AuthorityError):
+        issue_claims(native_event(), dynamodb=dynamo, cognito=FakeCognito(client_name=client_name))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("ClientSecret", "must-not-exist"),
+    ("AllowedOAuthFlows", ["code", "implicit"]),
+    ("AllowedOAuthScopes", ["openid", "email"]),
+    ("SupportedIdentityProviders", ["COGNITO", "Google"]),
+    ("CallbackURLs", ["kaevo-security-stage://oauth/callback", "kaevo://oauth/callback"]),
+    ("ExplicitAuthFlows", ["ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH"]),
+])
+def test_native_client_configuration_mismatch_fails_closed(field, value):
+    dynamo, _ = graph()
+    with pytest.raises(AuthorityError, match="unexpected_native_client_configuration"):
+        issue_claims(native_event(), dynamodb=dynamo, cognito=native_cognito(**{field: value}))
+
+
+def test_client_metadata_cannot_spoof_native_identity_role_or_household():
+    dynamo, _ = graph()
+    forged = native_event(request={
+        "userAttributes": {"sub": "user-1", "custom:role": "owner", "custom:household_id": "forged"},
+        "clientMetadata": {"clientId": "main-client", "role": "owner", "household_id": "forged"},
+    })
+    result = issue_claims(forged, dynamodb=dynamo, cognito=native_cognito())
+    claims = result["response"]["claimsAndScopeOverrideDetails"]["accessTokenGeneration"]["claimsToAddOrOverride"]
+    assert claims["household_id"] == "household-1"
+    assert claims["role"] == "owner"
 
 
 @pytest.mark.parametrize("missing", ["principals", "memberships", "households", "profiles"])
