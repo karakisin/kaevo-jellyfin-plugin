@@ -6,7 +6,9 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 public sealed record KaevoLocalProviderSecret(
     string BaseUrl,
     string ApiKey,
-    bool Enabled = true);
+    bool Enabled = true,
+    string[]? ApprovedAddresses = null,
+    string DestinationClass = "private");
 
 public sealed record KaevoConnectorSecrets(
     string ConnectorToken,
@@ -49,6 +51,7 @@ public sealed class KaevoSecretStore
         var dataFolder = KaevoPlugin.Instance?.DataFolderPath
             ?? throw new InvalidOperationException("Kaevo plugin data folder is unavailable.");
         Directory.CreateDirectory(dataFolder);
+        KaevoFilePermissions.OwnerOnlyDirectory(dataFolder);
         _path = Path.Combine(dataFolder, "connector-secrets.json");
     }
 
@@ -83,10 +86,23 @@ public sealed class KaevoSecretStore
         try
         {
             var temporaryPath = _path + ".tmp";
-            await using (var stream = File.Create(temporaryPath))
+            var options = new FileStreamOptions
+            {
+                Mode = FileMode.Create,
+                Access = FileAccess.Write,
+                Share = FileShare.None,
+                Options = FileOptions.WriteThrough
+            };
+            if (!OperatingSystem.IsWindows())
+            {
+                options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            }
+            await using (var stream = new FileStream(temporaryPath, options))
             {
                 await JsonSerializer.SerializeAsync(stream, secrets, cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                stream.Flush(true);
             }
 
             File.Move(temporaryPath, _path, true);

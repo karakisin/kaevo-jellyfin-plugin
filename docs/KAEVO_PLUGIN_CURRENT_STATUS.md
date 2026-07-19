@@ -1,6 +1,6 @@
 # Kaevo Plugin Current Status
 
-Updated: 2026-07-15
+Updated: 2026-07-16
 
 ## Foundation
 
@@ -8,7 +8,9 @@ Updated: 2026-07-15
 - Jellyfin target: `10.11.x`
 - .NET target: `net8.0`
 - Foundation version: `0.1.0`
-- Current repository version: `0.2.18`
+- Current built, tested, published, and installed version: `0.2.28`
+- `0.2.28` keeps relay protocol `hls-bounded-buffer-v3`, advertises an Apple-compatible H.264/HEVC + AAC HLS profile, and permits only media-source-bound subtitle resources.
+- Multi-language audio selection restarts the approved HLS item at the same playhead with Jellyfin's selected stream index. Text subtitles are fetched as grant-bound WebVTT and rendered without replacing the active video session.
 
 ## Files created for the foundation
 
@@ -47,6 +49,8 @@ copied or installed there.
 - The Jellyfin credential is stored only in the plugin's owner-only secret file.
 - Remote playback uses short-lived device-bound authorization and a bounded active session.
 - Jellyfin can locally transcode unsupported audio to AAC while copying compatible video.
+- Playback started, progress, and stopped commands report Kaevo playback to
+  Jellyfin session endpoints.
 - Remote writes and optimizer execution remain off.
 
 ## Local media services
@@ -64,5 +68,6 @@ mutations and real-media optimizer execution remain outside the supported phase.
 
 ## Next validation
 
-Run the Docker build and package scripts, install through the Jellyfin catalog,
-restart Jellyfin, then validate all three endpoints from the local network.
+Plugin `0.2.28` is active on the live Jellyfin server. Build 26 is installed on
+Jefferson's iPhone and needs one controlled cellular playback test covering
+startup, two-minute stability, audio switching, captions, and resume progress.

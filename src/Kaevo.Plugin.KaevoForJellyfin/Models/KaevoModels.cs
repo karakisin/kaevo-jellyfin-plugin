@@ -13,6 +13,7 @@ public sealed record KaevoStatusResponse(
     string PlaybackRelayStatus,
     DateTimeOffset? LastPlaybackRelayConnectedUtc,
     int PlaybackRelayChannels,
+    string PlaybackRelayProtocol,
     bool OptimizerExecution);
 
 public sealed record KaevoCloudPairingStatus(
@@ -31,6 +32,17 @@ public sealed record KaevoCloudActivationRequest(
 public sealed record KaevoCloudActivationResponse(
     string State,
     string Message);
+
+public sealed record KaevoLifecyclePairRequest(
+    string CloudBaseUrl,
+    string OwnerAccessToken,
+    string ProfileId,
+    string JellyfinUserId,
+    string JellyfinAccessToken);
+
+public sealed record KaevoLifecycleOwnerRequest(string OwnerAccessToken);
+
+public sealed record KaevoLifecycleResponse(string State, int CredentialVersion);
 
 public sealed record KaevoProviderProvisionRequest(
     string BaseUrl,

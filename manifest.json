@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.48.0",
+        "changelog": "Binds Cloud connector access to local lifecycle keys and enforces pinned local-provider destinations.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.48/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "ead01b0e1966e595169f7606c26d6689",
+        "timestamp": "2026-07-18T22:39:26Z"
+      },
+      {
         "version": "0.2.47.0",
         "changelog": "Lets paused titles yield the optimizer lane without losing priority and safely rebuilds silent optimized audio from the protected original.",
         "targetAbi": "10.11.0.0",

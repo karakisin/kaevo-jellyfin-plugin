@@ -24,7 +24,10 @@ internal sealed record ResolvedPlaybackRequest(
 internal static partial class KaevoPlaybackSecurity
 {
     private const long MaximumActivePlaybackSeconds = 12 * 60 * 60;
-    private const long MaximumIdlePlaybackSeconds = 5 * 60;
+    // A player can buffer several minutes of a direct stream without making a
+    // second relay request. Keep the activated grant alive through that normal
+    // quiet period while retaining the absolute 12-hour ceiling.
+    private const long MaximumIdlePlaybackSeconds = 30 * 60;
     private const int MaximumActivePlaybackGrants = 256;
     private const int MaximumQueryParameters = 96;
     private const int MaximumQueryValueLength = 4096;
@@ -168,7 +171,7 @@ internal static partial class KaevoPlaybackSecurity
             throw new InvalidOperationException("playbackMethodNotAllowed");
         }
 
-        var resource = ResolveResource(path, grant.ItemId);
+        var resource = ResolveResource(path, grant.ItemId, grant.MediaSourceId);
         if ((grant.Mode == "direct_play" && resource != PlaybackResourceKind.DirectStream)
             || (grant.Mode != "direct_play" && resource == PlaybackResourceKind.DirectStream))
         {
@@ -247,11 +250,11 @@ internal static partial class KaevoPlaybackSecurity
         values[key] = expected;
     }
 
-    internal static bool IsHlsSessionResourcePath(string path, string itemId)
+    internal static bool IsHlsSessionResourcePath(string path, string itemId, string mediaSourceId)
     {
         try
         {
-            return ResolveResource(path, itemId) is PlaybackResourceKind.Playlist or PlaybackResourceKind.Segment;
+            return ResolveResource(path, itemId, mediaSourceId) is PlaybackResourceKind.Playlist or PlaybackResourceKind.Segment;
         }
         catch (InvalidOperationException)
         {
@@ -259,7 +262,7 @@ internal static partial class KaevoPlaybackSecurity
         }
     }
 
-    private static PlaybackResourceKind ResolveResource(string path, string itemId)
+    private static PlaybackResourceKind ResolveResource(string path, string itemId, string mediaSourceId)
     {
         if (string.IsNullOrWhiteSpace(path)
             || path.Length > 2048
@@ -297,6 +300,42 @@ internal static partial class KaevoPlaybackSecurity
         if (resourceSegments.Length == 1 && PlaylistFileRegex().IsMatch(resourceSegments[0]))
         {
             return PlaybackResourceKind.Playlist;
+        }
+
+        if (resourceSegments.Length == 4
+            && string.Equals(resourceSegments[0], mediaSourceId, StringComparison.Ordinal)
+            && string.Equals(resourceSegments[1], "Subtitles", StringComparison.OrdinalIgnoreCase)
+            && int.TryParse(resourceSegments[2], out var subtitleIndex)
+            && subtitleIndex >= 0)
+        {
+            if (PlaylistFileRegex().IsMatch(resourceSegments[3]))
+            {
+                return PlaybackResourceKind.Playlist;
+            }
+            if (SegmentFileRegex().IsMatch(resourceSegments[3]))
+            {
+                return PlaybackResourceKind.Segment;
+            }
+        }
+
+        // Jellyfin 10.11 advertises an image-only HLS rendition for native
+        // scrubber thumbnails. Keep that rendition bound to the granted item,
+        // a bounded width directory, and either its fixed playlist or numbered
+        // JPEG tiles. Authentication query values are stripped by the playlist
+        // rewriter before these URLs are exposed to the player.
+        if (resourceSegments.Length == 3
+            && string.Equals(resourceSegments[0], "Trickplay", StringComparison.OrdinalIgnoreCase)
+            && int.TryParse(resourceSegments[1], out var trickplayWidth)
+            && trickplayWidth is > 0 and <= 8192)
+        {
+            if (string.Equals(resourceSegments[2], "tiles.m3u8", StringComparison.OrdinalIgnoreCase))
+            {
+                return PlaybackResourceKind.Playlist;
+            }
+            if (TrickplayTileRegex().IsMatch(resourceSegments[2]))
+            {
+                return PlaybackResourceKind.Segment;
+            }
         }
 
         if (resourceSegments.Length is < 2 or > 7 || !HlsPlaylistIdRegex().IsMatch(resourceSegments[0]))
@@ -386,6 +425,9 @@ internal static partial class KaevoPlaybackSecurity
 
     [GeneratedRegex("^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\\.(?:ts|mp4|m4s|aac|m4a|mp3|vtt|webvtt)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SegmentFileRegex();
+
+    [GeneratedRegex("^[0-9]{1,6}\\.jpg$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex TrickplayTileRegex();
 
     [GeneratedRegex("^bytes=(?:[0-9]+-[0-9]*|-[0-9]+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex RangeRegex();

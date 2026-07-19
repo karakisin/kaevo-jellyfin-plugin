@@ -10,6 +10,27 @@ public sealed class KaevoCloudState
     private string? _relayError;
     private DateTimeOffset? _lastRelayConnectedUtc;
     private int _relayConnectedChannels;
+    private CancellationTokenSource _configurationChanged = new();
+
+    public CancellationToken ConfigurationChangedToken()
+    {
+        lock (_gate)
+        {
+            return _configurationChanged.Token;
+        }
+    }
+
+    public void SignalConfigurationChanged()
+    {
+        CancellationTokenSource previous;
+        lock (_gate)
+        {
+            previous = _configurationChanged;
+            _configurationChanged = new CancellationTokenSource();
+        }
+        previous.Cancel();
+        previous.Dispose();
+    }
 
     public (string Status, string? LastError, DateTimeOffset? LastHeartbeatUtc) Snapshot()
     {

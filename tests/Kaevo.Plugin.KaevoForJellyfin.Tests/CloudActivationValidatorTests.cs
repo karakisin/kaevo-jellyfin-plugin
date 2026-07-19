@@ -35,6 +35,16 @@ public sealed class CloudActivationValidatorTests
     }
 
     [Fact]
+    public void SecurityStageApiIsEnvironmentScoped()
+    {
+        const string host = "vsuh8a8v8i.execute-api.us-west-2.amazonaws.com";
+
+        Assert.True(KaevoCloudEndpointPolicy.IsApprovedHost(host, "security-stage"));
+        Assert.False(KaevoCloudEndpointPolicy.IsApprovedHost(host, "production"));
+        Assert.False(KaevoCloudEndpointPolicy.IsApprovedHost("attacker.execute-api.us-west-2.amazonaws.com", "security-stage"));
+    }
+
+    [Fact]
     public void MalformedPairingMaterialIsRejected()
     {
         Assert.Throws<ArgumentException>(() =>

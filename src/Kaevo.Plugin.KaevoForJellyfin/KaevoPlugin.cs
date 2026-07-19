@@ -3,6 +3,7 @@ using MediaBrowser.Common.Plugins;
 using MediaBrowser.Model.Plugins;
 using MediaBrowser.Model.Serialization;
 using Kaevo.Plugin.KaevoForJellyfin.Configuration;
+using Kaevo.Plugin.KaevoForJellyfin.Services;
 
 namespace Kaevo.Plugin.KaevoForJellyfin;
 
@@ -13,10 +14,14 @@ public sealed class KaevoPlugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public KaevoPlugin(IApplicationPaths applicationPaths, IXmlSerializer xmlSerializer)
         : base(applicationPaths, xmlSerializer)
     {
+        PackageIntegrityValid = KaevoPackageIntegrity.IsValidVersion(
+            typeof(KaevoPlugin).Assembly.GetName().Version, typeof(KaevoPlugin).Assembly.Location);
         Instance = this;
     }
 
     public static KaevoPlugin? Instance { get; private set; }
+
+    public bool PackageIntegrityValid { get; }
 
     public override string Name => "Kaevo";
 
