@@ -8,7 +8,7 @@ Updated: 2026-07-20
 - Jellyfin target: `10.11.x`
 - .NET target: `net8.0`
 - Foundation version: `0.1.0`
-- Current repository candidate: `0.2.54`
+- Current built, tested, and published version: `0.2.54`
 - `0.2.54` makes every Media Services provider toggle use the same large,
   left-aligned checkbox, spacing, and label treatment as Media Management.
 - `0.2.53` adds embedded transparent Kaevo logo and wordmark assets, a concise
