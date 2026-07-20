@@ -78,6 +78,7 @@ def enrollment_environment(monkeypatch):
         "IDENTITY_HOUSEHOLDS_TABLE": "households", "IDENTITY_PROFILES_TABLE": "profiles",
         "SECURITY_AUDIT_TABLE": "audit", "EXPECTED_COGNITO_ISSUER": "https://issuer.example/pool",
         "EXPECTED_ENROLLMENT_CLIENT_ID": "enrollment-client", "KAEVO_ENV": "test",
+        "EXPECTED_NATIVE_CLIENT_ID": "native-client",
         "AUDIT_REFERENCE_SECRET_ARN": "test-audit-secret",
     }.items():
         monkeypatch.setenv(key, value)
@@ -127,6 +128,16 @@ def test_different_subjects_get_distinct_authority_graphs():
     second = dynamo.tables["principals"].items["user-2"]
     assert first["account_id"] != second["account_id"]
     assert first["household_id"] != second["household_id"]
+
+
+def test_verified_native_client_can_bootstrap_then_replay_idempotently():
+    dynamo = FakeDynamo()
+    first = enroll_owner(event(client_id="native-client"), dynamodb=dynamo, now=1_000)
+    second = enroll_owner(event(client_id="native-client"), dynamodb=dynamo, now=1_001)
+    assert first["statusCode"] == 201
+    assert json.loads(first["body"])["state"] == "enrolled"
+    assert second["statusCode"] == 200
+    assert json.loads(second["body"])["state"] == "already_enrolled"
 
 
 def test_transaction_failure_leaves_no_partial_identity_graph():

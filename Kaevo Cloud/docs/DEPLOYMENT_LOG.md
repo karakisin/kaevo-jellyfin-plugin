@@ -303,3 +303,15 @@ Date: 2026-07-14
 - API and relay tests: 16 passed.
 - SAM validation and build: passed.
 - Live health reported `0.0.19`.
+
+# Normal App Owner Session Promotion — Deployed
+
+Date: 2026-07-19
+Stack: `kaevo-cloud-dev`
+
+- Added a public native Cognito OIDC client for normal Kaevo using authorization code + PKCE, `openid` only, no client secret, and the exact `kaevo://oauth/callback` redirect.
+- Added managed login, authoritative V2 claim issuance, owner enrollment, installation P-256 identity, DPoP-bound access/refresh sessions, device revocation, and privacy-safe security auditing.
+- Split the app-session table migration into sequential refresh-family and installation indexes because DynamoDB permits one GSI creation per table update.
+- Preserved the existing normal Cognito app client and excluded unrelated Home Connector lifecycle routes from the reviewed change set.
+- Local focused Cloud security tests passed 61/61; the deployed health endpoint remained healthy and unauthorized route probes failed closed.
+- Two failed preflight deployments rolled back cleanly. Their deletion-protected empty log groups and generated audit-reference secrets were retained; the successful deployment uses `promotion-v2` resource names.

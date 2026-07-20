@@ -50,10 +50,11 @@ from connector_lifecycle import (
     opaque_intent,
     random_pairing_code,
 )
+from identity_authority import AuthorityError, validate_access_token_claims
 
 
 SERVICE_NAME = "kaevo-cloud"
-VERSION = "0.0.29"
+VERSION = "0.0.30"
 LOGGER = logging.getLogger(__name__)
 
 EVENTS_TABLE = os.environ.get("PROFILE_EVENTS_TABLE")
@@ -68,6 +69,10 @@ APP_SESSIONS_TABLE = os.environ.get("APP_SESSIONS_TABLE")
 PRINCIPALS_TABLE = os.environ.get("PRINCIPALS_TABLE")
 INSTALLATIONS_TABLE = os.environ.get("INSTALLATIONS_TABLE")
 SECURITY_AUDIT_TABLE = os.environ.get("SECURITY_AUDIT_TABLE")
+IDENTITY_MEMBERSHIPS_TABLE = os.environ.get("IDENTITY_MEMBERSHIPS_TABLE")
+IDENTITY_HOUSEHOLDS_TABLE = os.environ.get("IDENTITY_HOUSEHOLDS_TABLE")
+IDENTITY_PROFILES_TABLE = os.environ.get("IDENTITY_PROFILES_TABLE")
+HOUSEHOLD_INVITATIONS_TABLE = os.environ.get("HOUSEHOLD_INVITATIONS_TABLE")
 DEV_API_KEY = os.environ.get("DEV_API_KEY")
 KAEVO_ENV = os.environ.get("KAEVO_ENV", "dev").strip().lower()
 PLAYBACK_GRANT_SIGNING_KEY = os.environ.get("PLAYBACK_GRANT_SIGNING_KEY", "")
@@ -96,6 +101,10 @@ app_sessions_table = dynamodb.Table(APP_SESSIONS_TABLE) if APP_SESSIONS_TABLE el
 principals_table = dynamodb.Table(PRINCIPALS_TABLE) if PRINCIPALS_TABLE else None
 installations_table = dynamodb.Table(INSTALLATIONS_TABLE) if INSTALLATIONS_TABLE else None
 security_audit_table = dynamodb.Table(SECURITY_AUDIT_TABLE) if SECURITY_AUDIT_TABLE else None
+identity_memberships_table = dynamodb.Table(IDENTITY_MEMBERSHIPS_TABLE) if IDENTITY_MEMBERSHIPS_TABLE else None
+identity_households_table = dynamodb.Table(IDENTITY_HOUSEHOLDS_TABLE) if IDENTITY_HOUSEHOLDS_TABLE else None
+identity_profiles_table = dynamodb.Table(IDENTITY_PROFILES_TABLE) if IDENTITY_PROFILES_TABLE else None
+household_invitations_table = dynamodb.Table(HOUSEHOLD_INVITATIONS_TABLE) if HOUSEHOLD_INVITATIONS_TABLE else None
 
 
 DEFAULT_PROFILE_SETTINGS = {
@@ -1672,6 +1681,8 @@ def issue_bound_session_v2(event):
         )
     except AuditReferenceError:
         return audit_unavailable_response()
+    if identity.profile_ids:
+        ensure_nonproduction_family_entitlement(identity.profile_ids[0])
     access, refresh, access_token, refresh_token = new_session_material(identity, installation)
     app_sessions_table.put_item(Item=access)
     app_sessions_table.put_item(Item=refresh)
@@ -1768,6 +1779,7 @@ def refresh_bound_session_v2(event):
             commit_security_audit(audit, containment=True)
             return response(401, {"state": "session_family_revoked"})
         raise
+    ensure_nonproduction_family_entitlement(str(record.get("profile_id") or ""))
     app_sessions_table.put_item(Item=access)
     app_sessions_table.put_item(Item=next_refresh)
     return response(200, {
@@ -1788,6 +1800,210 @@ def owner_bound_session(event):
     if session.get("role") != "owner":
         return None, response(403, {"state": "owner_required"})
     return session, None
+
+
+def _gateway_jwt_claims(event):
+    authorizer = (((event.get("requestContext") or {}).get("authorizer") or {}).get("jwt") or {})
+    claims = authorizer.get("claims")
+    return claims if isinstance(claims, dict) else {}
+
+
+def _join_code_hash(code):
+    normalized = re.sub(r"[^A-Z0-9]", "", str(code or "").upper())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest() if normalized else ""
+
+
+def ensure_nonproduction_family_entitlement(profile_id):
+    """Grant the documented internal tester plan only outside production."""
+    if KAEVO_ENV not in {"dev", "security-stage"} or entitlements_table is None or not profile_id:
+        return None
+    entitlement, _ = load_entitlements_for_profile(profile_id)
+    if bool_value(entitlement.get("family_enabled"), False) and bool_value(entitlement.get("cloud_enabled"), False):
+        return entitlement
+    entitlement = {
+        **DEFAULT_ENTITLEMENTS,
+        "plan": "family",
+        "subscription_state": "active",
+        "cloud_enabled": True,
+        "family_enabled": True,
+        "family_seats": 6,
+        "source": f"{KAEVO_ENV.replace('-', '_')}_owner_testing",
+        "feature_flags": {
+            "cloud_sync": True,
+            "family_profiles": True,
+            "household_participants": True,
+            "household_playback_sync": True,
+        },
+    }
+    timestamp = utc_now_iso()
+    entitlements_table.put_item(Item={
+        "profile_id": profile_id,
+        "entitlements_json": json.dumps(entitlement, separators=(",", ":")),
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    })
+    return entitlement
+
+
+def create_household_invitation(event):
+    session, error_response = owner_bound_session(event)
+    if error_response:
+        return error_response
+    if household_invitations_table is None:
+        return response(503, {"state": "invitation_storage_unavailable"})
+    profile_id = str(session.get("profile_id") or "")
+    entitlement, _ = load_entitlements_for_profile(profile_id)
+    if KAEVO_ENV in {"dev", "security-stage"} and not bool_value(entitlement.get("family_enabled"), False):
+        entitlement = ensure_nonproduction_family_entitlement(profile_id) or entitlement
+    if not bool_value(entitlement.get("family_enabled"), False):
+        return response(409, {"state": "family_plan_required", "message": "Kaevo Family is required to invite a household member."})
+    body = parse_json_body(event) or {}
+    display_name = str(body.get("display_name") or "").strip()[:80]
+    profile_type = str(body.get("profile_type") or "adult").strip().lower()
+    if not display_name or profile_type not in {"adult", "kid"}:
+        return response(400, {"state": "invalid_invitation"})
+    now = epoch_now()
+    expires_at = now + 15 * 60
+    raw_code = secrets.token_hex(5).upper()
+    join_code = f"{raw_code[:5]}-{raw_code[5:]}"
+    invitation_id = f"invite_{secrets.token_urlsafe(18)}"
+    profile_id = f"profile_{secrets.token_urlsafe(24)}"
+    item = {
+        "code_hash": _join_code_hash(join_code),
+        "invitation_id": invitation_id,
+        "account_id": str(session.get("account_id") or ""),
+        "household_id": str(session.get("household_id") or ""),
+        "owner_principal_id": str(session.get("principal_id") or ""),
+        "owner_profile_id": str(session.get("profile_id") or ""),
+        "profile_id": profile_id,
+        "display_name": display_name,
+        "profile_type": profile_type,
+        "role": "kid" if profile_type == "kid" else "adult",
+        "state": "pending",
+        "created_at": utc_now_iso(),
+        "expires_at": expires_at,
+    }
+    household_invitations_table.put_item(Item=item, ConditionExpression="attribute_not_exists(code_hash)")
+    return response(201, {
+        "state": "invitation_created",
+        "invitation_id": invitation_id,
+        "display_name": display_name,
+        "join_code": join_code,
+        "join_url": f"kaevo://join?code={join_code}",
+        "expires_at": expires_at,
+    })
+
+
+def list_household_invitations(event):
+    session, error_response = owner_bound_session(event)
+    if error_response:
+        return error_response
+    if household_invitations_table is None:
+        return response(503, {"state": "invitation_storage_unavailable"})
+    records = household_invitations_table.scan(
+        FilterExpression=Attr("household_id").eq(str(session.get("household_id") or "")),
+    ).get("Items", [])
+    public = [{
+        "invitation_id": str(item.get("invitation_id") or ""),
+        "display_name": str(item.get("display_name") or "Household member"),
+        "profile_type": str(item.get("profile_type") or "adult"),
+        "state": str(item.get("state") or "pending"),
+        "expires_at": int(item.get("expires_at") or 0),
+    } for item in records]
+    return response(200, {"state": "invitations_listed", "invitations": public})
+
+
+def revoke_household_invitation(event, path):
+    session, error_response = owner_bound_session(event)
+    if error_response:
+        return error_response
+    invitation_id = path.removeprefix("/v2/household/invitations/").removesuffix("/revoke").strip("/")
+    records = household_invitations_table.scan(
+        FilterExpression=Attr("household_id").eq(str(session.get("household_id") or "")),
+    ).get("Items", []) if household_invitations_table else []
+    invitation = next((item for item in records if hmac.compare_digest(str(item.get("invitation_id") or ""), invitation_id)), None)
+    if not invitation:
+        return response(404, {"state": "invitation_not_found"})
+    invitation["state"] = "revoked"
+    invitation["revoked_at"] = utc_now_iso()
+    household_invitations_table.put_item(Item=invitation)
+    return response(200, {"state": "invitation_revoked"})
+
+
+def join_household(event):
+    if not all((household_invitations_table, principals_table, identity_memberships_table, identity_profiles_table)):
+        return response(503, {"state": "identity_storage_unavailable"})
+    try:
+        standard = validate_access_token_claims(
+            _gateway_jwt_claims(event),
+            expected_issuer=os.environ.get("EXPECTED_COGNITO_ISSUER", ""),
+            expected_client_id=os.environ.get("EXPECTED_NATIVE_CLIENT_ID", ""),
+            now=epoch_now(),
+        )
+    except AuthorityError:
+        return response(401, {"state": "not_authorized"})
+    subject = standard["sub"]
+    if principals_table.get_item(Key={"principal_id": subject}, ConsistentRead=True).get("Item"):
+        return response(409, {"state": "identity_already_enrolled"})
+    body = parse_json_body(event) or {}
+    code_hash = _join_code_hash(body.get("join_code"))
+    invitation = household_invitations_table.get_item(Key={"code_hash": code_hash}, ConsistentRead=True).get("Item") if code_hash else None
+    now = epoch_now()
+    if not invitation or invitation.get("state") != "pending" or int(invitation.get("expires_at") or 0) < now:
+        return response(410, {"state": "invitation_invalid_or_expired"})
+    created_at = utc_now_iso()
+    profile_id = str(invitation["profile_id"])
+    account_id = str(invitation["account_id"])
+    household_id = str(invitation["household_id"])
+    role = str(invitation["role"])
+    principal = {
+        "principal_id": subject, "account_id": account_id, "household_id": household_id,
+        "role": role, "authz_version": 1, "profile_ids": [profile_id],
+        "state": "active", "revoked": False, "created_at": created_at,
+    }
+    membership = {
+        "principal_id": subject, "account_id": account_id, "household_id": household_id,
+        "profile_id": profile_id, "role": role, "authz_version": 1,
+        "state": "active", "created_at": created_at,
+    }
+    profile = {
+        "profile_id": profile_id, "account_id": account_id, "household_id": household_id,
+        "owner_principal_id": str(invitation["owner_principal_id"]),
+        "member_principal_id": subject, "display_name": str(invitation["display_name"]),
+        "profile_type": str(invitation["profile_type"]), "state": "active", "created_at": created_at,
+    }
+    consumed = dict(invitation)
+    consumed.update({"state": "consumed", "consumed_at": created_at, "member_principal_id": subject})
+    owner_entitlement, _ = load_entitlements_for_profile(str(invitation.get("owner_profile_id") or ""))
+    member_entitlement = {
+        "profile_id": profile_id,
+        "entitlements_json": json.dumps(owner_entitlement, separators=(",", ":")),
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+    transaction = [
+        {"Put": {"TableName": PRINCIPALS_TABLE, "Item": principal, "ConditionExpression": "attribute_not_exists(principal_id)"}},
+        {"Put": {"TableName": IDENTITY_MEMBERSHIPS_TABLE, "Item": membership, "ConditionExpression": "attribute_not_exists(principal_id)"}},
+        {"Put": {"TableName": IDENTITY_PROFILES_TABLE, "Item": profile, "ConditionExpression": "attribute_not_exists(profile_id)"}},
+        {"Put": {"TableName": HOUSEHOLD_INVITATIONS_TABLE, "Item": consumed, "ConditionExpression": "#state = :pending", "ExpressionAttributeNames": {"#state": "state"}, "ExpressionAttributeValues": {":pending": "pending"}}},
+        {"Put": {"TableName": ENTITLEMENTS_TABLE, "Item": member_entitlement, "ConditionExpression": "attribute_not_exists(profile_id)"}},
+        {"Update": {
+            "TableName": PRINCIPALS_TABLE,
+            "Key": {"principal_id": str(invitation["owner_principal_id"])},
+            "UpdateExpression": "SET profile_ids = list_append(profile_ids, :profile)",
+            "ConditionExpression": "contains(profile_ids, :owner_profile) AND NOT contains(profile_ids, :joined_profile)",
+            "ExpressionAttributeValues": {
+                ":profile": [profile_id],
+                ":owner_profile": str(invitation["owner_profile_id"]),
+                ":joined_profile": profile_id,
+            },
+        }},
+    ]
+    try:
+        dynamodb.meta.client.transact_write_items(TransactItems=transaction)
+    except ClientError:
+        return response(409, {"state": "invitation_already_used"})
+    return response(201, {"state": "household_joined", "next": "authenticate_again"})
 
 
 def list_owner_installations_v2(event):
@@ -3865,6 +4081,9 @@ def lambda_handler(event, context):
                 "/v2/installations/{installationId}/revoke",
                 "/v2/app-sessions",
                 "/v2/app-sessions/refresh",
+                "/v2/household/invitations",
+                "/v2/household/invitations/{invitationId}/revoke",
+                "/v2/identity/join-household",
                 "/v1/home-connectors/pairing/start",
                 "/v1/home-connectors/pairing/exchange",
                 "/v1/home-connectors/register",
@@ -3925,6 +4144,18 @@ def lambda_handler(event, context):
 
     if method == "POST" and path == "/v2/app-sessions/refresh":
         return refresh_bound_session_v2(event)
+
+    if path == "/v2/household/invitations":
+        if method == "POST":
+            return create_household_invitation(event)
+        if method == "GET":
+            return list_household_invitations(event)
+
+    if method == "POST" and path.startswith("/v2/household/invitations/") and path.endswith("/revoke"):
+        return revoke_household_invitation(event, path)
+
+    if method == "POST" and path == "/v2/identity/join-household":
+        return join_household(event)
 
     if method == "POST" and path == "/v1/events":
         return save_event(event)

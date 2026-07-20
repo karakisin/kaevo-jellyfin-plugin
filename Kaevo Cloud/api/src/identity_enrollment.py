@@ -83,6 +83,7 @@ def enroll_owner(event: Mapping[str, Any], *, dynamodb: Any, now: int | None = N
         _claims(event),
         expected_issuer=_name("EXPECTED_COGNITO_ISSUER"),
         expected_client_id=_name("EXPECTED_ENROLLMENT_CLIENT_ID"),
+        additional_expected_client_ids=(os.environ.get("EXPECTED_NATIVE_CLIENT_ID", ""),),
         now=current,
     )
     subject = standard["sub"]

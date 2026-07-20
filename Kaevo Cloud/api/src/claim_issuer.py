@@ -25,7 +25,7 @@ SUPPORTED_TRIGGERS = frozenset({
 NATIVE_TRIGGERS = frozenset({"TokenGeneration_HostedAuth"})
 KAEVO_CLAIMS = [
     "account_id", "household_id", "profile_id", "role",
-    "authz_version", "identity_schema_version",
+    "authz_version", "identity_schema_version", "kaevo_enrollment_required",
 ]
 
 
@@ -74,11 +74,16 @@ def _configured_policies() -> tuple[ClientPolicy, ...]:
 
 def _deny(reason: str, event: Mapping[str, Any], started: float) -> None:
     request_id = str(event.get("requestId") or "")[:64]
+    trigger_source = str(event.get("triggerSource") or "missing")[:80]
+    client_id = str((event.get("callerContext") or {}).get("clientId") or "")
+    client_state = "present" if client_id else "missing"
     subject_present = bool(((event.get("request") or {}).get("userAttributes") or {}).get("sub"))
     LOGGER.warning(
-        "identity_claim_denied reason=%s request=%s subject_state=%s duration_ms=%d",
+        "identity_claim_denied reason=%s request=%s trigger_source=%s client_state=%s subject_state=%s duration_ms=%d",
         reason,
         request_id,
+        trigger_source,
+        client_state,
         "present" if subject_present else "missing",
         int((time.monotonic() - started) * 1000),
     )
@@ -93,6 +98,10 @@ def _table(resource: Any, environment_name: str):
 
 
 def _validate_native_configuration(client: Mapping[str, Any]) -> None:
+    callback_uri = os.environ.get("EXPECTED_NATIVE_CALLBACK_URI", "")
+    logout_uri = os.environ.get("EXPECTED_NATIVE_LOGOUT_URI", "")
+    if not callback_uri or not logout_uri:
+        raise AuthorityError("unexpected_native_client_configuration")
     required = {
         "AllowedOAuthFlowsUserPoolClient": True,
         "EnableTokenRevocation": True,
@@ -103,13 +112,13 @@ def _validate_native_configuration(client: Mapping[str, Any]) -> None:
         "AllowedOAuthFlows": ["code"],
         "AllowedOAuthScopes": ["openid"],
         "SupportedIdentityProviders": ["COGNITO"],
-        "CallbackURLs": ["kaevo-security-stage://oauth/callback"],
-        "LogoutURLs": ["kaevo-security-stage://oauth/logout"],
+        "CallbackURLs": [callback_uri],
+        "LogoutURLs": [logout_uri],
         "ExplicitAuthFlows": ["ALLOW_REFRESH_TOKEN_AUTH"],
     }
     if any(client.get(key) != value for key, value in exact_lists.items()):
         raise AuthorityError("unexpected_native_client_configuration")
-    if client.get("DefaultRedirectURI") != "kaevo-security-stage://oauth/callback":
+    if client.get("DefaultRedirectURI") != callback_uri:
         raise AuthorityError("unexpected_native_client_configuration")
 
 
@@ -163,6 +172,13 @@ def issue_claims(event: Mapping[str, Any], *, dynamodb: Any, cognito: Any) -> di
     profile_id = str((membership or {}).get("profile_id") or "")
     household = households.get_item(Key={"household_id": household_id}, ConsistentRead=True).get("Item") if household_id else None
     profile = profiles.get_item(Key={"profile_id": profile_id}, ConsistentRead=True).get("Item") if profile_id else None
+    if policy.kind == "native" and not any((principal, membership, household, profile)):
+        overrides["accessTokenGeneration"] = {
+            "claimsToAddOrOverride": {"kaevo_enrollment_required": "true"},
+            "claimsToSuppress": [claim for claim in KAEVO_CLAIMS if claim != "kaevo_enrollment_required"],
+        }
+        response["response"]["claimsAndScopeOverrideDetails"] = overrides
+        return response
     claims = derive_authoritative_claims(subject, principal, membership, household, profile)
     overrides["accessTokenGeneration"] = {
         "claimsToAddOrOverride": claims.as_token_claims(),

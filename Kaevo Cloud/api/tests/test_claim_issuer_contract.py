@@ -62,6 +62,8 @@ def issuer_environment(monkeypatch):
         "EXPECTED_MAIN_CLIENT_NAME": "kaevo-test-ios-tvos",
         "EXPECTED_ENROLLMENT_CLIENT_NAME": "kaevo-test-owner-enrollment",
         "EXPECTED_NATIVE_CLIENT_NAME": "kaevo-security-stage-native-oidc",
+        "EXPECTED_NATIVE_CALLBACK_URI": "kaevo-security-stage://oauth/callback",
+        "EXPECTED_NATIVE_LOGOUT_URI": "kaevo-security-stage://oauth/logout",
     }
     for key, value in values.items():
         monkeypatch.setenv(key, value)
@@ -146,7 +148,7 @@ def test_issuer_uses_only_authoritative_records_and_access_token():
         "role": "owner", "authz_version": "7", "identity_schema_version": "1",
     }
     assert "claimsToAddOrOverride" not in details["idTokenGeneration"]
-    assert set(details["idTokenGeneration"]["claimsToSuppress"]) == set(claims)
+    assert set(details["idTokenGeneration"]["claimsToSuppress"]) == set(claim_issuer.KAEVO_CLAIMS)
 
 
 def test_enrollment_client_never_receives_kaevo_authority_claims():
@@ -162,6 +164,42 @@ def test_native_hosted_auth_receives_equivalent_authoritative_claims():
     main = issue_claims(event(), dynamodb=dynamo, cognito=FakeCognito())
     native = issue_claims(native_event(), dynamodb=dynamo, cognito=native_cognito())
     assert native["response"]["claimsAndScopeOverrideDetails"] == main["response"]["claimsAndScopeOverrideDetails"]
+
+
+def test_unenrolled_native_hosted_auth_receives_only_enrollment_marker():
+    dynamo, _ = graph()
+    for table in dynamo.tables.values():
+        table.items.clear()
+    result = issue_claims(native_event(), dynamodb=dynamo, cognito=native_cognito())
+    details = result["response"]["claimsAndScopeOverrideDetails"]
+    assert details["accessTokenGeneration"]["claimsToAddOrOverride"] == {
+        "kaevo_enrollment_required": "true",
+    }
+    assert "profile_id" in details["accessTokenGeneration"]["claimsToSuppress"]
+    assert "claimsToAddOrOverride" not in details["idTokenGeneration"]
+
+
+def test_partial_native_identity_graph_still_fails_closed():
+    dynamo, _ = graph()
+    dynamo.tables["memberships"].items.clear()
+    with pytest.raises(AuthorityError):
+        issue_claims(native_event(), dynamodb=dynamo, cognito=native_cognito())
+
+
+def test_normal_app_native_callback_is_validated_from_the_deployed_environment(monkeypatch):
+    monkeypatch.setenv("EXPECTED_NATIVE_CLIENT_NAME", "kaevo-cloud-dev-native-oidc")
+    monkeypatch.setenv("EXPECTED_NATIVE_CALLBACK_URI", "kaevo://oauth/callback")
+    monkeypatch.setenv("EXPECTED_NATIVE_LOGOUT_URI", "kaevo://oauth/logout")
+    dynamo, _ = graph()
+    client = native_cognito(
+        CallbackURLs=["kaevo://oauth/callback"],
+        LogoutURLs=["kaevo://oauth/logout"],
+        DefaultRedirectURI="kaevo://oauth/callback",
+    )
+    client.client_name = "kaevo-cloud-dev-native-oidc"
+    result = issue_claims(native_event(), dynamodb=dynamo, cognito=client)
+    claims = result["response"]["claimsAndScopeOverrideDetails"]["accessTokenGeneration"]["claimsToAddOrOverride"]
+    assert claims["role"] == "owner"
 
 
 @pytest.mark.parametrize("trigger", [

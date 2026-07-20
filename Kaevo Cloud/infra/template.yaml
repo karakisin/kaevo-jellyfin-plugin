@@ -6,7 +6,7 @@ Parameters:
   EnvironmentName:
     Type: String
     Default: dev
-    AllowedValues: [dev, staging, production]
+    AllowedValues: [dev, staging, security-stage, production]
 
   DevApiKey:
     Type: String
@@ -25,15 +25,20 @@ Parameters:
     Default: ""
     Description: Public HTTPS origin of the separate long-lived Kaevo playback relay
 
-  CognitoUserPoolTier:
+  EnableInstallationSessionIndex:
     Type: String
-    Default: ESSENTIALS
-    AllowedValues: [ESSENTIALS, PLUS]
-    Description: Access-token customization requires Cognito Essentials or Plus. Confirm cost before deployment.
+    Default: "false"
+    AllowedValues: ["false", "true"]
+    Description: Enables the second bound-session GSI after the refresh-family index is active
 
 Conditions:
   IsProduction: !Equals [!Ref EnvironmentName, production]
+  IsDevelopment: !Equals [!Ref EnvironmentName, dev]
   IsSecurityStage: !Equals [!Ref EnvironmentName, security-stage]
+  HasNativeOidc: !Or
+    - !Condition IsDevelopment
+    - !Condition IsSecurityStage
+  HasInstallationSessionIndex: !Equals [!Ref EnableInstallationSessionIndex, "true"]
 
 Globals:
   Function:
@@ -71,13 +76,14 @@ Resources:
               issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
               audience:
                 - !Ref KaevoUserPoolClient
-                - !If [IsSecurityStage, !Ref KaevoSecurityStageNativeOidcClient, !Ref AWS::NoValue]
+                - !If [HasNativeOidc, !Ref KaevoSecurityStageNativeOidcClient, !Ref AWS::NoValue]
             IdentitySource: "$request.header.Authorization"
           KaevoEnrollmentAuthorizer:
             JwtConfiguration:
               issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
               audience:
                 - !Ref KaevoEnrollmentUserPoolClient
+                - !If [HasNativeOidc, !Ref KaevoSecurityStageNativeOidcClient, !Ref AWS::NoValue]
             IdentitySource: "$request.header.Authorization"
 
   KaevoProfileEventsTable:
@@ -160,8 +166,11 @@ Resources:
           AttributeType: S
         - AttributeName: created_at_epoch
           AttributeType: N
-        - AttributeName: installation_id
-          AttributeType: S
+        - !If
+          - HasInstallationSessionIndex
+          - AttributeName: installation_id
+            AttributeType: S
+          - !Ref AWS::NoValue
       KeySchema:
         - AttributeName: token_hash
           KeyType: HASH
@@ -174,14 +183,17 @@ Resources:
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
-        - IndexName: installation_id-created_at_epoch-index
-          KeySchema:
-            - AttributeName: installation_id
-              KeyType: HASH
-            - AttributeName: created_at_epoch
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
+        - !If
+          - HasInstallationSessionIndex
+          - IndexName: installation_id-created_at_epoch-index
+            KeySchema:
+              - AttributeName: installation_id
+                KeyType: HASH
+              - AttributeName: created_at_epoch
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - !Ref AWS::NoValue
       TimeToLiveSpecification:
         AttributeName: expires_at
         Enabled: true
@@ -255,6 +267,28 @@ Resources:
         - Key: KaevoDataClass
           Value: identity-authority
 
+  KaevoHouseholdInvitationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-household-invitations
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: code_hash
+          AttributeType: S
+      KeySchema:
+        - AttributeName: code_hash
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      Tags:
+        - Key: KaevoDataClass
+          Value: short-lived-household-invitation
+
   KaevoInstallationsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -304,7 +338,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Name: !Sub kaevo-cloud-${EnvironmentName}-audit-reference-v1
+      Name: !Sub kaevo-cloud-${EnvironmentName}-audit-reference-promotion-v2
       Description: Environment-scoped HMAC key for privacy-safe security-audit references
       GenerateSecretString:
         PasswordLength: 64
@@ -413,7 +447,6 @@ Resources:
       Handler: claim_issuer.lambda_handler
       Timeout: 5
       MemorySize: 128
-      ReservedConcurrentExecutions: 20
       Environment:
         Variables:
           PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
@@ -423,7 +456,18 @@ Resources:
           EXPECTED_USER_POOL_NAME: !Sub kaevo-cloud-${EnvironmentName}-users
           EXPECTED_MAIN_CLIENT_NAME: !Sub kaevo-cloud-${EnvironmentName}-ios-tvos
           EXPECTED_ENROLLMENT_CLIENT_NAME: !Sub kaevo-cloud-${EnvironmentName}-owner-enrollment
-          EXPECTED_NATIVE_CLIENT_NAME: !If [IsSecurityStage, kaevo-security-stage-native-oidc, ""]
+          EXPECTED_NATIVE_CLIENT_NAME: !If
+            - IsSecurityStage
+            - kaevo-security-stage-native-oidc
+            - !If [IsDevelopment, kaevo-cloud-dev-native-oidc, ""]
+          EXPECTED_NATIVE_CALLBACK_URI: !If
+            - IsSecurityStage
+            - kaevo-security-stage://oauth/callback
+            - !If [IsDevelopment, kaevo://oauth/callback, ""]
+          EXPECTED_NATIVE_LOGOUT_URI: !If
+            - IsSecurityStage
+            - kaevo-security-stage://oauth/logout
+            - !If [IsDevelopment, kaevo://oauth/logout, ""]
       Policies:
         - AWSLambdaBasicExecutionRole
         - Statement:
@@ -450,7 +494,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-identity-claim-issuer
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-identity-claim-issuer-promotion-v2
       RetentionInDays: 30
 
   KaevoUserPool:
@@ -459,7 +503,6 @@ Resources:
       - KaevoIdentityClaimIssuerPermission
     Properties:
       UserPoolName: !Sub kaevo-cloud-${EnvironmentName}-users
-      UserPoolTier: !Ref CognitoUserPoolTier
       LambdaConfig:
         PreTokenGenerationConfig:
           LambdaArn: !GetAtt KaevoIdentityClaimIssuerFunction.Arn
@@ -468,21 +511,14 @@ Resources:
         - email
       AutoVerifiedAttributes:
         - email
-      MfaConfiguration: OPTIONAL
-      EnabledMfas:
-        - SOFTWARE_TOKEN_MFA
-      AccountRecoverySetting:
-        RecoveryMechanisms:
-          - Name: verified_email
-            Priority: 1
-      WebAuthnUserVerification: required
+      MfaConfiguration: "OFF"
       Policies:
         PasswordPolicy:
-          MinimumLength: 14
+          MinimumLength: 8
           RequireLowercase: true
           RequireUppercase: true
           RequireNumbers: true
-          RequireSymbols: true
+          RequireSymbols: false
 
   KaevoUserPoolClient:
     Type: AWS::Cognito::UserPoolClient
@@ -492,22 +528,9 @@ Resources:
       GenerateSecret: false
       PreventUserExistenceErrors: ENABLED
       ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
         - ALLOW_USER_SRP_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
-        - ALLOW_USER_AUTH
-      AccessTokenValidity: 15
-      IdTokenValidity: 15
-      RefreshTokenValidity: 30
-      TokenValidityUnits:
-        AccessToken: minutes
-        IdToken: minutes
-        RefreshToken: days
-      EnableTokenRevocation: true
-      ReadAttributes:
-        - email
-        - email_verified
-      WriteAttributes:
-        - email
 
   KaevoEnrollmentUserPoolClient:
     Type: AWS::Cognito::UserPoolClient
@@ -535,9 +558,9 @@ Resources:
 
   KaevoSecurityStageNativeOidcClient:
     Type: AWS::Cognito::UserPoolClient
-    Condition: IsSecurityStage
+    Condition: HasNativeOidc
     Properties:
-      ClientName: kaevo-security-stage-native-oidc
+      ClientName: !If [IsSecurityStage, kaevo-security-stage-native-oidc, kaevo-cloud-dev-native-oidc]
       UserPoolId: !Ref KaevoUserPool
       GenerateSecret: false
       PreventUserExistenceErrors: ENABLED
@@ -551,10 +574,10 @@ Resources:
       SupportedIdentityProviders:
         - COGNITO
       CallbackURLs:
-        - kaevo-security-stage://oauth/callback
+        - !If [IsSecurityStage, kaevo-security-stage://oauth/callback, kaevo://oauth/callback]
       LogoutURLs:
-        - kaevo-security-stage://oauth/logout
-      DefaultRedirectURI: kaevo-security-stage://oauth/callback
+        - !If [IsSecurityStage, kaevo-security-stage://oauth/logout, kaevo://oauth/logout]
+      DefaultRedirectURI: !If [IsSecurityStage, kaevo-security-stage://oauth/callback, kaevo://oauth/callback]
       AccessTokenValidity: 5
       IdTokenValidity: 5
       RefreshTokenValidity: 1
@@ -566,15 +589,15 @@ Resources:
 
   KaevoSecurityStageUserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain
-    Condition: IsSecurityStage
+    Condition: HasNativeOidc
     Properties:
       UserPoolId: !Ref KaevoUserPool
-      Domain: kaevo-security-stage-48c1664d38f4
+      Domain: !If [IsSecurityStage, kaevo-security-stage-48c1664d38f4, kaevo-cloud-dev-295055514343-us-west-2]
       ManagedLoginVersion: 2
 
   KaevoSecurityStageManagedLoginBranding:
     Type: AWS::Cognito::ManagedLoginBranding
-    Condition: IsSecurityStage
+    Condition: HasNativeOidc
     DependsOn: KaevoSecurityStageUserPoolDomain
     Properties:
       UserPoolId: !Ref KaevoUserPool
@@ -598,7 +621,6 @@ Resources:
       Handler: identity_enrollment.lambda_handler
       Timeout: 10
       MemorySize: 128
-      ReservedConcurrentExecutions: 5
       Environment:
         Variables:
           KAEVO_ENV: !Ref EnvironmentName
@@ -610,6 +632,7 @@ Resources:
           AUDIT_REFERENCE_SECRET_ARN: !Ref KaevoAuditReferenceSecret
           EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
           EXPECTED_ENROLLMENT_CLIENT_ID: !Ref KaevoEnrollmentUserPoolClient
+          EXPECTED_NATIVE_CLIENT_ID: !If [HasNativeOidc, !Ref KaevoSecurityStageNativeOidcClient, ""]
       Policies:
         - AWSLambdaBasicExecutionRole
         - Statement:
@@ -647,7 +670,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-owner-enrollment
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-owner-enrollment-promotion-v2
       RetentionInDays: 30
 
   KaevoCloudApiFunction:
@@ -670,6 +693,10 @@ Resources:
           PROFILE_AVATARS_BUCKET: !Ref KaevoProfileAvatarsBucket
           APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
           PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
+          IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
+          IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
+          IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
+          HOUSEHOLD_INVITATIONS_TABLE: !Ref KaevoHouseholdInvitationsTable
           INSTALLATIONS_TABLE: !Ref KaevoInstallationsTable
           SECURITY_AUDIT_TABLE: !Ref KaevoSecurityAuditTable
           AUDIT_REFERENCE_SECRET_ARN: !Ref KaevoAuditReferenceSecret
@@ -677,7 +704,7 @@ Resources:
           PLAYBACK_RELAY_PUBLIC_URL: !Ref PlaybackRelayPublicUrl
           EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
           EXPECTED_MAIN_CLIENT_ID: !Ref KaevoUserPoolClient
-          EXPECTED_NATIVE_CLIENT_ID: !If [IsSecurityStage, !Ref KaevoSecurityStageNativeOidcClient, ""]
+          EXPECTED_NATIVE_CLIENT_ID: !If [HasNativeOidc, !Ref KaevoSecurityStageNativeOidcClient, ""]
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoProfileEventsTable
@@ -696,6 +723,14 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoPrincipalsTable
         - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoIdentityMembershipsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoIdentityHouseholdsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoIdentityProfilesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoHouseholdInvitationsTable
+        - DynamoDBCrudPolicy:
             TableName: !Ref KaevoInstallationsTable
         - Statement:
             - Sid: ConnectorLifecycleTransactions
@@ -707,6 +742,11 @@ Resources:
                 - !GetAtt KaevoHomeConnectorsTable.Arn
                 - !GetAtt KaevoAppSessionsTable.Arn
                 - !GetAtt KaevoSecurityAuditTable.Arn
+                - !GetAtt KaevoPrincipalsTable.Arn
+                - !GetAtt KaevoIdentityMembershipsTable.Arn
+                - !GetAtt KaevoIdentityProfilesTable.Arn
+                - !GetAtt KaevoHouseholdInvitationsTable.Arn
+                - !GetAtt KaevoEntitlementsTable.Arn
             - Sid: ReadAuditReferenceKey
               Effect: Allow
               Action:
@@ -907,71 +947,39 @@ Resources:
             Auth:
               Authorizer: KaevoOwnerAuthorizer
 
+        HouseholdInvitations:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/household/invitations
+            Method: ANY
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
+
+        RevokeHouseholdInvitation:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/household/invitations/{invitationId}/revoke
+            Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
+
+        JoinHousehold:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/identity/join-household
+            Method: POST
+            Auth:
+              Authorizer: KaevoEnrollmentAuthorizer
+
         ExchangeHomeConnectorPairing:
           Type: HttpApi
           Properties:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v1/home-connectors/pairing/exchange
             Method: POST
-
-        ExchangeHomeConnectorPairingV2:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v2/home-connectors/pairing/exchange
-            Method: POST
-
-        StartHomeConnectorRotation:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v2/home-connectors/{connectorId}/rotation-intents
-            Method: POST
-            Auth:
-              Authorizer: KaevoOwnerAuthorizer
-
-        StartHomeConnectorRecovery:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v2/home-connectors/{connectorId}/recovery-intents
-            Method: POST
-            Auth:
-              Authorizer: KaevoOwnerAuthorizer
-
-        StartHomeConnectorUnpair:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v2/home-connectors/{connectorId}/unpair-intents
-            Method: POST
-            Auth:
-              Authorizer: KaevoOwnerAuthorizer
-
-        ActivateHomeConnectorUnpair:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v2/home-connectors/lifecycle/intents/{intentId}/unpair
-            Method: POST
-            Auth:
-              Authorizer: KaevoOwnerAuthorizer
-
-        ActivateHomeConnectorLifecycleIntent:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v2/home-connectors/lifecycle/intents/{intentId}/activate
-            Method: POST
-
-        CancelHomeConnectorLifecycleIntent:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v2/home-connectors/lifecycle/intents/{intentId}/cancel
-            Method: POST
-            Auth:
-              Authorizer: KaevoOwnerAuthorizer
 
         RegisterHomeConnector:
           Type: HttpApi
@@ -1142,6 +1150,31 @@ Outputs:
     Condition: IsSecurityStage
     Description: Logout endpoint for isolated Security Stage managed login
     Value: https://kaevo-security-stage-48c1664d38f4.auth.us-west-2.amazoncognito.com/logout
+
+  DevelopmentNativeOidcClientId:
+    Condition: IsDevelopment
+    Description: Public native OIDC client ID for the normal Kaevo development app
+    Value: !Ref KaevoSecurityStageNativeOidcClient
+
+  DevelopmentCognitoDomain:
+    Condition: IsDevelopment
+    Description: Cognito prefix domain for normal Kaevo development managed login
+    Value: kaevo-cloud-dev-295055514343-us-west-2
+
+  DevelopmentAuthorizationEndpoint:
+    Condition: IsDevelopment
+    Description: Authorization endpoint for normal Kaevo development managed login
+    Value: https://kaevo-cloud-dev-295055514343-us-west-2.auth.us-west-2.amazoncognito.com/oauth2/authorize
+
+  DevelopmentTokenEndpoint:
+    Condition: IsDevelopment
+    Description: Token endpoint for normal Kaevo development managed login
+    Value: https://kaevo-cloud-dev-295055514343-us-west-2.auth.us-west-2.amazoncognito.com/oauth2/token
+
+  DevelopmentLogoutEndpoint:
+    Condition: IsDevelopment
+    Description: Logout endpoint for normal Kaevo development managed login
+    Value: https://kaevo-cloud-dev-295055514343-us-west-2.auth.us-west-2.amazoncognito.com/logout
 
   SecurityStageIssuer:
     Condition: IsSecurityStage
