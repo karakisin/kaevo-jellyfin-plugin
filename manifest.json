@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.51.0",
+        "changelog": "Adds a Kaevo-branded plugin layout and a live countdown for local pairing codes.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.51/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "82a068f2597801b36e19374447e1576d",
+        "timestamp": "2026-07-20T08:00:00Z"
+      },
+      {
         "version": "0.2.50.0",
         "changelog": "Fixes QR and one-time code display after Jellyfin returns the pairing response.",
         "targetAbi": "10.11.0.0",
