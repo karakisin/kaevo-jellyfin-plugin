@@ -86,7 +86,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         return Ok(new KaevoStatusResponse(
             "ok",
             "Kaevo",
-            "0.2.51",
+            "0.2.52",
             configuration.CloudConnectorEnabled,
             cloud.Status,
             cloud.LastHeartbeatUtc,

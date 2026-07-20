@@ -21,5 +21,9 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("KaevoPairingCountdown", page, StringComparison.Ordinal);
         Assert.Contains("Here’s your one-time code", page, StringComparison.Ordinal);
         Assert.Contains("class=\"kaevo-card\"", page, StringComparison.Ordinal);
+        var pageBody = page.IndexOf("<div id=\"KaevoConfigPage\"", StringComparison.Ordinal);
+        var injectedStyles = page.IndexOf("<style id=\"KaevoInjectedStyles\">", StringComparison.Ordinal);
+        Assert.True(injectedStyles > pageBody, "Kaevo styles must live inside the body fragment Jellyfin injects.");
+        Assert.Contains("text-align:center", page, StringComparison.Ordinal);
     }
 }

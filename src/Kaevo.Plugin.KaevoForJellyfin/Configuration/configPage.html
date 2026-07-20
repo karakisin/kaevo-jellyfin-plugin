@@ -20,11 +20,6 @@
         #KaevoConfigPage .kaevo-hero {
             display: flex; align-items: center; gap: 1.1rem; padding: 1.5rem 0 1.25rem;
         }
-        #KaevoConfigPage .kaevo-mark {
-            display: grid; place-items: center; width: 58px; height: 58px; border-radius: 18px;
-            color: #16181c; background: linear-gradient(145deg, #f3d8aa, #b77c2e);
-            font-size: 1.7rem; font-weight: 800; box-shadow: 0 12px 30px rgba(185, 135, 63, .2);
-        }
         #KaevoConfigPage .kaevo-hero h2 { margin: 0; color: var(--kaevo-text); font-size: 2rem; }
         #KaevoConfigPage .kaevo-hero p { margin: .3rem 0 0; color: var(--kaevo-muted); }
         #KaevoConfigPage .kaevo-card {
@@ -72,11 +67,64 @@
 </head>
 <body>
     <div id="KaevoConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+        <!-- Jellyfin injects the body fragment and discards styles declared in the document head. -->
+        <style id="KaevoInjectedStyles">
+            #KaevoConfigPage {
+                --kaevo-bg: #0d0f12; --kaevo-card: #181b20; --kaevo-gold: #e7c48b;
+                --kaevo-text: #f5ead8; --kaevo-muted: #aaa5a0; --kaevo-border: rgba(231,196,139,.22);
+                color: var(--kaevo-text);
+                background: radial-gradient(circle at 80% 0%, rgba(185,135,63,.14), transparent 34%), var(--kaevo-bg);
+            }
+            #KaevoConfigPage .content-primary { max-width: 880px; margin: 0 auto; }
+            #KaevoConfigPage .kaevo-hero { display:flex; align-items:center; gap:1.1rem; padding:1.5rem 0 1.25rem; }
+            #KaevoConfigPage .kaevo-hero h2 { margin:0; color:var(--kaevo-text); font-size:2rem; }
+            #KaevoConfigPage .kaevo-hero p { margin:.3rem 0 0; color:var(--kaevo-muted); }
+            #KaevoConfigPage .kaevo-card {
+                margin:0 0 1.15rem; padding:1.35rem; border:1px solid var(--kaevo-border);
+                border-radius:22px; background:linear-gradient(145deg,rgba(32,36,43,.96),rgba(21,24,29,.98));
+                box-shadow:0 18px 42px rgba(0,0,0,.2);
+            }
+            #KaevoConfigPage .kaevo-card h3 { margin:0 0 .55rem; color:var(--kaevo-text); font-size:1.25rem; }
+            #KaevoConfigPage .kaevo-card-intro, #KaevoConfigPage .fieldDescription { color:var(--kaevo-muted); }
+            #KaevoConfigPage .kaevo-card-intro { margin:0 0 1.15rem; line-height:1.5; }
+            #KaevoConfigPage #KaevoCreatePairing,
+            #KaevoConfigPage #KaevoConfigForm > .kaevo-card .button-submit {
+                border:0; border-radius:999px; min-height:52px; color:#17191d;
+                background:linear-gradient(135deg,#f0d3a3,#d6a65f); font-weight:750;
+                box-shadow:0 10px 24px rgba(185,135,63,.17);
+            }
+            #KaevoConfigPage #KaevoPairingTicket {
+                padding:1.4rem; margin:1.2rem 0 0; border:1px solid var(--kaevo-border);
+                border-radius:18px; background:rgba(8,10,13,.52); text-align:center;
+            }
+            #KaevoConfigPage #KaevoPairingQr {
+                display:block; margin:0 auto 1rem; padding:12px; border-radius:16px;
+                background:#fff; box-shadow:0 12px 30px rgba(0,0,0,.3);
+            }
+            #KaevoConfigPage .kaevo-code-label { margin:.25rem 0 .45rem; color:var(--kaevo-muted); text-align:center; }
+            #KaevoConfigPage #KaevoPairingCode {
+                display:block; color:var(--kaevo-gold); font-size:clamp(1.65rem,5vw,2.35rem);
+                letter-spacing:.16em; font-variant-numeric:tabular-nums; text-align:center;
+            }
+            #KaevoConfigPage .kaevo-countdown { margin:.65rem 0 0; color:var(--kaevo-muted); text-align:center; }
+            #KaevoConfigPage #KaevoPairingCountdown { color:var(--kaevo-text); font-variant-numeric:tabular-nums; }
+            #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingQr,
+            #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingCode { opacity:.4; }
+            #KaevoConfigPage .inputContainer { margin-top:1.15rem; }
+            #KaevoConfigPage input { border-color:rgba(255,255,255,.12); border-radius:12px; }
+            #KaevoConfigPage .kaevo-provider-card {
+                padding:1rem; margin:1rem 0; border:1px solid rgba(255,255,255,.1);
+                border-radius:16px; background:rgba(9,11,14,.35);
+            }
+            @media (max-width:600px) {
+                #KaevoConfigPage .kaevo-card { padding:1rem; border-radius:18px; }
+                #KaevoConfigPage .kaevo-hero { padding-top:.75rem; }
+            }
+        </style>
         <div data-role="content">
             <div class="content-primary">
                 <form id="KaevoConfigForm">
                     <header class="kaevo-hero">
-                        <div class="kaevo-mark" aria-hidden="true">K</div>
                         <div>
                             <h2>Kaevo</h2>
                             <p>Your Jellyfin library, securely connected.</p>
