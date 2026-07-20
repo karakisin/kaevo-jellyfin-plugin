@@ -13,6 +13,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<KaevoSecretStore>();
         serviceCollection.AddSingleton<KaevoConnectorLifecycleStore>();
         serviceCollection.AddSingleton<KaevoConnectorLifecycleClient>();
+        serviceCollection.AddSingleton<KaevoLocalPairingService>();
         serviceCollection.AddSingleton<KaevoProviderDestinationPolicy>();
         serviceCollection.AddSingleton<KaevoProviderTransport>();
         serviceCollection.AddSingleton<KaevoProviderPolicyAuditStore>();

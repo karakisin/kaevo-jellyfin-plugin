@@ -3,19 +3,171 @@
 <head>
     <meta charset="utf-8">
     <title>Kaevo</title>
+    <style>
+        #KaevoConfigPage {
+            --kaevo-bg: #0d0f12;
+            --kaevo-card: #181b20;
+            --kaevo-card-soft: #20242b;
+            --kaevo-gold: #e7c48b;
+            --kaevo-gold-deep: #b9873f;
+            --kaevo-text: #f5ead8;
+            --kaevo-muted: #aaa5a0;
+            --kaevo-border: rgba(231, 196, 139, .22);
+            color: var(--kaevo-text);
+            background: radial-gradient(circle at 80% 0%, rgba(185, 135, 63, .12), transparent 34%), var(--kaevo-bg);
+        }
+        #KaevoConfigPage .content-primary { max-width: 880px; margin: 0 auto; }
+        #KaevoConfigPage .kaevo-hero {
+            display: flex; align-items: center; gap: 1.1rem; padding: 1.5rem 0 1.25rem;
+        }
+        #KaevoConfigPage .kaevo-hero h2 { margin: 0; color: var(--kaevo-text); font-size: 2rem; }
+        #KaevoConfigPage .kaevo-hero p { margin: .3rem 0 0; color: var(--kaevo-muted); }
+        #KaevoConfigPage .kaevo-card {
+            margin: 0 0 1.15rem; padding: 1.35rem; border: 1px solid var(--kaevo-border);
+            border-radius: 22px; background: linear-gradient(145deg, rgba(32,36,43,.96), rgba(21,24,29,.98));
+            box-shadow: 0 18px 42px rgba(0,0,0,.2);
+        }
+        #KaevoConfigPage .kaevo-card h3 { margin: 0 0 .55rem; color: var(--kaevo-text); font-size: 1.25rem; }
+        #KaevoConfigPage .kaevo-card-intro { margin: 0 0 1.15rem; color: var(--kaevo-muted); line-height: 1.5; }
+        #KaevoConfigPage .fieldDescription { color: var(--kaevo-muted); }
+        #KaevoConfigPage #KaevoCreatePairing,
+        #KaevoConfigPage #KaevoConfigForm > .kaevo-card .button-submit {
+            border: 0; border-radius: 999px; min-height: 52px; color: #17191d;
+            background: linear-gradient(135deg, #f0d3a3, #d6a65f); font-weight: 750;
+            box-shadow: 0 10px 24px rgba(185, 135, 63, .17);
+        }
+        #KaevoConfigPage #KaevoPairingTicket {
+            padding: 1.4rem; margin: 1.2rem 0 0; border: 1px solid var(--kaevo-border);
+            border-radius: 18px; background: rgba(8,10,13,.52);
+        }
+        #KaevoConfigPage #KaevoPairingQr {
+            display: block; margin: 0 auto 1rem; padding: 12px; border-radius: 16px;
+            background: #fff; box-shadow: 0 12px 30px rgba(0,0,0,.3);
+        }
+        #KaevoConfigPage .kaevo-code-label { margin: .25rem 0 .45rem; color: var(--kaevo-muted); }
+        #KaevoConfigPage #KaevoPairingCode {
+            display: block; color: var(--kaevo-gold); font-size: clamp(1.65rem, 5vw, 2.35rem);
+            letter-spacing: .16em; font-variant-numeric: tabular-nums;
+        }
+        #KaevoConfigPage .kaevo-countdown { margin: .65rem 0 0; color: var(--kaevo-muted); }
+        #KaevoConfigPage #KaevoPairingCountdown { color: var(--kaevo-text); font-variant-numeric: tabular-nums; }
+        #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingQr,
+        #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingCode { opacity: .4; }
+        #KaevoConfigPage .inputContainer { margin-top: 1.15rem; }
+        #KaevoConfigPage input { border-color: rgba(255,255,255,.12); border-radius: 12px; }
+        #KaevoConfigPage .kaevo-provider-card {
+            padding: 1rem; margin: 1rem 0; border: 1px solid rgba(255,255,255,.1);
+            border-radius: 16px; background: rgba(9,11,14,.35);
+        }
+        @media (max-width: 600px) {
+            #KaevoConfigPage .kaevo-card { padding: 1rem; border-radius: 18px; }
+            #KaevoConfigPage .kaevo-hero { padding-top: .75rem; }
+        }
+    </style>
 </head>
 <body>
     <div id="KaevoConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+        <!-- Jellyfin injects the body fragment and discards styles declared in the document head. -->
+        <style id="KaevoInjectedStyles">
+            #KaevoConfigPage {
+                --kaevo-bg: #0d0f12; --kaevo-card: #181b20; --kaevo-gold: #e7c48b;
+                --kaevo-text: #f5ead8; --kaevo-muted: #aaa5a0; --kaevo-border: rgba(231,196,139,.22);
+                color: var(--kaevo-text);
+                background: radial-gradient(circle at 80% 0%, rgba(185,135,63,.14), transparent 34%), var(--kaevo-bg);
+            }
+            #KaevoConfigPage .content-primary { width:min(calc(100% - 2rem),880px); max-width:880px; margin:0 auto; }
+            #KaevoConfigPage #KaevoConfigForm { width:100%; max-width:none; margin:0; }
+            #KaevoConfigPage .kaevo-hero { display:flex; flex-direction:column; align-items:flex-start; gap:.75rem; padding:1.5rem 0 1.25rem; }
+            #KaevoConfigPage .kaevo-brand-lockup { display:flex; align-items:center; gap:.9rem; min-height:60px; }
+            #KaevoConfigPage .kaevo-logo { display:block; width:58px; height:58px; object-fit:contain; }
+            #KaevoConfigPage .kaevo-wordmark {
+                width:206px; height:44px; background-repeat:no-repeat;
+                background-size:360px 240px; background-position:-77px -101px;
+            }
+            #KaevoConfigPage .kaevo-hero h2 { margin:0; color:var(--kaevo-text); font-size:2rem; }
+            #KaevoConfigPage .kaevo-hero p { margin:.3rem 0 0; color:var(--kaevo-muted); }
+            #KaevoConfigPage .kaevo-card {
+                margin:0 0 1.15rem; padding:1.35rem; border:1px solid var(--kaevo-border);
+                border-radius:22px; background:linear-gradient(145deg,rgba(32,36,43,.96),rgba(21,24,29,.98));
+                box-shadow:0 18px 42px rgba(0,0,0,.2); box-sizing:border-box; width:100%;
+            }
+            #KaevoConfigPage .kaevo-card h3 { margin:0 0 .55rem; color:var(--kaevo-text); font-size:1.25rem; }
+            #KaevoConfigPage .kaevo-card-intro, #KaevoConfigPage .fieldDescription { color:var(--kaevo-muted); }
+            #KaevoConfigPage .kaevo-card-intro { margin:0 0 1.15rem; line-height:1.5; }
+            #KaevoConfigPage .kaevo-trust-summary {
+                display:grid; gap:.55rem; width:100%; box-sizing:border-box; padding:1rem 1.1rem;
+                border:1px solid rgba(231,196,139,.16); border-radius:16px; background:rgba(8,10,13,.42);
+                color:var(--kaevo-muted); line-height:1.5;
+            }
+            #KaevoConfigPage .kaevo-trust-summary strong { color:var(--kaevo-text); }
+            #KaevoConfigPage #KaevoCreatePairing,
+            #KaevoConfigPage #KaevoConfigForm > .kaevo-card .button-submit {
+                border:0; border-radius:999px; min-height:52px; color:#17191d;
+                background:linear-gradient(135deg,#f0d3a3,#d6a65f); font-weight:750;
+                box-shadow:0 10px 24px rgba(185,135,63,.17);
+            }
+            #KaevoConfigPage #KaevoPairingTicket {
+                padding:1.4rem; margin:1.2rem 0 0; border:1px solid var(--kaevo-border);
+                border-radius:18px; background:rgba(8,10,13,.52); text-align:center;
+            }
+            #KaevoConfigPage #KaevoPairingQr {
+                display:block; margin:0 auto 1rem; padding:12px; border-radius:16px;
+                background:#fff; box-shadow:0 12px 30px rgba(0,0,0,.3);
+            }
+            #KaevoConfigPage .kaevo-code-label { margin:.25rem 0 .45rem; color:var(--kaevo-muted); text-align:center; }
+            #KaevoConfigPage #KaevoPairingCode {
+                display:block; color:var(--kaevo-gold); font-size:clamp(1.65rem,5vw,2.35rem);
+                letter-spacing:.16em; font-variant-numeric:tabular-nums; text-align:center;
+            }
+            #KaevoConfigPage .kaevo-countdown { margin:.65rem 0 0; color:var(--kaevo-muted); text-align:center; }
+            #KaevoConfigPage #KaevoPairingCountdown { color:var(--kaevo-text); font-variant-numeric:tabular-nums; }
+            #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingQr,
+            #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingCode { opacity:.4; }
+            #KaevoConfigPage .inputContainer { margin-top:1.15rem; }
+            #KaevoConfigPage input { border-color:rgba(255,255,255,.12); border-radius:12px; }
+            #KaevoConfigPage .kaevo-provider-card {
+                padding:1rem; margin:1rem 0; border:1px solid rgba(255,255,255,.1);
+                border-radius:16px; background:rgba(9,11,14,.35); box-sizing:border-box; width:100%;
+            }
+            #KaevoConfigPage .kaevo-provider-card .inputContainer,
+            #KaevoConfigPage .kaevo-provider-card input { width:100%; box-sizing:border-box; }
+            @media (max-width:600px) {
+                #KaevoConfigPage .kaevo-card { padding:1rem; border-radius:18px; }
+                #KaevoConfigPage .kaevo-hero { padding-top:.75rem; }
+            }
+        </style>
         <div data-role="content">
             <div class="content-primary">
                 <form id="KaevoConfigForm">
-                    <h2>Kaevo</h2>
-                    <p>Kaevo securely connects this Jellyfin server to the Kaevo app.</p>
+                    <header class="kaevo-hero">
+                        <div class="kaevo-brand-lockup" aria-label="Kaevo">
+                            <img id="KaevoBrandLogo" class="kaevo-logo" alt="" aria-hidden="true" />
+                            <span id="KaevoBrandWordmark" class="kaevo-wordmark" role="img" aria-label="Kaevo"></span>
+                        </div>
+                        <p>Your Jellyfin library, securely connected at home and away.</p>
+                        <div class="kaevo-trust-summary">
+                            <div><strong>Private at home.</strong> Your passwords, API keys, local addresses, and media stay on this server.</div>
+                            <div><strong>Connected with purpose.</strong> Kaevo Cloud coordinates sign-in, device pairing, and actions you approve through this plugin.</div>
+                            <div><strong>Nothing extra.</strong> Kaevo Cloud does not receive your Jellyfin password, provider credentials, media files, or unrestricted access to your home network.</div>
+                        </div>
+                    </header>
 
-                    <h3>Remote Access</h3>
+                    <section class="kaevo-card">
+                    <h3>Pair with the Kaevo App</h3>
                     <div class="fieldDescription">Status: <strong id="CloudConnectorStatus">Checking…</strong></div>
-                    <p id="CloudSetupMessage">Open the Kaevo app to start Remote Access. No server addresses, codes, or credentials are entered here.</p>
+                    <p id="CloudSetupMessage" class="kaevo-card-intro">Create a private connection, then scan the QR code or enter the one-time code in Kaevo while you are at home.</p>
+                    <button id="KaevoCreatePairing" is="emby-button" type="button" class="raised button-submit block emby-button">
+                        <span>Connect Kaevo App</span>
+                    </button>
+                    <section id="KaevoPairingTicket" hidden aria-live="polite">
+                        <img id="KaevoPairingQr" alt="Kaevo one-time pairing QR code" width="240" height="240" />
+                        <p class="kaevo-code-label">Here’s your one-time code</p>
+                        <strong id="KaevoPairingCode"></strong>
+                        <p id="KaevoPairingExpiry" class="kaevo-countdown">It expires in <strong id="KaevoPairingCountdown">10:00</strong> and works once.</p>
+                    </section>
+                    </section>
 
+                    <section class="kaevo-card">
                     <h3>Library Snapshot</h3>
                     <div class="inputContainer">
                         <label class="inputLabel inputLabelUnfocused" for="SnapshotItemLimit">Items per section</label>
@@ -33,11 +185,12 @@
                     <button is="emby-button" type="submit" class="raised button-submit block emby-button">
                         <span>Save</span>
                     </button>
+                    </section>
                 </form>
 
-                <div style="margin-top:2.5em">
+                <div class="kaevo-card">
                     <h3>Media Services</h3>
-                    <p>Connect services running on this home server. Each connection stays here and can be turned on or off independently.</p>
+                    <p class="kaevo-card-intro">Connect services running on this home server. Each connection stays here and can be turned on or off independently.</p>
                     <div id="KaevoProviderList"></div>
                 </div>
             </div>
@@ -45,8 +198,48 @@
         <script type="text/javascript">
             var KaevoConfig = {
                 pluginUniqueId: '80c77b84-7f2d-4b52-84c7-7dfe68cd95ae',
-                providers: []
+                providers: [],
+                pairingCountdownTimer: null
             };
+
+            function stopPairingCountdown() {
+                if (KaevoConfig.pairingCountdownTimer) {
+                    clearInterval(KaevoConfig.pairingCountdownTimer);
+                    KaevoConfig.pairingCountdownTimer = null;
+                }
+            }
+
+            function loadKaevoBranding() {
+                document.querySelector('#KaevoBrandLogo').src = ApiClient.getUrl('kaevo/branding/logo');
+                document.querySelector('#KaevoBrandWordmark').style.backgroundImage =
+                    'url("' + ApiClient.getUrl('kaevo/branding/wordmark') + '")';
+            }
+
+            function startPairingCountdown(expiresAt) {
+                stopPairingCountdown();
+                var expiresAtMs = Date.parse(expiresAt);
+                if (!Number.isFinite(expiresAtMs)) expiresAtMs = Date.now() + (10 * 60 * 1000);
+                var ticket = document.querySelector('#KaevoPairingTicket');
+                var expiry = document.querySelector('#KaevoPairingExpiry');
+                ticket.dataset.expired = 'false';
+                expiry.innerHTML = 'It expires in <strong id="KaevoPairingCountdown">10:00</strong> and works once.';
+
+                function updateCountdown() {
+                    var remaining = Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 1000));
+                    var minutes = Math.floor(remaining / 60);
+                    var seconds = String(remaining % 60).padStart(2, '0');
+                    var countdown = document.querySelector('#KaevoPairingCountdown');
+                    if (countdown) countdown.textContent = minutes + ':' + seconds;
+                    if (remaining === 0) {
+                        stopPairingCountdown();
+                        ticket.dataset.expired = 'true';
+                        expiry.textContent = 'This code has expired. Create a new code to continue.';
+                    }
+                }
+
+                updateCountdown();
+                KaevoConfig.pairingCountdownTimer = setInterval(updateCountdown, 1000);
+            }
 
             function providerValue(provider, suffix) {
                 return document.querySelector('#KaevoProvider-' + provider + '-' + suffix);
@@ -76,7 +269,7 @@
                             + '<input id="KaevoProvider-' + provider.Provider + '-key" type="password" is="emby-input" autocomplete="new-password" placeholder="Leave blank to keep the saved key" /></div>'
                         : '';
                     var connected = provider.Enabled && provider.Configured;
-                    return '<section style="padding:1em;margin:1em 0;border:1px solid rgba(255,255,255,.12);border-radius:12px">'
+                    return '<section class="kaevo-provider-card">'
                         + '<h4 style="margin-top:0">' + provider.DisplayName + '</h4>'
                         + '<div class="fieldDescription">Status: <strong id="KaevoProvider-' + provider.Provider + '-status">'
                         + (connected ? 'Connected' : provider.Configured ? 'Off' : 'Not Connected') + '</strong></div>'
@@ -95,6 +288,7 @@
             }
 
             document.querySelector('#KaevoConfigPage').addEventListener('pageshow', function () {
+                loadKaevoBranding();
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
                     document.querySelector('#SnapshotItemLimit').value = config.SnapshotItemLimit || 50;
@@ -109,7 +303,7 @@
                     document.querySelector('#CloudConnectorStatus').textContent = ready ? 'Remote Access Ready' : 'Not Connected';
                     document.querySelector('#CloudSetupMessage').textContent = ready
                         ? 'Remote Access is managed securely by the Kaevo app.'
-                        : 'Open the Kaevo app to start Remote Access. No server addresses, codes, or credentials are entered here.';
+                        : 'Create a private connection, then scan the QR code or enter the one-time code in Kaevo while you are at home.';
                 }).catch(function () {
                     document.querySelector('#CloudConnectorStatus').textContent = 'Not Connected';
                 }).finally(function () {
@@ -142,6 +336,36 @@
                     Dashboard.hideLoadingMsg();
                 });
             });
+
+            document.querySelector('#KaevoCreatePairing').addEventListener('click', function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.ajax({
+                    type: 'POST',
+                    url: ApiClient.getUrl('kaevo/local-pairing/start'),
+                    contentType: 'application/json',
+                    data: '{}'
+                }).then(function (response) {
+                    if (typeof response === 'string') return JSON.parse(response);
+                    if (response && typeof response.json === 'function') return response.json();
+                    return response;
+                }).then(function (ticket) {
+                    var code = ticket.Code || ticket.code;
+                    var qr = ticket.QrPngBase64 || ticket.qrPngBase64;
+                    var expiresAt = ticket.ExpiresAtUtc || ticket.expiresAtUtc;
+                    if (!code || !qr) throw new Error('Incomplete Kaevo pairing response.');
+                    document.querySelector('#KaevoPairingCode').textContent = code;
+                    document.querySelector('#KaevoPairingQr').src = 'data:image/png;base64,' + qr;
+                    document.querySelector('#KaevoPairingTicket').hidden = false;
+                    document.querySelector('#KaevoCreatePairing span').textContent = 'Create New Pairing Code';
+                    startPairingCountdown(expiresAt);
+                }).catch(function () {
+                    Dashboard.alert('Kaevo could not create a pairing code. Sign in as a Jellyfin administrator and try again.');
+                }).finally(function () {
+                    Dashboard.hideLoadingMsg();
+                });
+            });
+
+            document.querySelector('#KaevoConfigPage').addEventListener('pagehide', stopPairingCountdown);
 
             document.querySelector('#KaevoConfigForm').addEventListener('submit', function (event) {
                 event.preventDefault();

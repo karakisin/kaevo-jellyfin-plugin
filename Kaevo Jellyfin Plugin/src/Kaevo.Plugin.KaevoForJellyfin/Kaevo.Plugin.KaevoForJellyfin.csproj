@@ -4,9 +4,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>12</LangVersion>
-    <Version>0.2.48</Version>
-    <AssemblyVersion>0.2.48.0</AssemblyVersion>
-    <FileVersion>0.2.48.0</FileVersion>
+    <Version>0.2.53</Version>
+    <AssemblyVersion>0.2.53.0</AssemblyVersion>
+    <FileVersion>0.2.53.0</FileVersion>
     <RootNamespace>Kaevo.Plugin.KaevoForJellyfin</RootNamespace>
     <AssemblyName>Kaevo.Plugin.KaevoForJellyfin</AssemblyName>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -19,11 +19,14 @@
   <ItemGroup>
     <PackageReference Include="Jellyfin.Controller" Version="10.10.7" ExcludeAssets="runtime" />
     <PackageReference Include="Jellyfin.Model" Version="10.10.7" ExcludeAssets="runtime" />
+    <PackageReference Include="QRCoder" Version="1.6.0" />
   </ItemGroup>
 
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <EmbeddedResource Include="Configuration/configPage.html" />
+    <EmbeddedResource Include="Configuration/Branding/Kaevo_LogoMark_Transparent.png" />
+    <EmbeddedResource Include="Configuration/Branding/Kaevo_Wordmark_Transparent.png" />
   </ItemGroup>
 
   <ItemGroup>

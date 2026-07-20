@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 
-ARCHIVE_FILES = ("Kaevo.Plugin.KaevoForJellyfin.dll", "meta.json")
+ARCHIVE_FILES = ("Kaevo.Plugin.KaevoForJellyfin.dll", "QRCoder.dll", "meta.json")
 
 
 def create_archive(plugin_dir: Path, output: Path) -> None:

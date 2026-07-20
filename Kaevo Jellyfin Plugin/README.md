@@ -9,12 +9,15 @@ metadata access without requiring a separate Kaevo server installation.
 - Jellyfin: `10.11.x`
 - .NET target: `net8.0`
 - Foundation baseline: `0.1.0`
-- Current repository build: `0.2.18`
+- Current repository build: `0.2.53`
 - Supported phase: local metadata, app-guided Cloud activation, and guarded remote playback
 
 Current endpoints:
 
 - `GET /kaevo/status`
+- `GET /kaevo/branding/{logo|wordmark}`
+- `POST /kaevo/local-pairing/start` (elevated Jellyfin administrator only)
+- `POST /kaevo/local-pairing/claim` (elevated Jellyfin administrator only)
 - `GET /kaevo/media-scan`
 - `GET /kaevo/main-snapshot`
 - `POST /kaevo/cloud/activate` (authenticated Jellyfin administrator only)
@@ -37,6 +40,18 @@ Tdarr. API keys and local addresses remain on the Jellyfin server. Sonarr
 missing-episode search, progress, cancellation, and guarded removal are the
 first active provider workflow; the other connections are foundations for the
 next provider-specific features.
+
+## Privacy boundary
+
+The plugin keeps Jellyfin credentials, provider API keys, local service
+addresses, and media on the home server. Kaevo Cloud coordinates owner sign-in,
+device pairing, connector status, and explicitly approved Kaevo actions through
+the plugin. It does not receive the user's Jellyfin password, provider
+credentials, media files, or unrestricted access to the home network.
+
+The configuration page uses embedded transparent Kaevo logo and wordmark assets;
+it does not contact an external image host. Its local pairing QR code and
+one-time code expire after ten minutes and can be used only once.
 
 Kaevo can independently verify Local, DNS / Proxy, and Cloud connectivity for
 each supported service. The Cloud check travels through Kaevo Cloud to this
