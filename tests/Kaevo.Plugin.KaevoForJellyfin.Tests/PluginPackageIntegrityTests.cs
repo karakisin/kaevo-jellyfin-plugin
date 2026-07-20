@@ -7,7 +7,7 @@ public sealed class PluginPackageIntegrityTests
 {
     [Fact]
     public void MatchingJellyfinPackageDirectoryIsAccepted()
-        => Assert.True(KaevoPackageIntegrity.IsValidVersion(new Version(0, 2, 53, 0), "/config/plugins/Kaevo_0.2.53.0/Kaevo.Plugin.KaevoForJellyfin.dll"));
+        => Assert.True(KaevoPackageIntegrity.IsValidVersion(new Version(0, 2, 54, 0), "/config/plugins/Kaevo_0.2.54.0/Kaevo.Plugin.KaevoForJellyfin.dll"));
 
     [Theory]
     [InlineData("/config/plugins/Kaevo_0.2.50.0/Kaevo.Plugin.KaevoForJellyfin.dll")]

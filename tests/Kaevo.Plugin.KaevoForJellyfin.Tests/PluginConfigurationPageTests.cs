@@ -29,6 +29,9 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("Private at home.", page, StringComparison.Ordinal);
         Assert.Contains("Nothing extra.", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoConfigForm { width:100%; max-width:none; margin:0; }", page, StringComparison.Ordinal);
+        Assert.Contains("class=\"kaevo-toggle-row\"", page, StringComparison.Ordinal);
+        Assert.Contains("type=\"checkbox\" is=\"emby-checkbox\"", page, StringComparison.Ordinal);
+        Assert.Contains("input:not([type=\"checkbox\"])", page, StringComparison.Ordinal);
 
         Assert.Contains(assembly.GetManifestResourceNames(), name => name.EndsWith("Branding.Kaevo_LogoMark_Transparent.png", StringComparison.Ordinal));
         Assert.Contains(assembly.GetManifestResourceNames(), name => name.EndsWith("Branding.Kaevo_Wordmark_Transparent.png", StringComparison.Ordinal));
