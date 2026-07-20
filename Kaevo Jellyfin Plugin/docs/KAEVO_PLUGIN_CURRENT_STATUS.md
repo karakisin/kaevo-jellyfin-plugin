@@ -8,7 +8,7 @@ Updated: 2026-07-20
 - Jellyfin target: `10.11.x`
 - .NET target: `net8.0`
 - Foundation version: `0.1.0`
-- Current repository candidate: `0.2.53`
+- Current built, tested, and published version: `0.2.53`
 - `0.2.53` adds embedded transparent Kaevo logo and wordmark assets, a concise
   privacy boundary, aligned configuration cards, and the live single-use pairing
   countdown. Live installation remains a separate operator action.
@@ -86,6 +86,6 @@ mutations and real-media optimizer execution remain outside the supported phase.
 
 ## Next validation
 
-After publishing `0.2.53`, update and restart Jellyfin, hard-refresh the plugin
+Update to `0.2.53`, restart Jellyfin, hard-refresh the plugin
 page, and verify the transparent brand lockup, aligned cards, privacy summary,
 centered pairing ticket, live countdown, and single-use expiration behavior.
