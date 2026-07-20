@@ -130,7 +130,15 @@
                 border-radius:16px; background:rgba(9,11,14,.35); box-sizing:border-box; width:100%;
             }
             #KaevoConfigPage .kaevo-provider-card .inputContainer,
-            #KaevoConfigPage .kaevo-provider-card input { width:100%; box-sizing:border-box; }
+            #KaevoConfigPage .kaevo-provider-card input:not([type="checkbox"]) { width:100%; box-sizing:border-box; }
+            #KaevoConfigPage .kaevo-toggle-row {
+                display:flex; gap:.65em; align-items:flex-start; margin:1em 0;
+                color:var(--kaevo-text); line-height:1.35;
+            }
+            #KaevoConfigPage .kaevo-toggle-row input[type="checkbox"] {
+                width:auto; flex:0 0 auto; box-sizing:initial;
+            }
+            #KaevoConfigPage .kaevo-toggle-row > span { display:block; }
             @media (max-width:600px) {
                 #KaevoConfigPage .kaevo-card { padding:1rem; border-radius:18px; }
                 #KaevoConfigPage .kaevo-hero { padding-top:.75rem; }
@@ -175,7 +183,7 @@
                         <div class="fieldDescription">Limits the number of movies, shows, collections, and Continue Watching items Kaevo reads at once.</div>
                     </div>
                     <h3>Media Management</h3>
-                    <label style="display:flex;gap:.65em;align-items:flex-start;margin:1em 0">
+                    <label class="kaevo-toggle-row">
                         <input id="RemoteMediaDeletionEnabled" type="checkbox" is="emby-checkbox" />
                         <span>
                             Allow Kaevo to delete media
@@ -273,7 +281,7 @@
                         + '<h4 style="margin-top:0">' + provider.DisplayName + '</h4>'
                         + '<div class="fieldDescription">Status: <strong id="KaevoProvider-' + provider.Provider + '-status">'
                         + (connected ? 'Connected' : provider.Configured ? 'Off' : 'Not Connected') + '</strong></div>'
-                        + '<label style="display:flex;gap:.65em;align-items:center;margin:1em 0"><input id="KaevoProvider-' + provider.Provider + '-enabled" type="checkbox" '
+                        + '<label class="kaevo-toggle-row"><input id="KaevoProvider-' + provider.Provider + '-enabled" type="checkbox" is="emby-checkbox" '
                         + (provider.Enabled ? 'checked' : '') + ' /><span>Use ' + provider.DisplayName + '</span></label>'
                         + '<div class="inputContainer"><label class="inputLabel inputLabelUnfocused">Local address</label>'
                         + '<input id="KaevoProvider-' + provider.Provider + '-url" type="url" is="emby-input" value="' + escapeHtml(provider.BaseUrl) + '" placeholder="http://192.168.1.10:port" /></div>'

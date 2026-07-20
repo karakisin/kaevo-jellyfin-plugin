@@ -199,7 +199,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 connector_name = "Kaevo Jellyfin Plugin",
                 host_type = "jellyfin_plugin",
-                app_version = "0.2.53",
+                app_version = "0.2.54",
                 capabilities = new[]
                 {
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
@@ -1352,7 +1352,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         await Task.WhenAll(viewsTask, moviesTask, showsTask, collectionsTask, resumeTask, recentTask).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
-            version = "0.2.53",
+            version = "0.2.54",
             generated_at = DateTimeOffset.UtcNow,
             views = viewsTask.Result.Payload,
             movies = moviesTask.Result.Payload,
@@ -1993,7 +1993,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         var result = new Dictionary<string, ProviderReachability>(StringComparer.OrdinalIgnoreCase)
         {
-            ["jellyfin"] = ProviderStatus(true, true, "0.2.53", null)
+            ["jellyfin"] = ProviderStatus(true, true, "0.2.54", null)
         };
         foreach (var providerName in new[] { "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr" })
         {
@@ -2006,7 +2006,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             result[providerName] = ProviderStatus(
                 enabled && configured,
                 configured,
-                "0.2.53",
+                "0.2.54",
                 !configured ? "notConfigured" : enabled ? null : "disabled");
         }
 
@@ -2015,13 +2015,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             result["optimizer"] = ProviderStatus(
                 configuration.OptimizerPlanningEnabled,
                 configuration.OptimizerPlanningEnabled,
-                "0.2.53",
+                "0.2.54",
                 configuration.OptimizerPlanningEnabled ? null : "disabled");
         }
         result["playback_tunnel"] = ProviderStatus(
             configuration.RemotePlaybackEnabled,
             configuration.RemotePlaybackEnabled,
-            "0.2.53",
+            "0.2.54",
             configuration.RemotePlaybackEnabled ? null : "disabled");
         return result;
     }
