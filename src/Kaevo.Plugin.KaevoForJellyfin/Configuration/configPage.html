@@ -14,7 +14,16 @@
 
                     <h3>Remote Access</h3>
                     <div class="fieldDescription">Status: <strong id="CloudConnectorStatus">Checking…</strong></div>
-                    <p id="CloudSetupMessage">Open the Kaevo app to start Remote Access. No server addresses, codes, or credentials are entered here.</p>
+                    <p id="CloudSetupMessage">Create a private connection, then scan the QR code or enter the one-time code in Kaevo while you are at home.</p>
+                    <button id="KaevoCreatePairing" is="emby-button" type="button" class="raised button-submit block emby-button">
+                        <span>Connect Kaevo App</span>
+                    </button>
+                    <section id="KaevoPairingTicket" hidden style="text-align:center;padding:1.25em;margin:1em 0;border:1px solid rgba(255,255,255,.18);border-radius:16px">
+                        <img id="KaevoPairingQr" alt="Kaevo one-time pairing QR code" width="240" height="240" style="max-width:100%;background:white;padding:10px;border-radius:12px" />
+                        <p style="margin-bottom:.25em">Or enter this one-time code:</p>
+                        <strong id="KaevoPairingCode" style="font-size:1.7em;letter-spacing:.12em"></strong>
+                        <p class="fieldDescription">Expires in 10 minutes and works once.</p>
+                    </section>
 
                     <h3>Library Snapshot</h3>
                     <div class="inputContainer">
@@ -138,6 +147,27 @@
                     Dashboard.alert('Connection saved.');
                 }).catch(function () {
                     Dashboard.alert('Kaevo could not save this connection. Check the local address and API key.');
+                }).finally(function () {
+                    Dashboard.hideLoadingMsg();
+                });
+            });
+
+            document.querySelector('#KaevoCreatePairing').addEventListener('click', function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.ajax({
+                    type: 'POST',
+                    url: ApiClient.getUrl('kaevo/local-pairing/start'),
+                    contentType: 'application/json',
+                    data: '{}'
+                }).then(function (ticket) {
+                    if (typeof ticket === 'string') ticket = JSON.parse(ticket);
+                    var code = ticket.Code || ticket.code;
+                    var qr = ticket.QrPngBase64 || ticket.qrPngBase64;
+                    document.querySelector('#KaevoPairingCode').textContent = code;
+                    document.querySelector('#KaevoPairingQr').src = 'data:image/png;base64,' + qr;
+                    document.querySelector('#KaevoPairingTicket').hidden = false;
+                }).catch(function () {
+                    Dashboard.alert('Kaevo could not create a pairing code. Sign in as a Jellyfin administrator and try again.');
                 }).finally(function () {
                     Dashboard.hideLoadingMsg();
                 });

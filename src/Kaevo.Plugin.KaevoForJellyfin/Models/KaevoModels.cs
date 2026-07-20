@@ -44,6 +44,20 @@ public sealed record KaevoLifecycleOwnerRequest(string OwnerAccessToken);
 
 public sealed record KaevoLifecycleResponse(string State, int CredentialVersion);
 
+public sealed record KaevoLocalPairingStartResponse(
+    string Code,
+    DateTimeOffset ExpiresAtUtc,
+    string PairingUri,
+    string QrPngBase64);
+
+public sealed record KaevoLocalPairingClaimRequest(
+    string Code,
+    string CloudBaseUrl,
+    string OwnerAccessToken,
+    string ProfileId,
+    string JellyfinUserId,
+    string JellyfinAccessToken);
+
 public sealed record KaevoProviderProvisionRequest(
     string BaseUrl,
     string? ApiKey,

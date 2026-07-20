@@ -28,11 +28,12 @@ rm -rf "$PLUGIN_DIR" "$ZIP_PATH"
 mkdir -p "$PLUGIN_DIR"
 
 cp "$BUILD_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/"
+cp "$BUILD_DIR/QRCoder.dll" "$PLUGIN_DIR/"
 
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Binds Cloud connector access to local lifecycle keys and enforces pinned local-provider destinations.",
+  "changelog": "Adds a local-only, single-use QR or code handshake for securely pairing the Kaevo app with Jellyfin.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -40,12 +41,12 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.48.0"
+  "version": "0.2.49.0"
 }
 EOF
 
 NORMALIZED_TIMESTAMP="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$TIMESTAMP" '+%Y%m%d%H%M.%S')"
-touch -t "$NORMALIZED_TIMESTAMP" "$PLUGIN_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/meta.json"
+touch -t "$NORMALIZED_TIMESTAMP" "$PLUGIN_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/QRCoder.dll" "$PLUGIN_DIR/meta.json"
 
 python3 "$SCRIPT_DIR/create-deterministic-plugin-zip.py" "$PLUGIN_DIR" "$ZIP_PATH"
 
