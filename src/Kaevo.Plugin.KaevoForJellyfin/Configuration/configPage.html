@@ -159,10 +159,14 @@
                     url: ApiClient.getUrl('kaevo/local-pairing/start'),
                     contentType: 'application/json',
                     data: '{}'
+                }).then(function (response) {
+                    if (typeof response === 'string') return JSON.parse(response);
+                    if (response && typeof response.json === 'function') return response.json();
+                    return response;
                 }).then(function (ticket) {
-                    if (typeof ticket === 'string') ticket = JSON.parse(ticket);
                     var code = ticket.Code || ticket.code;
                     var qr = ticket.QrPngBase64 || ticket.qrPngBase64;
+                    if (!code || !qr) throw new Error('Incomplete Kaevo pairing response.');
                     document.querySelector('#KaevoPairingCode').textContent = code;
                     document.querySelector('#KaevoPairingQr').src = 'data:image/png;base64,' + qr;
                     document.querySelector('#KaevoPairingTicket').hidden = false;
