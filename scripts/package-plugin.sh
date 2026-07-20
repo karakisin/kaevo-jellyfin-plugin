@@ -33,7 +33,7 @@ cp "$BUILD_DIR/QRCoder.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Applies Kaevo branding inside Jellyfin's injected plugin page and centers the pairing experience.",
+  "changelog": "Adds official transparent Kaevo branding, clear privacy guidance, and consistently aligned configuration cards.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -41,7 +41,7 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.52.0"
+  "version": "0.2.53.0"
 }
 EOF
 

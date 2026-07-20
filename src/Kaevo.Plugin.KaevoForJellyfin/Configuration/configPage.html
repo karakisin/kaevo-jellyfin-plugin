@@ -75,18 +75,31 @@
                 color: var(--kaevo-text);
                 background: radial-gradient(circle at 80% 0%, rgba(185,135,63,.14), transparent 34%), var(--kaevo-bg);
             }
-            #KaevoConfigPage .content-primary { max-width: 880px; margin: 0 auto; }
-            #KaevoConfigPage .kaevo-hero { display:flex; align-items:center; gap:1.1rem; padding:1.5rem 0 1.25rem; }
+            #KaevoConfigPage .content-primary { width:min(calc(100% - 2rem),880px); max-width:880px; margin:0 auto; }
+            #KaevoConfigPage #KaevoConfigForm { width:100%; max-width:none; margin:0; }
+            #KaevoConfigPage .kaevo-hero { display:flex; flex-direction:column; align-items:flex-start; gap:.75rem; padding:1.5rem 0 1.25rem; }
+            #KaevoConfigPage .kaevo-brand-lockup { display:flex; align-items:center; gap:.9rem; min-height:60px; }
+            #KaevoConfigPage .kaevo-logo { display:block; width:58px; height:58px; object-fit:contain; }
+            #KaevoConfigPage .kaevo-wordmark {
+                width:206px; height:44px; background-repeat:no-repeat;
+                background-size:360px 240px; background-position:-77px -101px;
+            }
             #KaevoConfigPage .kaevo-hero h2 { margin:0; color:var(--kaevo-text); font-size:2rem; }
             #KaevoConfigPage .kaevo-hero p { margin:.3rem 0 0; color:var(--kaevo-muted); }
             #KaevoConfigPage .kaevo-card {
                 margin:0 0 1.15rem; padding:1.35rem; border:1px solid var(--kaevo-border);
                 border-radius:22px; background:linear-gradient(145deg,rgba(32,36,43,.96),rgba(21,24,29,.98));
-                box-shadow:0 18px 42px rgba(0,0,0,.2);
+                box-shadow:0 18px 42px rgba(0,0,0,.2); box-sizing:border-box; width:100%;
             }
             #KaevoConfigPage .kaevo-card h3 { margin:0 0 .55rem; color:var(--kaevo-text); font-size:1.25rem; }
             #KaevoConfigPage .kaevo-card-intro, #KaevoConfigPage .fieldDescription { color:var(--kaevo-muted); }
             #KaevoConfigPage .kaevo-card-intro { margin:0 0 1.15rem; line-height:1.5; }
+            #KaevoConfigPage .kaevo-trust-summary {
+                display:grid; gap:.55rem; width:100%; box-sizing:border-box; padding:1rem 1.1rem;
+                border:1px solid rgba(231,196,139,.16); border-radius:16px; background:rgba(8,10,13,.42);
+                color:var(--kaevo-muted); line-height:1.5;
+            }
+            #KaevoConfigPage .kaevo-trust-summary strong { color:var(--kaevo-text); }
             #KaevoConfigPage #KaevoCreatePairing,
             #KaevoConfigPage #KaevoConfigForm > .kaevo-card .button-submit {
                 border:0; border-radius:999px; min-height:52px; color:#17191d;
@@ -114,8 +127,10 @@
             #KaevoConfigPage input { border-color:rgba(255,255,255,.12); border-radius:12px; }
             #KaevoConfigPage .kaevo-provider-card {
                 padding:1rem; margin:1rem 0; border:1px solid rgba(255,255,255,.1);
-                border-radius:16px; background:rgba(9,11,14,.35);
+                border-radius:16px; background:rgba(9,11,14,.35); box-sizing:border-box; width:100%;
             }
+            #KaevoConfigPage .kaevo-provider-card .inputContainer,
+            #KaevoConfigPage .kaevo-provider-card input { width:100%; box-sizing:border-box; }
             @media (max-width:600px) {
                 #KaevoConfigPage .kaevo-card { padding:1rem; border-radius:18px; }
                 #KaevoConfigPage .kaevo-hero { padding-top:.75rem; }
@@ -125,9 +140,15 @@
             <div class="content-primary">
                 <form id="KaevoConfigForm">
                     <header class="kaevo-hero">
-                        <div>
-                            <h2>Kaevo</h2>
-                            <p>Your Jellyfin library, securely connected.</p>
+                        <div class="kaevo-brand-lockup" aria-label="Kaevo">
+                            <img id="KaevoBrandLogo" class="kaevo-logo" alt="" aria-hidden="true" />
+                            <span id="KaevoBrandWordmark" class="kaevo-wordmark" role="img" aria-label="Kaevo"></span>
+                        </div>
+                        <p>Your Jellyfin library, securely connected at home and away.</p>
+                        <div class="kaevo-trust-summary">
+                            <div><strong>Private at home.</strong> Your passwords, API keys, local addresses, and media stay on this server.</div>
+                            <div><strong>Connected with purpose.</strong> Kaevo Cloud coordinates sign-in, device pairing, and actions you approve through this plugin.</div>
+                            <div><strong>Nothing extra.</strong> Kaevo Cloud does not receive your Jellyfin password, provider credentials, media files, or unrestricted access to your home network.</div>
                         </div>
                     </header>
 
@@ -186,6 +207,12 @@
                     clearInterval(KaevoConfig.pairingCountdownTimer);
                     KaevoConfig.pairingCountdownTimer = null;
                 }
+            }
+
+            function loadKaevoBranding() {
+                document.querySelector('#KaevoBrandLogo').src = ApiClient.getUrl('kaevo/branding/logo');
+                document.querySelector('#KaevoBrandWordmark').style.backgroundImage =
+                    'url("' + ApiClient.getUrl('kaevo/branding/wordmark') + '")';
             }
 
             function startPairingCountdown(expiresAt) {
@@ -261,6 +288,7 @@
             }
 
             document.querySelector('#KaevoConfigPage').addEventListener('pageshow', function () {
+                loadKaevoBranding();
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
                     document.querySelector('#SnapshotItemLimit').value = config.SnapshotItemLimit || 50;

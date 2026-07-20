@@ -77,6 +77,27 @@ public sealed class KaevoController : ControllerBase, IActionFilter
 
     public void OnActionExecuted(ActionExecutedContext context) { }
 
+    [AllowAnonymous]
+    [HttpGet("branding/{asset}")]
+    [Produces("image/png")]
+    [ResponseCache(Duration = 86400, Location = ResponseCacheLocation.Client)]
+    public IActionResult GetBrandingAsset(string asset)
+    {
+        var resourceName = asset.ToLowerInvariant() switch
+        {
+            "logo" => "Kaevo.Plugin.KaevoForJellyfin.Configuration.Branding.Kaevo_LogoMark_Transparent.png",
+            "wordmark" => "Kaevo.Plugin.KaevoForJellyfin.Configuration.Branding.Kaevo_Wordmark_Transparent.png",
+            _ => null
+        };
+        if (resourceName is null)
+        {
+            return NotFound();
+        }
+
+        var stream = typeof(KaevoController).Assembly.GetManifestResourceStream(resourceName);
+        return stream is null ? NotFound() : File(stream, "image/png");
+    }
+
     [HttpGet("status")]
     public ActionResult<KaevoStatusResponse> GetStatus()
     {
@@ -86,7 +107,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         return Ok(new KaevoStatusResponse(
             "ok",
             "Kaevo",
-            "0.2.52",
+            "0.2.53",
             configuration.CloudConnectorEnabled,
             cloud.Status,
             cloud.LastHeartbeatUtc,

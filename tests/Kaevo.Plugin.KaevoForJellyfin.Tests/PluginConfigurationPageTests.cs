@@ -25,5 +25,12 @@ public sealed class PluginConfigurationPageTests
         var injectedStyles = page.IndexOf("<style id=\"KaevoInjectedStyles\">", StringComparison.Ordinal);
         Assert.True(injectedStyles > pageBody, "Kaevo styles must live inside the body fragment Jellyfin injects.");
         Assert.Contains("text-align:center", page, StringComparison.Ordinal);
+        Assert.Contains("loadKaevoBranding()", page, StringComparison.Ordinal);
+        Assert.Contains("Private at home.", page, StringComparison.Ordinal);
+        Assert.Contains("Nothing extra.", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoConfigForm { width:100%; max-width:none; margin:0; }", page, StringComparison.Ordinal);
+
+        Assert.Contains(assembly.GetManifestResourceNames(), name => name.EndsWith("Branding.Kaevo_LogoMark_Transparent.png", StringComparison.Ordinal));
+        Assert.Contains(assembly.GetManifestResourceNames(), name => name.EndsWith("Branding.Kaevo_Wordmark_Transparent.png", StringComparison.Ordinal));
     }
 }
