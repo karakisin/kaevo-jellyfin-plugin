@@ -15,6 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
+    private const string PluginVersion = "0.2.55";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -199,7 +200,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 profile_id = configuration.ProfileId,
                 connector_name = "Kaevo Jellyfin Plugin",
                 host_type = "jellyfin_plugin",
-                app_version = "0.2.54",
+                app_version = PluginVersion,
                 capabilities = new[]
                 {
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
@@ -1352,7 +1353,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         await Task.WhenAll(viewsTask, moviesTask, showsTask, collectionsTask, resumeTask, recentTask).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
-            version = "0.2.54",
+            version = PluginVersion,
             generated_at = DateTimeOffset.UtcNow,
             views = viewsTask.Result.Payload,
             movies = moviesTask.Result.Payload,
@@ -1993,7 +1994,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         var result = new Dictionary<string, ProviderReachability>(StringComparer.OrdinalIgnoreCase)
         {
-            ["jellyfin"] = ProviderStatus(true, true, "0.2.54", null)
+            ["jellyfin"] = ProviderStatus(true, true, PluginVersion, null)
         };
         foreach (var providerName in new[] { "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr" })
         {
@@ -2006,7 +2007,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             result[providerName] = ProviderStatus(
                 enabled && configured,
                 configured,
-                "0.2.54",
+                PluginVersion,
                 !configured ? "notConfigured" : enabled ? null : "disabled");
         }
 
@@ -2015,13 +2016,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             result["optimizer"] = ProviderStatus(
                 configuration.OptimizerPlanningEnabled,
                 configuration.OptimizerPlanningEnabled,
-                "0.2.54",
+                PluginVersion,
                 configuration.OptimizerPlanningEnabled ? null : "disabled");
         }
         result["playback_tunnel"] = ProviderStatus(
             configuration.RemotePlaybackEnabled,
             configuration.RemotePlaybackEnabled,
-            "0.2.54",
+            PluginVersion,
             configuration.RemotePlaybackEnabled ? null : "disabled");
         return result;
     }

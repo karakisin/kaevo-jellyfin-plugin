@@ -25,17 +25,37 @@ public sealed class KaevoLocalPairingService
 
     public bool Consume(string code)
     {
+        return TryConsumeWithReason(code) == KaevoLocalPairingConsumeResult.Success;
+    }
+
+    public KaevoLocalPairingConsumeResult TryConsumeWithReason(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            return KaevoLocalPairingConsumeResult.Invalid;
+        }
         var candidate = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Normalize(code)));
         lock (_gate)
         {
-            if (_codeHash is null || DateTimeOffset.UtcNow >= _expiresAtUtc
-                || !CryptographicOperations.FixedTimeEquals(_codeHash, candidate)) return false;
+            if (_codeHash is null) return KaevoLocalPairingConsumeResult.Invalid;
+            if (DateTimeOffset.UtcNow >= _expiresAtUtc) return KaevoLocalPairingConsumeResult.Expired;
+            if (!CryptographicOperations.FixedTimeEquals(_codeHash, candidate))
+            {
+                return KaevoLocalPairingConsumeResult.Invalid;
+            }
             CryptographicOperations.ZeroMemory(_codeHash);
             _codeHash = null;
             _expiresAtUtc = default;
-            return true;
+            return KaevoLocalPairingConsumeResult.Success;
         }
     }
 
     private static string Normalize(string value) => value.Trim().Replace("-", string.Empty, StringComparison.Ordinal).ToUpperInvariant();
+}
+
+public enum KaevoLocalPairingConsumeResult
+{
+    Invalid,
+    Expired,
+    Success
 }

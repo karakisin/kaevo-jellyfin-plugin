@@ -18,6 +18,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
+    private const string PluginVersion = "0.2.55";
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey)>(StringComparer.OrdinalIgnoreCase)
         {
@@ -107,7 +108,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         return Ok(new KaevoStatusResponse(
             "ok",
             "Kaevo",
-            "0.2.54",
+            PluginVersion,
             configuration.CloudConnectorEnabled,
             cloud.Status,
             cloud.LastHeartbeatUtc,
@@ -137,7 +138,8 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     {
         var ticket = _localPairing.Start();
         var baseUrl = $"{Request.Scheme}://{Request.Host}{Request.PathBase}".TrimEnd('/');
-        var pairingUri = $"kaevo://home-pair?server={Uri.EscapeDataString(baseUrl)}&code={Uri.EscapeDataString(ticket.Code)}";
+        var pairingUri =
+            $"kaevo://home-pair?server={Uri.EscapeDataString(baseUrl)}&code={Uri.EscapeDataString(ticket.Code)}&expires={Uri.EscapeDataString(ticket.ExpiresAtUtc.ToString("o"))}";
         using var data = QRCodeGenerator.GenerateQrCode(pairingUri, QRCodeGenerator.ECCLevel.Q);
         var png = new PngByteQRCode(data).GetGraphic(8);
         return Ok(new KaevoLocalPairingStartResponse(ticket.Code, ticket.ExpiresAtUtc, pairingUri, Convert.ToBase64String(png)));
@@ -149,13 +151,30 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         [FromBody] KaevoLocalPairingClaimRequest request,
         CancellationToken cancellationToken)
     {
-        if (!TryCloudUri(request.CloudBaseUrl, out var cloud)
-            || !ValidOwnerToken(request.OwnerAccessToken)
-            || string.IsNullOrWhiteSpace(request.ProfileId)
-            || string.IsNullOrWhiteSpace(request.JellyfinAccessToken)
-            || !_localPairing.Consume(request.Code))
+        if (!TryCloudUri(request.CloudBaseUrl, out var cloud))
         {
-            return BadRequest(new KaevoLifecycleResponse("invalid_or_expired", 0));
+            return BadRequest(new KaevoLifecycleResponse("invalid_cloud_server", 0));
+        }
+        if (!ValidOwnerToken(request.OwnerAccessToken))
+        {
+            return BadRequest(new KaevoLifecycleResponse("invalid_owner_token", 0));
+        }
+        if (string.IsNullOrWhiteSpace(request.ProfileId))
+        {
+            return BadRequest(new KaevoLifecycleResponse("invalid_profile_context", 0));
+        }
+        if (string.IsNullOrWhiteSpace(request.JellyfinAccessToken))
+        {
+            return BadRequest(new KaevoLifecycleResponse("invalid_profile_context", 0));
+        }
+        var consumeResult = _localPairing.TryConsumeWithReason(request.Code);
+        if (consumeResult == KaevoLocalPairingConsumeResult.Expired)
+        {
+            return BadRequest(new KaevoLifecycleResponse("pairing_expired", 0));
+        }
+        if (consumeResult != KaevoLocalPairingConsumeResult.Success)
+        {
+            return BadRequest(new KaevoLifecycleResponse("invalid_pairing_code", 0));
         }
         return await CompletePairing(cloud, request.OwnerAccessToken, request.ProfileId,
             request.JellyfinUserId, request.JellyfinAccessToken, cancellationToken).ConfigureAwait(false);
