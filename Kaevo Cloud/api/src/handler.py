@@ -1681,8 +1681,8 @@ def issue_bound_session_v2(event):
         )
     except AuditReferenceError:
         return audit_unavailable_response()
-    if identity.profile_ids:
-        ensure_nonproduction_family_entitlement(identity.profile_ids[0])
+    if identity.profile_id:
+        ensure_nonproduction_family_entitlement(identity.profile_id)
     access, refresh, access_token, refresh_token = new_session_material(identity, installation)
     app_sessions_table.put_item(Item=access)
     app_sessions_table.put_item(Item=refresh)
