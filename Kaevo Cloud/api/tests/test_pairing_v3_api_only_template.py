@@ -160,6 +160,25 @@ def test_v3_change_set_scope_rejects_existing_api_function_or_role_change():
         assert SCOPE.scope_errors(rejected) == [f"unexpected modification: {logical_id}"]
 
 
+def test_v3_change_set_scope_accepts_connector_control_code_update_in_place():
+    reviewed = {"Changes": [{"ResourceChange": {
+        "LogicalResourceId": "KaevoV3ConnectorControlFunction",
+        "ResourceType": "AWS::Lambda::Function",
+        "Action": "Modify",
+        "Replacement": "False",
+        "Details": [{
+            "Target": {
+                "Attribute": "Properties",
+                "Name": "Code",
+                "RequiresRecreation": "Never",
+            },
+            "Evaluation": "Static",
+            "ChangeSource": "DirectModification",
+        }],
+    }}]}
+    assert SCOPE.scope_errors(reviewed) == []
+
+
 def test_dedicated_control_lambda_has_exact_routes_and_least_privilege_boundary():
     source = (ROOT / "infra" / "template.yaml").read_text()
     control = PREPARE.resource_section(source, "KaevoV3ConnectorControlFunction")

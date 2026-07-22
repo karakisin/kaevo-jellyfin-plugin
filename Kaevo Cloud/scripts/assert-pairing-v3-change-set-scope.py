@@ -21,6 +21,7 @@ ALLOWED_ADDS = {
 }
 ALLOWED_MODIFIES = {
     "KaevoCloudHttpApi",
+    "KaevoV3ConnectorControlFunction",
 }
 
 

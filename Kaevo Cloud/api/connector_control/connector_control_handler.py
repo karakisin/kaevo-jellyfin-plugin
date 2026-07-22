@@ -355,7 +355,7 @@ def _status_sort_key(status, timestamp, request_id):
 
 def public_remote_request(item):
     request_payload = _parse_json_field(item.get("request_json"), {})
-    return {
+    result = {
         "request_id": item.get("request_id"), "profile_id": item.get("profile_id"),
         "connector_id": item.get("connector_id"), "status": item.get("status"),
         "created_at": item.get("created_at"), "updated_at": item.get("updated_at"),
@@ -364,6 +364,14 @@ def public_remote_request(item):
         "provider": request_payload.get("provider"), "method": request_payload.get("method"),
         "path": request_payload.get("path"), "query": request_payload.get("query", {}),
     }
+    if request_payload.get("method") == "COMMAND":
+        # Match the established V1 claim contract. The authenticated V3
+        # connector needs the allowlisted command body in order to execute the
+        # command; omitting it turns every parameterized command into a safe
+        # but unusable providerParameterInvalid failure.
+        result["operation"] = str(request_payload.get("path") or "").removeprefix("/commands/")
+        result["parameters"] = request_payload.get("body", {})
+    return result
 
 
 def claim_remote_request(event):

@@ -195,6 +195,36 @@ def test_concurrent_claim_has_one_authoritative_winner_and_no_duplicate(tables):
     assert list(tables[3].items) == ["remote-1"]
 
 
+def test_command_claim_preserves_allowlisted_operation_and_parameters(tables):
+    tables[0].items[CONNECTOR_ID]["profile_id"] = PROFILE_ID
+    tables[3].items["provider-health-1"] = {
+        "request_id": "provider-health-1", "connector_id": CONNECTOR_ID, "profile_id": PROFILE_ID,
+        "status": "pending", "status_created_at": "pending#001", "expires_at": control.epoch_now() + 60,
+        "request_json": json.dumps({
+            "provider": "home_server", "method": "COMMAND", "path": "/commands/provider.health",
+            "query": {}, "body": {"provider": "sonarr"},
+        }),
+    }
+
+    result = control.lambda_handler(
+        signed(
+            "/v3/remote-requests/claim",
+            {"connector_id": CONNECTOR_ID},
+            "connectorcontrolnonce0123456899",
+        ),
+        None,
+    )
+    payload = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert payload["state"] == "claimed"
+    assert payload["request"]["operation"] == "provider.health"
+    assert payload["request"]["parameters"] == {"provider": "sonarr"}
+    encoded = json.dumps(payload)
+    assert "authorization" not in encoded.lower()
+    assert "token" not in encoded.lower()
+
+
 def test_completion_and_failure_transitions_are_consistent(tables):
     tables[0].items[CONNECTOR_ID]["profile_id"] = PROFILE_ID
     for request_id in ("complete-1", "fail-1"):
