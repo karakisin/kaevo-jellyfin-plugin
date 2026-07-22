@@ -11,7 +11,10 @@ import zipfile
 from pathlib import Path
 
 
-ARCHIVE_FILES = ("Kaevo.Plugin.KaevoForJellyfin.dll", "QRCoder.dll", "meta.json")
+# The V3 Ed25519 implementation depends on BouncyCastle at runtime. Keep the
+# archive allowlist explicit so package validation fails closed if a required
+# dependency is omitted or an unexpected file is introduced.
+ARCHIVE_FILES = ("Kaevo.Plugin.KaevoForJellyfin.dll", "QRCoder.dll", "BouncyCastle.Cryptography.dll", "meta.json")
 
 
 def create_archive(plugin_dir: Path, output: Path) -> None:

@@ -18,6 +18,18 @@ public sealed class PluginConfigurationPageTests
 
         Assert.Contains("typeof response.json === 'function'", page, StringComparison.Ordinal);
         Assert.Contains("startPairingCountdown(expiresAt)", page, StringComparison.Ordinal);
+        Assert.Contains("kaevo/v3/pairing/start", page, StringComparison.Ordinal);
+        Assert.Contains("kaevo/v3/pairing/status", page, StringComparison.Ordinal);
+        Assert.Contains("System/Info/Public", page, StringComparison.Ordinal);
+        Assert.Contains("config.PairingV3Enabled === true || config.pairingV3Enabled === true", page, StringComparison.Ordinal);
+        Assert.Contains("Create New Pairing V3 QR", page, StringComparison.Ordinal);
+        Assert.Contains("Kaevo App Connected", page, StringComparison.Ordinal);
+        Assert.Contains("button.disabled = paired", page, StringComparison.Ordinal);
+        Assert.Contains("KaevoConfig.pairingV3Connected", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoCreatePairing:disabled", page, StringComparison.Ordinal);
+        Assert.Contains("background:rgba(8,10,13,.52)", page, StringComparison.Ordinal);
+        Assert.Contains("border:1px solid rgba(231,196,139,.45)", page, StringComparison.Ordinal);
+        Assert.Contains("Scan this signed Pairing V3 QR in Kaevo.", page, StringComparison.Ordinal);
         Assert.Contains("KaevoPairingCountdown", page, StringComparison.Ordinal);
         Assert.Contains("Here’s your one-time code", page, StringComparison.Ordinal);
         Assert.Contains("class=\"kaevo-card\"", page, StringComparison.Ordinal);

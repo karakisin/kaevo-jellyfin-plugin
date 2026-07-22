@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Text.Json;
 using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Entities;
@@ -18,6 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
+    private const string PluginVersion = "0.2.64";
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey)>(StringComparer.OrdinalIgnoreCase)
         {
@@ -41,6 +43,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     private readonly KaevoConnectorLifecycleClient _lifecycleClient;
     private readonly KaevoConnectorLifecycleStore _lifecycleStore;
     private readonly KaevoLocalPairingService _localPairing;
+    private readonly KaevoPairingV3Service _pairingV3;
     private readonly KaevoProviderPolicyAuditStore _providerAudit;
 
     public KaevoController(
@@ -53,6 +56,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         KaevoConnectorLifecycleClient lifecycleClient,
         KaevoConnectorLifecycleStore lifecycleStore,
         KaevoLocalPairingService localPairing,
+        KaevoPairingV3Service pairingV3,
         KaevoProviderPolicyAuditStore providerAudit)
     {
         _libraryManager = libraryManager;
@@ -64,6 +68,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         _lifecycleClient = lifecycleClient;
         _lifecycleStore = lifecycleStore;
         _localPairing = localPairing;
+        _pairingV3 = pairingV3;
         _providerAudit = providerAudit;
     }
 
@@ -107,7 +112,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         return Ok(new KaevoStatusResponse(
             "ok",
             "Kaevo",
-            "0.2.54",
+            PluginVersion,
             configuration.CloudConnectorEnabled,
             cloud.Status,
             cloud.LastHeartbeatUtc,
@@ -137,11 +142,158 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     {
         var ticket = _localPairing.Start();
         var baseUrl = $"{Request.Scheme}://{Request.Host}{Request.PathBase}".TrimEnd('/');
-        var pairingUri = $"kaevo://home-pair?server={Uri.EscapeDataString(baseUrl)}&code={Uri.EscapeDataString(ticket.Code)}";
+        var pairingUri =
+            $"kaevo://home-pair?server={Uri.EscapeDataString(baseUrl)}&code={Uri.EscapeDataString(ticket.Code)}&expires={Uri.EscapeDataString(ticket.ExpiresAtUtc.ToString("o"))}";
         using var data = QRCodeGenerator.GenerateQrCode(pairingUri, QRCodeGenerator.ECCLevel.Q);
         var png = new PngByteQRCode(data).GetGraphic(8);
         return Ok(new KaevoLocalPairingStartResponse(ticket.Code, ticket.ExpiresAtUtc, pairingUri, Convert.ToBase64String(png)));
     }
+
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("v3/pairing/start")]
+    public async Task<ActionResult> StartPairingV3([FromBody] KaevoPairingV3StartRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var localEndpoint = $"{Request.Scheme}://{Request.Host}{Request.PathBase}".TrimEnd('/');
+            var start = await _pairingV3.StartAsync(request.JellyfinServerId, request.JellyfinServerName, localEndpoint, request.JellyfinSetupUserId, cancellationToken).ConfigureAwait(false);
+            using var data = QRCodeGenerator.GenerateQrCode(start.PairingUri, QRCodeGenerator.ECCLevel.Q);
+            var png = new PngByteQRCode(data).GetGraphic(8);
+            return Ok(new KaevoPairingV3StartResponse(start.Protocol, start.ExpiresAtUtc, Convert.ToBase64String(png)));
+        }
+        catch (KaevoPairingV3Exception exception) { return V3Error(exception, StatusForV3(exception.Code)); }
+        catch (Exception) { return V3Error(new KaevoPairingV3Exception("unexpected_internal_error"), 500); }
+    }
+
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpGet("v3/pairing/status")]
+    public async Task<ActionResult<KaevoPairingV3StatusResponse>> GetPairingV3Status(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return Ok(await _pairingV3.GetLocalStatusAsync(cancellationToken).ConfigureAwait(false));
+        }
+        catch (Exception)
+        {
+            // Do not surface file or binding details from the protected V3
+            // state store. The configuration page may keep pairing available
+            // when local status cannot be determined.
+            return StatusCode(503, new KaevoPairingV3StatusResponse("unavailable", KaevoPairingV3Crypto.Protocol, false));
+        }
+    }
+
+    [AllowAnonymous]
+    [HttpPost("v3/pairing/challenges")]
+    public async Task<ActionResult> CreatePairingV3Challenge([FromBody] KaevoPairingV3ChallengeRequest request, CancellationToken cancellationToken)
+    {
+        var correlationId = KaevoPairingV3Service.NormalizeCorrelationId(request.CorrelationId);
+        try
+        {
+            if (request.Protocol != KaevoPairingV3Crypto.Protocol) return V3Error(new KaevoPairingV3Exception("malformed_request"), 400);
+            return Ok(await _pairingV3.ChallengeAsync(request.TicketId, request.PairingAttemptId, request.PairingAuthorizationHash, correlationId, cancellationToken).ConfigureAwait(false));
+        }
+        catch (KaevoPairingV3Exception exception) { return V3Error(exception, StatusForV3(exception.Code)); }
+        catch (Exception) { return V3Error(new KaevoPairingV3Exception("unexpected_internal_error"), 500); }
+    }
+
+    [AllowAnonymous]
+    [HttpPost("v3/pairing/complete")]
+    public async Task<ActionResult> CompletePairingV3([FromBody] JsonElement? payload, CancellationToken cancellationToken)
+    {
+        // Do not let ApiController's implicit non-nullable-record validation
+        // turn a V3 request-shape error into an ASP.NET ProblemDetails body.
+        // The iOS client must always receive the V3 envelope, and this method
+        // must never log the authorization, proof, QR material, or body.
+        if (!TryParsePairingV3Completion(payload, out var request))
+        {
+            return V3Error(new KaevoPairingV3Exception("malformed_request"), 400);
+        }
+
+        var correlationId = KaevoPairingV3Service.NormalizeCorrelationId(request.CorrelationId);
+        try
+        {
+            if (request.Protocol != KaevoPairingV3Crypto.Protocol)
+            {
+                return V3Error(new KaevoPairingV3Exception("malformed_request"), 400);
+            }
+            if (!TryCloudUri(KaevoPlugin.Instance?.Configuration.CloudBaseUrl ?? string.Empty, out var cloud))
+            {
+                return V3Error(new KaevoPairingV3Exception("pairing_dependency_failure", true), 503);
+            }
+            var completion = new KaevoPairingV3Completion(request.Protocol, request.TicketId, request.PairingAttemptId, request.ChallengeId,
+                request.ChallengeNonce, request.ChallengeResponseSignature, request.Authorization, request.JellyfinUserId, request.CorrelationId);
+            var result = await _pairingV3.CompleteAsync(cloud, completion, cancellationToken).ConfigureAwait(false);
+            return StatusCode(StatusForV3(result.Code), new { protocol = KaevoPairingV3Crypto.Protocol, code = result.Code, retryable = result.Retryable, connectorId = result.ConnectorId, idempotent = result.Idempotent, correlationId });
+        }
+        catch (KaevoPairingV3Exception exception) { return V3Error(exception, StatusForV3(exception.Code)); }
+        catch (Exception) { return V3Error(new KaevoPairingV3Exception("unexpected_internal_error"), 500); }
+    }
+
+    internal static bool TryParsePairingV3Completion(JsonElement? payload, out KaevoPairingV3CompleteRequest request)
+    {
+        request = default!;
+        if (payload is null || payload.Value.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var value = payload.Value;
+        if (!TryGetRequiredString(value, "protocol", out var protocol)
+            || !TryGetRequiredString(value, "ticketId", out var ticketId)
+            || !TryGetRequiredString(value, "pairingAttemptId", out var pairingAttemptId)
+            || !TryGetRequiredString(value, "challengeId", out var challengeId)
+            || !TryGetRequiredString(value, "challengeNonce", out var challengeNonce)
+            || !TryGetRequiredString(value, "challengeResponseSignature", out var challengeResponseSignature)
+            || !TryGetRequiredString(value, "authorization", out var authorization)
+            || !TryGetRequiredString(value, "jellyfinUserId", out var jellyfinUserId)
+            || !TryGetRequiredString(value, "correlationId", out var correlationId))
+        {
+            return false;
+        }
+
+        request = new KaevoPairingV3CompleteRequest(protocol, ticketId, pairingAttemptId, challengeId, challengeNonce,
+            challengeResponseSignature, authorization, jellyfinUserId, correlationId);
+        return true;
+    }
+
+    private static bool TryGetRequiredString(JsonElement payload, string name, out string value)
+    {
+        value = string.Empty;
+        return payload.TryGetProperty(name, out var property)
+            && property.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(value = property.GetString() ?? string.Empty);
+    }
+
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("v3/pairing/recovery")]
+    public async Task<ActionResult> RecoverPairingV3([FromBody] KaevoPairingV3RecoveryRequest request, CancellationToken cancellationToken)
+    {
+        var correlationId = KaevoPairingV3Service.NormalizeCorrelationId(request.CorrelationId);
+        try
+        {
+            if (!TryCloudUri(KaevoPlugin.Instance?.Configuration.CloudBaseUrl ?? string.Empty, out var cloud))
+                return V3Error(new KaevoPairingV3Exception("pairing_dependency_failure", true), 503);
+            var result = await _pairingV3.RecoverAsync(cloud, request.TicketId, correlationId, cancellationToken).ConfigureAwait(false);
+            return StatusCode(StatusForV3(result.Code), new { protocol = KaevoPairingV3Crypto.Protocol, code = result.Code, retryable = result.Retryable, connectorId = result.ConnectorId, idempotent = result.Idempotent, correlationId });
+        }
+        catch (KaevoPairingV3Exception exception) { return V3Error(exception, StatusForV3(exception.Code)); }
+        catch (Exception) { return V3Error(new KaevoPairingV3Exception("unexpected_internal_error"), 500); }
+    }
+
+    private ActionResult V3Error(KaevoPairingV3Exception exception, int status) => StatusCode(status, new { protocol = KaevoPairingV3Crypto.Protocol, code = exception.Code, retryable = exception.Retryable });
+
+    private static int StatusForV3(string code) => code switch
+    {
+        "malformed_request" => 400,
+        "pairing_ticket_not_found" => 404,
+        "pairing_ticket_expired" or "challenge_expired" or "pairing_authorization_expired" => 410,
+        "pairing_reserved" or "pairing_consumed" or "challenge_replayed" or "pairing_authorization_redeemed" or "plugin_nonce_replayed" => 409,
+        "invalid_challenge_proof" or "invalid_pairing_authorization" => 422,
+        "binding_mismatch" => 403,
+        "cloud_unavailable" or "pairing_dependency_failure" or "pairing_v3_disabled" => 503,
+        "ambiguous_enrollment" or "pairing_status_pending" => 202,
+        _ => 500
+    };
 
     [Authorize(Policy = "RequiresElevation")]
     [HttpPost("local-pairing/claim")]
@@ -149,13 +301,30 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         [FromBody] KaevoLocalPairingClaimRequest request,
         CancellationToken cancellationToken)
     {
-        if (!TryCloudUri(request.CloudBaseUrl, out var cloud)
-            || !ValidOwnerToken(request.OwnerAccessToken)
-            || string.IsNullOrWhiteSpace(request.ProfileId)
-            || string.IsNullOrWhiteSpace(request.JellyfinAccessToken)
-            || !_localPairing.Consume(request.Code))
+        if (!TryCloudUri(request.CloudBaseUrl, out var cloud))
         {
-            return BadRequest(new KaevoLifecycleResponse("invalid_or_expired", 0));
+            return BadRequest(new KaevoLifecycleResponse("invalid_cloud_server", 0));
+        }
+        if (!ValidOwnerToken(request.OwnerAccessToken))
+        {
+            return BadRequest(new KaevoLifecycleResponse("invalid_owner_token", 0));
+        }
+        if (string.IsNullOrWhiteSpace(request.ProfileId))
+        {
+            return BadRequest(new KaevoLifecycleResponse("invalid_profile_context", 0));
+        }
+        if (string.IsNullOrWhiteSpace(request.JellyfinAccessToken))
+        {
+            return BadRequest(new KaevoLifecycleResponse("invalid_profile_context", 0));
+        }
+        var consumeResult = _localPairing.TryConsumeWithReason(request.Code);
+        if (consumeResult == KaevoLocalPairingConsumeResult.Expired)
+        {
+            return BadRequest(new KaevoLifecycleResponse("pairing_expired", 0));
+        }
+        if (consumeResult != KaevoLocalPairingConsumeResult.Success)
+        {
+            return BadRequest(new KaevoLifecycleResponse("invalid_pairing_code", 0));
         }
         return await CompletePairing(cloud, request.OwnerAccessToken, request.ProfileId,
             request.JellyfinUserId, request.JellyfinAccessToken, cancellationToken).ConfigureAwait(false);

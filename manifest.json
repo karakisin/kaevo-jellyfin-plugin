@@ -9,14 +9,6 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
-        "version": "0.2.60.0",
-        "changelog": "Adds Secure Pairing V3 and shows the completed Kaevo App connection state in Jellyfin.",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.60/Kaevo.Plugin.KaevoForJellyfin.zip",
-        "checksum": "ee055522872662d93c90f61120001e54",
-        "timestamp": "2026-07-22T06:32:09Z"
-      },
-      {
         "version": "0.2.55.0",
         "changelog": "Adds explicit local-pairing expiry enforcement and improves QR rejection behavior for expired or malformed handshake codes.",
         "targetAbi": "10.11.0.0",

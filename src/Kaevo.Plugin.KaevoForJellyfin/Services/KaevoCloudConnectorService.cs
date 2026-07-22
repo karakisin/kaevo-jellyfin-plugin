@@ -15,6 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
+    private const string PluginVersion = "0.2.64";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -39,6 +40,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private readonly KaevoProviderTransport _providerTransport;
     private readonly KaevoConnectorLifecycleStore _lifecycleStore;
     private readonly KaevoConnectorLifecycleClient _lifecycleClient;
+    private readonly KaevoPairingV3Service _pairingV3;
+    private volatile bool _pairingV3Active;
     private readonly HttpClient _jellyfin = new() { Timeout = TimeSpan.FromSeconds(45) };
 
     public KaevoCloudConnectorService(
@@ -49,6 +52,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         KaevoProviderTransport providerTransport,
         KaevoConnectorLifecycleStore lifecycleStore,
         KaevoConnectorLifecycleClient lifecycleClient,
+        KaevoPairingV3Service pairingV3,
         ILogger<KaevoCloudConnectorService> logger)
     {
         _secretStore = secretStore;
@@ -58,6 +62,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         _providerTransport = providerTransport;
         _lifecycleStore = lifecycleStore;
         _lifecycleClient = lifecycleClient;
+        _pairingV3 = pairingV3;
         _logger = logger;
     }
 
@@ -78,8 +83,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     continue;
                 }
 
-                ValidateConfiguration(configuration);
                 var secrets = await EnsurePairedAsync(configuration, stoppingToken).ConfigureAwait(false);
+                ValidateConfiguration(configuration, _pairingV3Active);
                 if (string.IsNullOrWhiteSpace(secrets.JellyfinApiKey))
                 {
                     throw new InvalidOperationException("jellyfinApiKeyMissing");
@@ -159,6 +164,19 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var jellyfinCredential = string.IsNullOrWhiteSpace(environmentApiKey)
             ? existing?.JellyfinApiKey ?? string.Empty
             : environmentApiKey;
+        var pairingV3ConnectorId = await _pairingV3.GetActiveConnectorIdAsync(cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(pairingV3ConnectorId))
+        {
+            _pairingV3Active = true;
+            configuration.ConnectorId = pairingV3ConnectorId;
+            configuration.PairingCode = string.Empty;
+            var pairingV3Secrets = existing is null
+                ? new KaevoConnectorSecrets(string.Empty, string.Empty, jellyfinCredential)
+                : existing with { ConnectorToken = string.Empty, PlaybackGrantKey = string.Empty, JellyfinApiKey = jellyfinCredential };
+            KaevoPlugin.Instance?.SaveConfiguration();
+            return pairingV3Secrets;
+        }
+        _pairingV3Active = false;
         if (existing is not null && !string.IsNullOrWhiteSpace(existing.ConnectorToken))
         {
             throw new InvalidOperationException("lifecycle_upgrade_required");
@@ -196,10 +214,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             new
             {
                 connector_id = configuration.ConnectorId,
-                profile_id = configuration.ProfileId,
+                profile_id = ProfileIdForCloud(configuration.ProfileId, _pairingV3Active),
                 connector_name = "Kaevo Jellyfin Plugin",
                 host_type = "jellyfin_plugin",
-                app_version = "0.2.54",
+                app_version = PluginVersion,
                 capabilities = new[]
                 {
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
@@ -282,7 +300,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             new
             {
                 connector_id = configuration.ConnectorId,
-                profile_id = configuration.ProfileId,
+                profile_id = ProfileIdForCloud(configuration.ProfileId, _pairingV3Active),
                 provider_status = BuildProviderStatus(secrets, configuration, includeOptimizer: true)
             },
             cancellationToken).ConfigureAwait(false);
@@ -1352,7 +1370,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         await Task.WhenAll(viewsTask, moviesTask, showsTask, collectionsTask, resumeTask, recentTask).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
-            version = "0.2.54",
+            version = PluginVersion,
             generated_at = DateTimeOffset.UtcNow,
             views = viewsTask.Result.Payload,
             movies = moviesTask.Result.Payload,
@@ -1692,8 +1710,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         CancellationToken cancellationToken)
     {
         if (secrets is null) throw new InvalidOperationException("lifecycle_upgrade_required");
-        using var response = await _lifecycleClient.SendConnectorAsync(
-            new Uri(configuration.CloudBaseUrl, UriKind.Absolute), method, path, body, cancellationToken).ConfigureAwait(false);
+        var cloudBase = new Uri(configuration.CloudBaseUrl, UriKind.Absolute);
+        var effectivePath = _pairingV3Active ? PairingV3CloudPath(path) : path;
+        using var response = _pairingV3Active
+            ? await _pairingV3.SendConnectorRequestAsync(cloudBase, method, effectivePath, body, cancellationToken).ConfigureAwait(false)
+            : await _lifecycleClient.SendConnectorAsync(cloudBase, method, effectivePath, body, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException($"cloudHttp{(int)response.StatusCode}");
@@ -1707,7 +1728,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private static PluginConfiguration CurrentConfiguration()
         => KaevoPlugin.Instance?.Configuration ?? throw new InvalidOperationException("pluginConfigurationUnavailable");
 
-    private static void ValidateConfiguration(PluginConfiguration configuration)
+    internal static string PairingV3CloudPath(string path)
+        => path.StartsWith("/v1/", StringComparison.Ordinal) ? "/v3/" + path[4..] : path;
+
+    internal static string ProfileIdForCloud(string profileId, bool pairingV3Active)
+        => pairingV3Active ? string.Empty : profileId;
+
+    private static void ValidateConfiguration(PluginConfiguration configuration, bool pairingV3Active)
     {
         if (KaevoPlugin.Instance?.PackageIntegrityValid != true)
         {
@@ -1731,7 +1758,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             throw new InvalidOperationException("relayWebSocketUrlInvalid");
         }
 
-        if (string.IsNullOrWhiteSpace(configuration.ProfileId))
+        if (!pairingV3Active && string.IsNullOrWhiteSpace(configuration.ProfileId))
         {
             throw new InvalidOperationException("cloudProfileMissing");
         }
@@ -1993,7 +2020,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         var result = new Dictionary<string, ProviderReachability>(StringComparer.OrdinalIgnoreCase)
         {
-            ["jellyfin"] = ProviderStatus(true, true, "0.2.54", null)
+            ["jellyfin"] = ProviderStatus(true, true, PluginVersion, null)
         };
         foreach (var providerName in new[] { "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr" })
         {
@@ -2006,7 +2033,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             result[providerName] = ProviderStatus(
                 enabled && configured,
                 configured,
-                "0.2.54",
+                PluginVersion,
                 !configured ? "notConfigured" : enabled ? null : "disabled");
         }
 
@@ -2015,13 +2042,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             result["optimizer"] = ProviderStatus(
                 configuration.OptimizerPlanningEnabled,
                 configuration.OptimizerPlanningEnabled,
-                "0.2.54",
+                PluginVersion,
                 configuration.OptimizerPlanningEnabled ? null : "disabled");
         }
         result["playback_tunnel"] = ProviderStatus(
             configuration.RemotePlaybackEnabled,
             configuration.RemotePlaybackEnabled,
-            "0.2.54",
+            PluginVersion,
             configuration.RemotePlaybackEnabled ? null : "disabled");
         return result;
     }

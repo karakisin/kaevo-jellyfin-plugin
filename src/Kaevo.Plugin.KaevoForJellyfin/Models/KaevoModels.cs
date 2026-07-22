@@ -58,6 +58,52 @@ public sealed record KaevoLocalPairingClaimRequest(
     string JellyfinUserId,
     string JellyfinAccessToken);
 
+public sealed record KaevoPairingV3StartRequest(
+    string JellyfinServerId,
+    string JellyfinServerName,
+    string JellyfinSetupUserId);
+
+// The QR image is returned only to the elevated local Jellyfin administrator
+// who created the one-time ticket. It is never logged or persisted by the UI.
+public sealed record KaevoPairingV3StartResponse(
+    string Protocol,
+    DateTimeOffset ExpiresAtUtc,
+    string QrPngBase64);
+
+/// <summary>
+/// Deliberately minimal local-administrator status. It confirms only whether
+/// this plugin has a completed V3 connector; it never exposes QR, identity,
+/// authorization, or connector-binding material.
+/// </summary>
+public sealed record KaevoPairingV3StatusResponse(
+    string State,
+    string Protocol,
+    bool RequiresReauthentication);
+
+public sealed record KaevoPairingV3ChallengeRequest(
+    string Protocol,
+    string TicketId,
+    string PairingAttemptId,
+    string PairingAuthorizationHash,
+    string CorrelationId);
+
+public sealed record KaevoPairingV3CompleteRequest(
+    string Protocol,
+    string TicketId,
+    string PairingAttemptId,
+    string ChallengeId,
+    string ChallengeNonce,
+    string ChallengeResponseSignature,
+    string Authorization,
+    string JellyfinUserId,
+    string CorrelationId);
+
+// This is deliberately an explicit recovery operation, not normal-path
+// polling. It is used only after a reserved attempt has an ambiguous outcome.
+public sealed record KaevoPairingV3RecoveryRequest(
+    string TicketId,
+    string CorrelationId);
+
 public sealed record KaevoProviderProvisionRequest(
     string BaseUrl,
     string? ApiKey,
