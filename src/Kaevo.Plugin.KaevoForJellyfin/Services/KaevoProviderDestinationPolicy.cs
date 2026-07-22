@@ -23,20 +23,11 @@ public sealed record KaevoApprovedDestination(Uri BaseUri, string[] Addresses, s
 
 public sealed class KaevoProviderDestinationPolicy
 {
-    private static readonly IReadOnlyDictionary<string, HashSet<int>> ProviderPorts =
-        new Dictionary<string, HashSet<int>>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["sonarr"] = new() { 80, 443, 8989 },
-            ["radarr"] = new() { 80, 443, 7878 },
-            ["seerr"] = new() { 80, 443, 5055 },
-            ["sabnzbd"] = new() { 80, 443, 8080 },
-            ["qbittorrent"] = new() { 80, 443, 8080 },
-            ["lidarr"] = new() { 80, 443, 8686 },
-            ["readarr"] = new() { 80, 443, 8787 },
-            ["prowlarr"] = new() { 80, 443, 9696 },
-            ["bazarr"] = new() { 80, 443, 6767 },
-            ["tdarr"] = new() { 80, 443, 8265 }
-        };
+    private static readonly HashSet<string> SupportedProviders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "sonarr", "radarr", "seerr", "sabnzbd", "qbittorrent",
+        "lidarr", "readarr", "prowlarr", "bazarr", "tdarr"
+    };
 
     private readonly IKaevoDnsResolver _dns;
     private readonly HashSet<string> _stagingHosts;
@@ -75,7 +66,17 @@ public sealed class KaevoProviderDestinationPolicy
         {
             throw new InvalidOperationException("providerDestinationEscaped");
         }
-        var current = await ResolveAndValidateAsync(approved.Host, cancellationToken).ConfigureAwait(false);
+        IPAddress[] current;
+        try
+        {
+            current = await ResolveAndValidateAsync(approved.Host, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ArgumentException exception)
+        {
+            // Provider checks cross an authenticated Cloud boundary, so expose
+            // only the policy's stable machine code and never its destination.
+            throw new InvalidOperationException(exception.Message, exception);
+        }
         var currentText = current.Select(static value => value.ToString()).Order(StringComparer.Ordinal).ToArray();
         var saved = (secret.ApprovedAddresses ?? Array.Empty<string>()).Order(StringComparer.Ordinal).ToArray();
         if (saved.Length == 0 || !saved.SequenceEqual(currentText, StringComparer.Ordinal))
@@ -123,7 +124,14 @@ public sealed class KaevoProviderDestinationPolicy
         var idn = new IdnMapping().GetAscii(uri.IdnHost.TrimEnd('.')).ToLowerInvariant();
         if (string.IsNullOrEmpty(idn)) throw new ArgumentException("providerDestinationInvalid");
         var port = uri.IsDefaultPort ? (uri.Scheme == Uri.UriSchemeHttps ? 443 : 80) : uri.Port;
-        if (port is < 1 or > 65535 || !ProviderPorts.TryGetValue(provider, out var ports) || !ports.Contains(port))
+        // NAS and Docker installations commonly publish providers on an
+        // administrator-selected high host port. The saved URI, exact port,
+        // private resolved addresses, origin and base path are pinned during
+        // approval, so Cloud cannot select a different destination. Continue
+        // rejecting privileged non-HTTP ports and unknown provider types.
+        if (!SupportedProviders.Contains(provider)
+            || port is < 1 or > 65535
+            || (port < 1024 && port is not (80 or 443)))
         {
             throw new ArgumentException("providerPortNotApproved");
         }

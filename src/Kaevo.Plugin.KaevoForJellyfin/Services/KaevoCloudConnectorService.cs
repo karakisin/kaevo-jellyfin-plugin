@@ -15,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.64";
+    private const string PluginVersion = "0.2.65";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -1038,7 +1038,26 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             message.Headers.TryAddWithoutValidation(providerName == "bazarr" ? "X-API-KEY" : "X-Api-Key", provider.ApiKey);
         }
 
-        using var response = await _providerTransport.SendAsync(providerName, provider, message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        HttpResponseMessage response;
+        try
+        {
+            response = await _providerTransport.SendAsync(
+                providerName,
+                provider,
+                message,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException($"{providerName}Timeout");
+        }
+        catch (HttpRequestException)
+        {
+            throw new InvalidOperationException($"{providerName}TransportFailed");
+        }
+        using (response)
+        {
         if ((int)response.StatusCode is >= 300 and < 400)
         {
             throw new InvalidOperationException($"{providerName}RedirectRejected");
@@ -1060,7 +1079,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             throw new InvalidOperationException($"{providerName}ResponseMalformed");
         }
 
-        return new { provider = providerName, reachable = true, version };
+            return new { provider = providerName, reachable = true, version };
+        }
     }
 
     internal static string? ValidateProviderHealthResponse(byte[] data, string? mediaType)
