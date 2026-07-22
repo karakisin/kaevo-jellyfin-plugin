@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="$PROJECT_ROOT/artifacts/build"
-PACKAGE_ROOT="$PROJECT_ROOT/artifacts/package"
+BUILD_DIR="${KAEVO_BUILD_DIR:-$PROJECT_ROOT/artifacts/build}"
+PACKAGE_ROOT="${KAEVO_PACKAGE_ROOT:-$PROJECT_ROOT/artifacts/package}"
 PLUGIN_DIR="$PACKAGE_ROOT/Kaevo"
 ZIP_PATH="$PACKAGE_ROOT/Kaevo.Plugin.KaevoForJellyfin.zip"
 if [[ -n "${KAEVO_RELEASE_TIMESTAMP:-}" ]]; then
@@ -29,11 +29,12 @@ mkdir -p "$PLUGIN_DIR"
 
 cp "$BUILD_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/"
 cp "$BUILD_DIR/QRCoder.dll" "$PLUGIN_DIR/"
+cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Adds explicit local-pairing expiry enforcement and improves QR rejection behavior for expired or malformed handshake codes.",
+  "changelog": "Shows completed Secure Pairing V3 state in the Jellyfin admin page and keeps legacy pairing available only while V3 is disabled.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -41,12 +42,12 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.55.0"
+  "version": "0.2.60.0"
 }
 EOF
 
 NORMALIZED_TIMESTAMP="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$TIMESTAMP" '+%Y%m%d%H%M.%S')"
-touch -t "$NORMALIZED_TIMESTAMP" "$PLUGIN_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/QRCoder.dll" "$PLUGIN_DIR/meta.json"
+touch -t "$NORMALIZED_TIMESTAMP" "$PLUGIN_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/QRCoder.dll" "$PLUGIN_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/meta.json"
 
 python3 "$SCRIPT_DIR/create-deterministic-plugin-zip.py" "$PLUGIN_DIR" "$ZIP_PATH"
 

@@ -169,7 +169,7 @@
                     </button>
                     <section id="KaevoPairingTicket" hidden aria-live="polite">
                         <img id="KaevoPairingQr" alt="Kaevo one-time pairing QR code" width="240" height="240" />
-                        <p class="kaevo-code-label">Here’s your one-time code</p>
+                        <p id="KaevoPairingCodeLabel" class="kaevo-code-label">Here’s your one-time code</p>
                         <strong id="KaevoPairingCode"></strong>
                         <p id="KaevoPairingExpiry" class="kaevo-countdown">It expires in <strong id="KaevoPairingCountdown">10:00</strong> and works once.</p>
                     </section>
@@ -207,7 +207,9 @@
             var KaevoConfig = {
                 pluginUniqueId: '80c77b84-7f2d-4b52-84c7-7dfe68cd95ae',
                 providers: [],
-                pairingCountdownTimer: null
+                pairingCountdownTimer: null,
+                pairingV3Enabled: false,
+                pairingV3Connected: false
             };
 
             function stopPairingCountdown() {
@@ -221,6 +223,41 @@
                 document.querySelector('#KaevoBrandLogo').src = ApiClient.getUrl('kaevo/branding/logo');
                 document.querySelector('#KaevoBrandWordmark').style.backgroundImage =
                     'url("' + ApiClient.getUrl('kaevo/branding/wordmark') + '")';
+            }
+
+            function pairingV3Enabled(config) {
+                // Jellyfin configuration responses have used both PascalCase
+                // and camelCase across client/server versions. Treat either
+                // explicit boolean as the same persisted setting; never infer
+                // V3 from another property.
+                return config && (config.PairingV3Enabled === true || config.pairingV3Enabled === true);
+            }
+
+            function renderPairingMode() {
+                var enabled = KaevoConfig.pairingV3Enabled;
+                var paired = enabled && KaevoConfig.pairingV3Connected === true;
+                var button = document.querySelector('#KaevoCreatePairing');
+                button.disabled = paired;
+                button.setAttribute('aria-disabled', paired ? 'true' : 'false');
+                button.querySelector('span').textContent = paired
+                    ? 'Kaevo App Connected'
+                    : enabled
+                    ? 'Create New Pairing V3 QR'
+                    : 'Create New Pairing Code';
+                document.querySelector('#CloudSetupMessage').textContent = enabled
+                    ? paired
+                        ? 'Secure Pairing V3 is complete. Create another QR only if Kaevo asks you to reconnect.'
+                        : 'Create a signed Pairing V3 QR, then confirm this Jellyfin server in Kaevo while you are at home.'
+                    : 'Create a private connection, then scan the QR code or enter the one-time code in Kaevo while you are at home.';
+            }
+
+            function renderPairingV3Status(status) {
+                var state = String((status && (status.State || status.state)) || '').toLowerCase();
+                KaevoConfig.pairingV3Connected = KaevoConfig.pairingV3Enabled && state === 'paired';
+                document.querySelector('#CloudConnectorStatus').textContent = KaevoConfig.pairingV3Connected
+                    ? 'Kaevo App Connected'
+                    : 'Not Connected';
+                renderPairingMode();
             }
 
             function startPairingCountdown(expiresAt) {
@@ -301,17 +338,29 @@
                 ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
                     document.querySelector('#SnapshotItemLimit').value = config.SnapshotItemLimit || 50;
                     document.querySelector('#RemoteMediaDeletionEnabled').checked = config.RemoteMediaDeletionEnabled === true;
+                    KaevoConfig.pairingV3Enabled = pairingV3Enabled(config);
+                    renderPairingMode();
                     return Promise.all([
                         ApiClient.getJSON(ApiClient.getUrl('kaevo/cloud/status')),
+                        KaevoConfig.pairingV3Enabled
+                            ? ApiClient.getJSON(ApiClient.getUrl('kaevo/v3/pairing/status'))
+                            : Promise.resolve(null),
                         loadProviders()
                     ]);
-                }).then(function (status) {
-                    status = status[0];
+                }).then(function (responses) {
+                    var status = responses[0];
+                    var pairingV3Status = responses[1];
+                    if (KaevoConfig.pairingV3Enabled) {
+                        renderPairingV3Status(pairingV3Status);
+                        return;
+                    }
                     var ready = status.State === 'online' || status.state === 'online';
                     document.querySelector('#CloudConnectorStatus').textContent = ready ? 'Remote Access Ready' : 'Not Connected';
-                    document.querySelector('#CloudSetupMessage').textContent = ready
-                        ? 'Remote Access is managed securely by the Kaevo app.'
-                        : 'Create a private connection, then scan the QR code or enter the one-time code in Kaevo while you are at home.';
+                    if (ready) {
+                        document.querySelector('#CloudSetupMessage').textContent = 'Remote Access is managed securely by the Kaevo app.';
+                    } else {
+                        renderPairingMode();
+                    }
                 }).catch(function () {
                     document.querySelector('#CloudConnectorStatus').textContent = 'Not Connected';
                 }).finally(function () {
@@ -346,25 +395,53 @@
             });
 
             document.querySelector('#KaevoCreatePairing').addEventListener('click', function () {
+                if (KaevoConfig.pairingV3Enabled && KaevoConfig.pairingV3Connected) return;
                 Dashboard.showLoadingMsg();
-                ApiClient.ajax({
-                    type: 'POST',
-                    url: ApiClient.getUrl('kaevo/local-pairing/start'),
-                    contentType: 'application/json',
-                    data: '{}'
-                }).then(function (response) {
+                var startRequest;
+                if (KaevoConfig.pairingV3Enabled) {
+                    startRequest = ApiClient.getJSON(ApiClient.getUrl('System/Info/Public')).then(function (info) {
+                        var serverId = info.Id || info.id;
+                        var serverName = info.ServerName || info.serverName || info.Name || info.name || 'Jellyfin';
+                        if (!serverId) throw new Error('Jellyfin server identity is unavailable.');
+                        return ApiClient.ajax({
+                            type: 'POST',
+                            url: ApiClient.getUrl('kaevo/v3/pairing/start'),
+                            contentType: 'application/json',
+                            data: JSON.stringify({
+                                JellyfinServerId: serverId,
+                                JellyfinServerName: serverName,
+                                JellyfinSetupUserId: ''
+                            })
+                        });
+                    });
+                } else {
+                    startRequest = ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('kaevo/local-pairing/start'),
+                        contentType: 'application/json',
+                        data: '{}'
+                    });
+                }
+                startRequest.then(function (response) {
                     if (typeof response === 'string') return JSON.parse(response);
                     if (response && typeof response.json === 'function') return response.json();
                     return response;
                 }).then(function (ticket) {
-                    var code = ticket.Code || ticket.code;
+                    var protocol = ticket.Protocol || ticket.protocol || 'legacy';
+                    var isV3 = protocol === 'kaevo-pairing-v3';
+                    var code = isV3 ? 'Secure Pairing V3' : (ticket.Code || ticket.code);
                     var qr = ticket.QrPngBase64 || ticket.qrPngBase64;
                     var expiresAt = ticket.ExpiresAtUtc || ticket.expiresAtUtc;
                     if (!code || !qr) throw new Error('Incomplete Kaevo pairing response.');
                     document.querySelector('#KaevoPairingCode').textContent = code;
+                    document.querySelector('#KaevoPairingCodeLabel').textContent = isV3
+                        ? 'Scan this signed Pairing V3 QR in Kaevo.'
+                        : 'Here’s your one-time code';
                     document.querySelector('#KaevoPairingQr').src = 'data:image/png;base64,' + qr;
                     document.querySelector('#KaevoPairingTicket').hidden = false;
-                    document.querySelector('#KaevoCreatePairing span').textContent = 'Create New Pairing Code';
+                    document.querySelector('#KaevoCreatePairing span').textContent = isV3
+                        ? 'Create New Pairing V3 QR'
+                        : 'Create New Pairing Code';
                     startPairingCountdown(expiresAt);
                 }).catch(function () {
                     Dashboard.alert('Kaevo could not create a pairing code. Sign in as a Jellyfin administrator and try again.');

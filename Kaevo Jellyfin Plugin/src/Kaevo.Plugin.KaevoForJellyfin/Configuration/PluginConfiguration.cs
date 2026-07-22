@@ -41,4 +41,16 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     public int MaximumPlaybackBitrate { get; set; } = 40_000_000;
 
     public int MaximumRemoteResponseBytes { get; set; } = 2_000_000;
+
+    // Disabled until Cloud, Plugin, and iOS V3 are jointly validated. This is
+    // deliberately separate from legacy pairing so V3 never silently falls back.
+    public bool PairingV3Enabled { get; set; }
+
+    // Public verification keys only. Production authorization-signing private
+    // material is never stored in plugin configuration.
+    public string PairingV3CloudAuthorizationVerificationKeysJson { get; set; } = string.Empty;
+
+    // The issuer is an explicit deployment binding, not a user-supplied
+    // routing value. Empty means V3 remains fail-closed.
+    public string PairingV3CloudAuthorizationIssuer { get; set; } = string.Empty;
 }
