@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "purpose": "Deterministic, non-secret Pairing V3 interoperability vectors. Implementations must reproduce every output byte-for-byte.",
+  "challengeSigningKdf": {
+    "algorithm": "HKDF-SHA-256",
+    "ikmHex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    "saltUtf8": "kaevo-pairing-v3/challenge-signing-salt",
+    "infoUtf8Prefix": "kaevo-pairing-v3/challenge-signing-key",
+    "ticketIdUtf8": "ticket-v3-vector-01",
+    "outputLengthBytes": 32,
+    "expectedSeedHex": "ccec87ce5b0a31ef81e39ad290c60f3e4c95e8a5b6ceb1ec132931979c23a29f"
+  },
+  "ed25519": {
+    "expectedPublicKeyBase64url": "ZNW982EOXdEPg_In0NV5cXJ3-HcZwVrkRPRzaguYWEg",
+    "expectedFingerprint": "sha256:x24AtE8AmJ2ELE7bTUhau6AjLsTJcv2fSVOr5MtbPCg"
+  },
+  "challengeTranscript": {
+    "encoding": "UTF-8 prefix KAEVO-PAIRING-V3\\u0000, then field name UTF-8, \\u0000, uint32 big-endian value length, UTF-8 value",
+    "fieldOrder": ["protocol", "operation", "ticketId", "challengeId", "challengeNonce", "pairingAttemptId", "pluginInstanceId", "pluginPublicKeyFingerprint", "jellyfinServerId", "challengeIssuedAt", "challengeExpiresAt", "localCompletionRoute", "pairingAuthorizationHash"],
+    "values": {
+      "ticketId": "ticket-v3-vector-01",
+      "challengeId": "challenge-v3-vector-01",
+      "challengeNonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "pairingAttemptId": "123e4567-e89b-12d3-a456-426614174000",
+      "pluginInstanceId": "plugin-v3-vector-01",
+      "pluginPublicKeyFingerprint": "sha256:x24AtE8AmJ2ELE7bTUhau6AjLsTJcv2fSVOr5MtbPCg",
+      "jellyfinServerId": "server-v3-vector-01",
+      "challengeIssuedAt": "2026-07-21T22:00:00Z",
+      "challengeExpiresAt": "2026-07-21T22:00:30Z",
+      "localCompletionRoute": "/kaevo/v3/pairing/complete",
+      "pairingAuthorizationHash": "s5Wza9y2BFyqrWa6PFU24Zk861BNabbIGYj6W8tgoPtI"
+    },
+    "expectedSignatureBase64url": "SUjf9OsRIF5xYOANLgVNP2TidusFdf-76CLdckzwBHEYuB2HlagqFNtdtqaxbu3m7jvjMSZqbYBcAXSgBUZjCQ"
+  }
+}

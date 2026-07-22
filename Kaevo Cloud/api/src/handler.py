@@ -51,6 +51,24 @@ from connector_lifecycle import (
     random_pairing_code,
 )
 from identity_authority import AuthorityError, validate_access_token_claims
+from pairing_v3 import (
+    AUTHORIZATION_AUDIENCE,
+    PROTOCOL as PAIRING_V3_PROTOCOL,
+    PairingV3CryptoError,
+    b64url_decode as pairing_v3_b64url_decode,
+    b64url_encode as pairing_v3_b64url_encode,
+    canonical_transcript as pairing_v3_canonical_transcript,
+    canonical_json_digest as pairing_v3_canonical_json_digest,
+    canonical_uuid as pairing_v3_canonical_uuid,
+    constant_time_equal as pairing_v3_constant_time_equal,
+    ed25519_public_key_from_seed,
+    plugin_fingerprint as pairing_v3_plugin_fingerprint,
+    redemption_transcript as pairing_v3_redemption_transcript,
+    sha256_b64url as pairing_v3_sha256_b64url,
+    sign_authorization as pairing_v3_sign_authorization,
+    verify_authorization as pairing_v3_verify_authorization,
+    verify_ed25519 as pairing_v3_verify_ed25519,
+)
 
 
 SERVICE_NAME = "kaevo-cloud"
@@ -77,6 +95,8 @@ DEV_API_KEY = os.environ.get("DEV_API_KEY")
 KAEVO_ENV = os.environ.get("KAEVO_ENV", "dev").strip().lower()
 PLAYBACK_GRANT_SIGNING_KEY = os.environ.get("PLAYBACK_GRANT_SIGNING_KEY", "")
 PLAYBACK_RELAY_PUBLIC_URL = os.environ.get("PLAYBACK_RELAY_PUBLIC_URL", "").rstrip("/")
+PAIRING_V3_AUTHORIZATION_SIGNING_SEED = os.environ.get("PAIRING_V3_AUTHORIZATION_SIGNING_SEED", "")
+PAIRING_V3_AUTHORIZATION_KEY_ID = os.environ.get("PAIRING_V3_AUTHORIZATION_KEY_ID", "v3-dev-1")
 
 MAX_BATCH_EVENTS = 50
 CONNECTOR_ONLINE_WINDOW_SECONDS = 120
@@ -88,6 +108,13 @@ PLAYBACK_GRANT_TTL_SECONDS = 120
 REMOTE_RESPONSE_COMPRESS_THRESHOLD_BYTES = 180_000
 REMOTE_RESPONSE_MAX_STORED_BYTES = 330_000
 SAFE_PLAYBACK_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+SAFE_PAIRING_V3_OPAQUE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
+SAFE_PAIRING_V3_FINGERPRINT = re.compile(r"^sha256:[A-Za-z0-9_-]{43}$")
+SAFE_PAIRING_V3_NONCE = re.compile(r"^[A-Za-z0-9_-]{22,128}$")
+PAIRING_V3_AUTHORIZATION_TTL_SECONDS = 60
+PAIRING_V3_TERMINAL_RETENTION_SECONDS = 24 * 60 * 60
+PAIRING_V3_AUDIT_RETENTION_SECONDS = 30 * 24 * 60 * 60
+PAIRING_V3_PLUGIN_TIMESTAMP_SKEW_SECONDS = 60
 
 dynamodb = boto3.resource("dynamodb")
 events_table = dynamodb.Table(EVENTS_TABLE) if EVENTS_TABLE else None
@@ -508,9 +535,14 @@ def add_home_connector_signature(payload, connector_grant_key):
     return {**payload, "home_sig": base64url_encode(signature)}
 
 
-def create_connector_relay_ticket(event, path):
-    connector_id = path.removeprefix("/v1/home-connectors/").removesuffix("/relay-ticket").strip("/")
-    if not require_connector_auth(event, connector_id):
+def create_connector_relay_ticket(event, path, *, pairing_v3=False):
+    prefix = "/v3/home-connectors/" if pairing_v3 else "/v1/home-connectors/"
+    connector_id = path.removeprefix(prefix).removesuffix("/relay-ticket").strip("/")
+    body = parse_json_body(event)
+    if not isinstance(body, dict):
+        return response(400, {"state": "bad_request", "message": "invalid JSON body"})
+    authenticated = require_pairing_v3_connector_auth(event, connector_id, body) if pairing_v3 else require_connector_auth(event, connector_id)
+    if not authenticated:
         return response(401, {"state": "connector_unauthorized"})
     now = epoch_now()
     ticket = sign_playback_grant({
@@ -577,6 +609,66 @@ def require_connector_auth(event, connector_id):
     supplied = connector_bearer_token(event)
     expected = str(item.get("connector_token_hash") or "")
     return bool(supplied and expected and hmac.compare_digest(secret_hash(supplied), expected))
+
+
+def require_pairing_v3_connector_auth(event, connector_id, body):
+    """Verify one V3 connector request without accepting a legacy credential.
+
+    The connector's enrolled Ed25519 key is authoritative.  The signed
+    transcript binds the request method, concrete route, canonical body,
+    connector identity, plugin instance, key version, timestamp, and nonce.
+    A verified nonce is recorded before the operation is allowed to proceed.
+    """
+    if home_connectors_table is None or app_sessions_table is None or not connector_id or not isinstance(body, dict):
+        return False
+    body_connector_id = str(body.get("connector_id") or "").strip()
+    if body_connector_id and not hmac.compare_digest(body_connector_id, connector_id):
+        return False
+    item = home_connectors_table.get_item(Key={"connector_id": connector_id}, ConsistentRead=True).get("Item")
+    if not item or bool_value(item.get("revoked"), False):
+        return False
+    if item.get("protocol_version") != PAIRING_V3_PROTOCOL or item.get("auth_state") != "v3_active" or item.get("state") != "active":
+        return False
+    try:
+        public_key = pairing_v3_b64url_decode(str(item.get("plugin_public_key") or ""))
+        if len(public_key) != 32:
+            raise PairingV3CryptoError("invalid plugin key")
+        fingerprint = str(item.get("plugin_public_key_fingerprint") or "")
+        if not SAFE_PAIRING_V3_FINGERPRINT.fullmatch(fingerprint) or not pairing_v3_constant_time_equal(
+            fingerprint, pairing_v3_plugin_fingerprint(public_key)
+        ):
+            raise PairingV3CryptoError("plugin fingerprint mismatch")
+        plugin_instance_id = pairing_v3_text(item.get("plugin_instance_id"))
+        plugin_key_id = str(header_value(event, "x-kaevo-plugin-key-id") or "")
+        expected_key_id = str(item.get("plugin_key_id") or "1")
+        if not plugin_key_id or not hmac.compare_digest(plugin_key_id, expected_key_id):
+            raise PairingV3CryptoError("plugin key id mismatch")
+        timestamp = str(header_value(event, "x-kaevo-plugin-timestamp") or "")
+        if not re.fullmatch(r"\d{13}", timestamp) or abs((int(timestamp) // 1000) - epoch_now()) > PAIRING_V3_PLUGIN_TIMESTAMP_SKEW_SECONDS:
+            raise PairingV3CryptoError("plugin timestamp invalid")
+        nonce = str(header_value(event, "x-kaevo-plugin-nonce") or "")
+        if not SAFE_PAIRING_V3_NONCE.fullmatch(nonce):
+            raise PairingV3CryptoError("plugin nonce invalid")
+        transcript = pairing_v3_canonical_transcript("connector-request", (
+            ("httpMethod", method_for(event).upper()),
+            ("canonicalRoute", normalized_path(event)),
+            ("bodyDigest", pairing_v3_canonical_json_digest(body)),
+            ("timestamp", timestamp),
+            ("nonce", nonce),
+            ("connectorId", connector_id),
+            ("pluginInstanceId", plugin_instance_id),
+            ("pluginKeyId", plugin_key_id),
+            ("pluginPublicKeyFingerprint", fingerprint),
+        ))
+        pairing_v3_verify_ed25519(public_key, transcript, str(header_value(event, "x-kaevo-plugin-signature") or ""))
+        app_sessions_table.put_item(Item={
+            "token_hash": pairing_v3_key("v3_connector_nonce", f"{connector_id}:{nonce}"),
+            "record_type": "pairing_v3_connector_nonce",
+            "expires_at": epoch_now() + PAIRING_V3_TERMINAL_RETENTION_SECONDS,
+        }, ConditionExpression="attribute_not_exists(token_hash)")
+        return True
+    except (PairingV3CryptoError, ClientError, TypeError, ValueError):
+        return False
 
 
 def parse_json_body(event):
@@ -1795,11 +1887,483 @@ def refresh_bound_session_v2(event):
 
 def owner_bound_session(event):
     session = authenticated_app_session(event)
-    if not session:
+    # V3 is intentionally restricted to Owner Session Protected material.
+    # In development, authenticated_app_session also recognizes legacy
+    # app_session records for legacy routes. They must never authorize V3.
+    if not session or session.get("record_type") != "access":
         return None, response(401, {"state": "owner_session_required"})
     if session.get("role") != "owner":
         return None, response(403, {"state": "owner_required"})
     return session, None
+
+
+# Pairing V3 is intentionally implemented beside, rather than inside, the
+# legacy pairing handlers.  These helpers do not accept legacy credentials.
+def pairing_v3_correlation_id(event):
+    supplied = str(header_value(event, "x-kaevo-correlation-id") or "")
+    try:
+        return pairing_v3_canonical_uuid(supplied)
+    except PairingV3CryptoError:
+        return str(uuid.uuid4())
+
+
+def pairing_v3_response(status_code, code, correlation_id, *, retryable=False, **extra):
+    body = {
+        "protocol": PAIRING_V3_PROTOCOL,
+        "code": code,
+        "retryable": bool(retryable),
+        "correlationId": correlation_id,
+        **extra,
+    }
+    result = response(status_code, body)
+    result["headers"]["X-Kaevo-Correlation-Id"] = correlation_id
+    return result
+
+
+def pairing_v3_log(correlation_id, attempt_id, route, transition, status_code, outcome, *, aws_request_id=""):
+    """Emit an allowlisted record only; no request/header/body value is logged."""
+    record = {
+        "event": "kaevo_pairing_v3",
+        "timestamp": utc_now_iso(),
+        "correlationId": correlation_id,
+        # An attempt is linkable state, so retain only a one-way reference.
+        "pairingAttemptRef": pairing_v3_key("v3_attempt_log", attempt_id),
+        "route": route,
+        "transition": transition,
+        "httpStatus": int(status_code),
+        "outcome": outcome,
+    }
+    if aws_request_id:
+        record["awsRequestId"] = aws_request_id[:128]
+    # Lambda's default Python logging threshold is WARNING.  This is the sole
+    # V3 correlation record and contains only an allowlisted, redacted shape,
+    # so emit it at that threshold rather than silently losing live proof.
+    LOGGER.warning("%s", json.dumps(record, separators=(",", ":"), sort_keys=True))
+
+
+def pairing_v3_key(prefix, value):
+    return f"{prefix}#{secret_hash(value)}"
+
+
+def pairing_v3_text(value, *, required=True, limit=256):
+    result = str(value or "")
+    if (required and not result) or len(result.encode("utf-8")) > limit or not SAFE_PAIRING_V3_OPAQUE_IDENTIFIER.fullmatch(result):
+        raise PairingV3CryptoError("invalid pairing binding")
+    return result
+
+
+def pairing_v3_authorization_private_key():
+    try:
+        seed = pairing_v3_b64url_decode(PAIRING_V3_AUTHORIZATION_SIGNING_SEED)
+    except PairingV3CryptoError as error:
+        raise PairingV3CryptoError("pairing authorization signing key unavailable") from error
+    if len(seed) != 32:
+        raise PairingV3CryptoError("pairing authorization signing key unavailable")
+    return seed
+
+
+def pairing_v3_authorization_public_key():
+    return ed25519_public_key_from_seed(pairing_v3_authorization_private_key())
+
+
+def pairing_v3_authorization_claims(session, bindings, now):
+    return {
+        "iss": f"kaevo-cloud-{KAEVO_ENV}",
+        "aud": AUTHORIZATION_AUDIENCE,
+        "protocol": PAIRING_V3_PROTOCOL,
+        "jti": str(uuid.uuid4()),
+        "iat": now,
+        "nbf": now - 5,
+        "exp": now + PAIRING_V3_AUTHORIZATION_TTL_SECONDS,
+        "sub": pairing_v3_sha256_b64url(str(session.get("principal_id") or "").encode("utf-8")),
+        "accountBinding": pairing_v3_sha256_b64url(str(session.get("account_id") or "").encode("utf-8")),
+        "familyBinding": pairing_v3_sha256_b64url(str(session.get("household_id") or "").encode("utf-8")),
+        "ownerSessionProvenance": pairing_v3_sha256_b64url(str(session.get("family_id") or session.get("token_hash") or "").encode("utf-8")),
+        "iosDeviceBinding": pairing_v3_sha256_b64url(bindings["ios_device_id"].encode("utf-8")),
+        "pairingAttemptId": bindings["pairing_attempt_id"],
+        "ticketId": bindings["ticket_id"],
+        "pluginInstanceId": bindings["plugin_instance_id"],
+        "pluginPublicKeyFingerprint": bindings["plugin_public_key_fingerprint"],
+        "jellyfinServerId": bindings["jellyfin_server_id"],
+        "jellyfinUserProvenance": pairing_v3_sha256_b64url(bindings["jellyfin_user_id"].encode("utf-8")),
+        "entitlement": "cloud_enabled",
+    }
+
+
+def pairing_v3_bindings(body, session):
+    if not isinstance(body, dict) or body.get("protocol") != PAIRING_V3_PROTOCOL:
+        raise PairingV3CryptoError("invalid pairing protocol")
+    attempt_id = pairing_v3_canonical_uuid(str(body.get("pairingAttemptId") or ""))
+    values = {
+        "pairing_attempt_id": attempt_id,
+        "ticket_id": pairing_v3_text(body.get("ticketId")),
+        "plugin_instance_id": pairing_v3_text(body.get("pluginInstanceId")),
+        "jellyfin_server_id": pairing_v3_text(body.get("jellyfinServerId")),
+        "jellyfin_user_id": pairing_v3_text(body.get("jellyfinUserId")),
+        "ios_device_id": pairing_v3_text(body.get("iosDeviceId")),
+        "plugin_public_key_fingerprint": str(body.get("pluginPublicKeyFingerprint") or ""),
+    }
+    if not SAFE_PAIRING_V3_FINGERPRINT.fullmatch(values["plugin_public_key_fingerprint"]):
+        raise PairingV3CryptoError("invalid plugin fingerprint")
+    if not pairing_v3_constant_time_equal(values["ios_device_id"], str(session.get("device_id") or "")):
+        raise PairingV3CryptoError("device binding mismatch")
+    return values
+
+
+def pairing_v3_entitled(session):
+    entitlement, _ = load_entitlements_for_profile(str(session.get("profile_id") or ""))
+    return bool_value(entitlement.get("cloud_enabled"), False)
+
+
+def pairing_v3_audit_item(correlation_id, attempt_id, route, transition, status_code, outcome, now):
+    return {
+        "token_hash": pairing_v3_key("v3_audit", f"{attempt_id}:{transition}:{now}"),
+        "record_type": "pairing_v3_audit",
+        "correlation_id": correlation_id,
+        "pairing_attempt_ref": pairing_v3_key("v3_attempt_audit", attempt_id),
+        "route": route,
+        "transition": transition,
+        "http_status": int(status_code),
+        "outcome": outcome,
+        "created_at": utc_now_iso(),
+        "expires_at": now + PAIRING_V3_AUDIT_RETENTION_SECONDS,
+    }
+
+
+def issue_home_connector_pairing_authorization_v3(event):
+    route = "/v3/home-connectors/pairing/authorizations"
+    correlation_id = pairing_v3_correlation_id(event)
+    session, error_response = owner_bound_session(event)
+    if error_response:
+        try:
+            owner_error = json.loads(str(error_response.get("body") or "{}"))
+        except json.JSONDecodeError:
+            owner_error = {}
+        code = owner_error.get("state") if owner_error.get("state") in {"owner_session_required", "owner_required"} else "owner_session_required"
+        pairing_v3_log(correlation_id, "none", route, "authorization_denied", error_response["statusCode"], code)
+        return pairing_v3_response(error_response["statusCode"], code, correlation_id)
+    try:
+        bindings = pairing_v3_bindings(parse_json_body(event), session)
+    except PairingV3CryptoError:
+        pairing_v3_log(correlation_id, "none", route, "authorization_rejected", 400, "malformed_request")
+        return pairing_v3_response(400, "malformed_request", correlation_id)
+    if not pairing_v3_entitled(session):
+        pairing_v3_log(correlation_id, bindings["pairing_attempt_id"], route, "authorization_denied", 403, "entitlement_required")
+        return pairing_v3_response(403, "entitlement_required", correlation_id)
+    if app_sessions_table is None:
+        pairing_v3_log(correlation_id, bindings["pairing_attempt_id"], route, "authorization_failed", 503, "cloud_unavailable")
+        return pairing_v3_response(503, "cloud_unavailable", correlation_id, retryable=True)
+    now = epoch_now()
+    try:
+        claims = pairing_v3_authorization_claims(session, bindings, now)
+        authorization = pairing_v3_sign_authorization(pairing_v3_authorization_private_key(), PAIRING_V3_AUTHORIZATION_KEY_ID, claims)
+    except PairingV3CryptoError:
+        pairing_v3_log(correlation_id, bindings["pairing_attempt_id"], route, "authorization_failed", 503, "pairing_dependency_failure")
+        return pairing_v3_response(503, "pairing_dependency_failure", correlation_id, retryable=True)
+    item = {
+        "token_hash": pairing_v3_key("v3_authorization", claims["jti"]),
+        "record_type": "pairing_v3_authorization",
+        "state": "active",
+        "authorization_jti_hash": secret_hash(claims["jti"]),
+        "pairing_attempt_id": bindings["pairing_attempt_id"],
+        "ticket_id": bindings["ticket_id"],
+        "plugin_instance_id": bindings["plugin_instance_id"],
+        "plugin_public_key_fingerprint": bindings["plugin_public_key_fingerprint"],
+        "jellyfin_server_id": bindings["jellyfin_server_id"],
+        "jellyfin_user_provenance": claims["jellyfinUserProvenance"],
+        "account_binding": claims["accountBinding"],
+        "family_binding": claims["familyBinding"],
+        "ios_device_binding": claims["iosDeviceBinding"],
+        "owner_session_provenance": claims["ownerSessionProvenance"],
+        # Cloud-internal authoritative profile binding.  It is deliberately
+        # not placed in the signed Pairing Authorization returned to iOS or
+        # forwarded to the plugin.
+        "profile_id": str(session.get("profile_id") or ""),
+        "authorization_expires_at": claims["exp"],
+        "created_at": utc_now_iso(),
+        # The logical token expires in 60 seconds. This TTL retains its replay
+        # and idempotency state for the approved 24-hour terminal window.
+        "expires_at": now + PAIRING_V3_TERMINAL_RETENTION_SECONDS,
+    }
+    try:
+        app_sessions_table.put_item(Item=item, ConditionExpression="attribute_not_exists(token_hash)")
+        app_sessions_table.put_item(Item=pairing_v3_audit_item(correlation_id, bindings["pairing_attempt_id"], route, "authorization_issued", 201, "pairing_authorization_issued", now))
+    except ClientError:
+        pairing_v3_log(correlation_id, bindings["pairing_attempt_id"], route, "authorization_failed", 503, "cloud_unavailable")
+        return pairing_v3_response(503, "cloud_unavailable", correlation_id, retryable=True)
+    pairing_v3_log(correlation_id, bindings["pairing_attempt_id"], route, "authorization_issued", 201, "pairing_authorization_issued")
+    return pairing_v3_response(201, "pairing_authorization_issued", correlation_id, authorization=authorization, expiresAt=claims["exp"])
+
+
+def pairing_v3_verify_authorization_claims(authorization, now):
+    verified = pairing_v3_verify_authorization(authorization, pairing_v3_authorization_public_key())
+    claims = verified.claims
+    required = ("iss", "aud", "protocol", "jti", "iat", "nbf", "exp", "pairingAttemptId", "ticketId",
+                "pluginInstanceId", "pluginPublicKeyFingerprint", "jellyfinServerId", "jellyfinUserProvenance",
+                "accountBinding", "familyBinding", "iosDeviceBinding", "ownerSessionProvenance")
+    if any(not claims.get(key) for key in required):
+        raise PairingV3CryptoError("authorization claims missing")
+    if claims["iss"] != f"kaevo-cloud-{KAEVO_ENV}" or claims["aud"] != AUTHORIZATION_AUDIENCE or claims["protocol"] != PAIRING_V3_PROTOCOL:
+        raise PairingV3CryptoError("authorization claims invalid")
+    pairing_v3_canonical_uuid(str(claims["pairingAttemptId"]))
+    if not isinstance(claims["nbf"], int) or not isinstance(claims["exp"], int) or claims["nbf"] > now or claims["exp"] <= now:
+        raise PairingV3CryptoError("authorization expired")
+    return verified
+
+
+def pairing_v3_plugin_request(event, body, authorization_jti, operation):
+    try:
+        public_key = pairing_v3_b64url_decode(str(body.get("pluginPublicKey") or ""))
+        if len(public_key) != 32:
+            raise PairingV3CryptoError("invalid plugin key")
+        plugin_instance_id = pairing_v3_text(body.get("pluginInstanceId"))
+        pairing_attempt_id = pairing_v3_canonical_uuid(str(body.get("pairingAttemptId") or ""))
+        jellyfin_server_id = pairing_v3_text(body.get("jellyfinServerId"))
+        fingerprint = str(body.get("pluginPublicKeyFingerprint") or "")
+        if not SAFE_PAIRING_V3_FINGERPRINT.fullmatch(fingerprint) or not pairing_v3_constant_time_equal(fingerprint, pairing_v3_plugin_fingerprint(public_key)):
+            raise PairingV3CryptoError("plugin fingerprint mismatch")
+        timestamp = str(header_value(event, "x-kaevo-plugin-timestamp") or "")
+        if not re.fullmatch(r"\d{13}", timestamp) or abs((int(timestamp) // 1000) - epoch_now()) > PAIRING_V3_PLUGIN_TIMESTAMP_SKEW_SECONDS:
+            raise PairingV3CryptoError("plugin timestamp invalid")
+        nonce = str(header_value(event, "x-kaevo-plugin-nonce") or "")
+        if not SAFE_PAIRING_V3_NONCE.fullmatch(nonce):
+            raise PairingV3CryptoError("plugin nonce invalid")
+        signature = str(header_value(event, "x-kaevo-plugin-signature") or "")
+        method = method_for(event).upper()
+        route = normalized_path(event)
+        if operation == "redemption":
+            transcript = pairing_v3_redemption_transcript(
+                method=method, route=route, body_digest=pairing_v3_canonical_json_digest(body), timestamp=timestamp,
+                nonce=nonce, pairing_attempt_id=pairing_attempt_id, authorization_jti=authorization_jti,
+                plugin_instance_id=plugin_instance_id, plugin_public_key_fingerprint=fingerprint,
+                jellyfin_server_id=jellyfin_server_id,
+            )
+        else:
+            transcript = pairing_v3_canonical_transcript("attempt-status", (
+                ("httpMethod", method), ("canonicalRoute", route), ("bodyDigest", pairing_v3_canonical_json_digest(body)),
+                ("timestamp", timestamp), ("nonce", nonce), ("pairingAttemptId", pairing_attempt_id),
+                ("authorizationJti", authorization_jti), ("pluginInstanceId", plugin_instance_id),
+                ("pluginPublicKeyFingerprint", fingerprint), ("jellyfinServerId", jellyfin_server_id),
+            ))
+        pairing_v3_verify_ed25519(public_key, transcript, signature)
+    except (PairingV3CryptoError, TypeError, ValueError) as error:
+        raise PairingV3CryptoError("plugin request invalid") from error
+    return {
+        "public_key": public_key,
+        "plugin_instance_id": plugin_instance_id,
+        "pairing_attempt_id": pairing_attempt_id,
+        "jellyfin_server_id": jellyfin_server_id,
+        "fingerprint": fingerprint,
+        "nonce": nonce,
+        "timestamp": timestamp,
+    }
+
+
+def pairing_v3_transact_write(items):
+    def encode(value):
+        # ``dynamodb`` is a resource and its meta client applies the DynamoDB
+        # attribute-value transformer. Passing already-serialized values here
+        # would store an invalid nested map and breaks real transactions.
+        return dict(value)
+
+    def put(table_name, item, condition, values=None, names=None):
+        value = {"TableName": table_name, "Item": encode(item)}
+        if condition:
+            value["ConditionExpression"] = condition
+        if values:
+            value["ExpressionAttributeValues"] = encode(values)
+        if names:
+            value["ExpressionAttributeNames"] = names
+        return {"Put": value}
+
+    def update(table_name, key, expression, condition, values=None, names=None):
+        value = {"TableName": table_name, "Key": encode(key), "UpdateExpression": expression}
+        if condition:
+            value["ConditionExpression"] = condition
+        if values:
+            value["ExpressionAttributeValues"] = encode(values)
+        if names:
+            value["ExpressionAttributeNames"] = names
+        return {"Update": value}
+
+    dynamodb.meta.client.transact_write_items(TransactItems=[
+        update(item["table"], item["key"], item["update_expression"], item.get("condition"), item.get("values"), item.get("names"))
+        if item.get("kind") == "update" else
+        put(item["table"], item["item"], item.get("condition"), item.get("values"), item.get("names")) for item in items
+    ])
+
+
+def pairing_v3_transaction_conflict(error):
+    code = str((error.response or {}).get("Error", {}).get("Code") or "")
+    return code in {"ConditionalCheckFailedException", "TransactionCanceledException"}
+
+
+def pairing_v3_authorization_record(authorization_jti):
+    return app_sessions_table.get_item(
+        Key={"token_hash": pairing_v3_key("v3_authorization", authorization_jti)}, ConsistentRead=True,
+    ).get("Item") if app_sessions_table else None
+
+
+def redeem_home_connector_pairing_v3(event):
+    route = "/v3/home-connectors/pairing/redemptions"
+    correlation_id = pairing_v3_correlation_id(event)
+    body = parse_json_body(event)
+    if not isinstance(body, dict) or body.get("protocol") != PAIRING_V3_PROTOCOL:
+        pairing_v3_log(correlation_id, "none", route, "redemption_rejected", 400, "malformed_request")
+        return pairing_v3_response(400, "malformed_request", correlation_id)
+    if app_sessions_table is None or home_connectors_table is None:
+        pairing_v3_log(correlation_id, "none", route, "redemption_failed", 503, "cloud_unavailable")
+        return pairing_v3_response(503, "cloud_unavailable", correlation_id, retryable=True)
+    now = epoch_now()
+    try:
+        verified = pairing_v3_verify_authorization_claims(str(body.get("authorization") or ""), now)
+        claims = verified.claims
+        request = pairing_v3_plugin_request(event, body, str(claims["jti"]), "redemption")
+        jellyfin_user_id = pairing_v3_text(body.get("jellyfinUserId"))
+        plugin_key_id = pairing_v3_text(body.get("pluginKeyId"), limit=32)
+    except PairingV3CryptoError:
+        pairing_v3_log(correlation_id, "none", route, "redemption_rejected", 422, "invalid_pairing_authorization")
+        return pairing_v3_response(422, "invalid_pairing_authorization", correlation_id)
+    attempt_id = request["pairing_attempt_id"]
+    expected = (
+        ("pairingAttemptId", attempt_id), ("ticketId", str(body.get("ticketId") or "")),
+        ("pluginInstanceId", request["plugin_instance_id"]), ("pluginPublicKeyFingerprint", request["fingerprint"]),
+        ("jellyfinServerId", request["jellyfin_server_id"]),
+        ("jellyfinUserProvenance", pairing_v3_sha256_b64url(jellyfin_user_id.encode("utf-8"))),
+    )
+    if any(not pairing_v3_constant_time_equal(str(claims.get(key) or ""), value) for key, value in expected):
+        pairing_v3_log(correlation_id, attempt_id, route, "redemption_rejected", 403, "binding_mismatch")
+        return pairing_v3_response(403, "binding_mismatch", correlation_id)
+    authorization = pairing_v3_authorization_record(str(claims["jti"]))
+    if not authorization or authorization.get("record_type") != "pairing_v3_authorization":
+        pairing_v3_log(correlation_id, attempt_id, route, "redemption_rejected", 422, "invalid_pairing_authorization")
+        return pairing_v3_response(422, "invalid_pairing_authorization", correlation_id)
+    nonce_key = pairing_v3_key("v3_nonce", f"{request['plugin_instance_id']}:{request['nonce']}")
+    if app_sessions_table.get_item(Key={"token_hash": nonce_key}, ConsistentRead=True).get("Item"):
+        pairing_v3_log(correlation_id, attempt_id, route, "redemption_rejected", 409, "plugin_nonce_replayed")
+        return pairing_v3_response(409, "plugin_nonce_replayed", correlation_id)
+    if authorization.get("state") != "active":
+        attempt = app_sessions_table.get_item(Key={"token_hash": pairing_v3_key("v3_attempt", f"{request['plugin_instance_id']}:{attempt_id}")}, ConsistentRead=True).get("Item")
+        if attempt and pairing_v3_constant_time_equal(str(attempt.get("authorization_jti_hash") or ""), secret_hash(str(claims["jti"]))):
+            pairing_v3_log(correlation_id, attempt_id, route, "redemption_idempotent", 200, "pairing_redeemed")
+            return pairing_v3_response(200, "pairing_redeemed", correlation_id, connectorId=attempt.get("connector_id"), idempotent=True)
+        pairing_v3_log(correlation_id, attempt_id, route, "redemption_rejected", 409, "pairing_authorization_redeemed")
+        return pairing_v3_response(409, "pairing_authorization_redeemed", correlation_id)
+    if int(authorization.get("authorization_expires_at") or 0) < now:
+        pairing_v3_log(correlation_id, attempt_id, route, "redemption_rejected", 410, "pairing_authorization_expired")
+        return pairing_v3_response(410, "pairing_authorization_expired", correlation_id)
+    stored = (
+        ("pairing_attempt_id", attempt_id), ("ticket_id", str(claims["ticketId"])),
+        ("plugin_instance_id", request["plugin_instance_id"]), ("plugin_public_key_fingerprint", request["fingerprint"]),
+        ("jellyfin_server_id", request["jellyfin_server_id"]),
+        ("jellyfin_user_provenance", str(claims["jellyfinUserProvenance"])),
+    )
+    if any(not pairing_v3_constant_time_equal(str(authorization.get(key) or ""), value) for key, value in stored):
+        pairing_v3_log(correlation_id, attempt_id, route, "redemption_rejected", 403, "binding_mismatch")
+        return pairing_v3_response(403, "binding_mismatch", correlation_id)
+    attempt_key = pairing_v3_key("v3_attempt", f"{request['plugin_instance_id']}:{attempt_id}")
+    if app_sessions_table.get_item(Key={"token_hash": attempt_key}, ConsistentRead=True).get("Item"):
+        pairing_v3_log(correlation_id, attempt_id, route, "redemption_rejected", 409, "pairing_authorization_redeemed")
+        return pairing_v3_response(409, "pairing_authorization_redeemed", correlation_id)
+    binding_key_v3 = pairing_v3_key("v3_plugin", request["plugin_instance_id"])
+    binding = home_connectors_table.get_item(Key={"connector_id": binding_key_v3}, ConsistentRead=True).get("Item")
+    existing_connector_binding = binding is not None
+    connector = None
+    if binding:
+        if any(not pairing_v3_constant_time_equal(str(binding.get(key) or ""), value) for key, value in (
+            ("plugin_public_key_fingerprint", request["fingerprint"]), ("jellyfin_server_id", request["jellyfin_server_id"]),
+            ("account_binding", str(claims["accountBinding"])),
+        )) or binding.get("state") != "active":
+            pairing_v3_log(correlation_id, attempt_id, route, "redemption_rejected", 403, "binding_mismatch")
+            return pairing_v3_response(403, "binding_mismatch", correlation_id)
+        connector = home_connectors_table.get_item(Key={"connector_id": str(binding.get("active_connector_id") or "")}, ConsistentRead=True).get("Item")
+        if not connector:
+            pairing_v3_log(correlation_id, attempt_id, route, "redemption_failed", 503, "pairing_status_pending")
+            return pairing_v3_response(202, "pairing_status_pending", correlation_id, retryable=True)
+    else:
+        connector_id = f"v3_{uuid.uuid4()}"
+        connector = {
+            "connector_id": connector_id, "protocol_version": PAIRING_V3_PROTOCOL, "state": "active", "auth_state": "v3_active",
+            "plugin_instance_id": request["plugin_instance_id"], "plugin_public_key": pairing_v3_b64url_encode(request["public_key"]),
+            "plugin_public_key_fingerprint": request["fingerprint"], "plugin_key_id": plugin_key_id,
+            "server_id": request["jellyfin_server_id"],
+            "jellyfin_server_id": request["jellyfin_server_id"], "jellyfin_user_provenance": claims["jellyfinUserProvenance"],
+            "account_binding": claims["accountBinding"], "family_binding": claims["familyBinding"],
+            "ios_device_binding": claims["iosDeviceBinding"], "owner_session_provenance": claims["ownerSessionProvenance"],
+            "profile_id": str(authorization.get("profile_id") or ""),
+            "paired_at": utc_now_iso(), "last_contact_at": utc_now_iso(), "revoked": False,
+        }
+    nonce_item = {
+        "token_hash": nonce_key,
+        "record_type": "pairing_v3_plugin_nonce", "expires_at": now + PAIRING_V3_TERMINAL_RETENTION_SECONDS,
+    }
+    attempt = {
+        "token_hash": attempt_key, "record_type": "pairing_v3_attempt", "state": "redeemed",
+        "pairing_attempt_id": attempt_id, "authorization_jti_hash": secret_hash(str(claims["jti"])),
+        "plugin_instance_id": request["plugin_instance_id"], "plugin_public_key_fingerprint": request["fingerprint"],
+        "connector_id": connector["connector_id"], "created_at": utc_now_iso(),
+        "expires_at": now + PAIRING_V3_TERMINAL_RETENTION_SECONDS,
+    }
+    writes = [
+        {"table": app_sessions_table.name, "item": nonce_item, "condition": "attribute_not_exists(token_hash)"},
+        {"kind": "update", "table": app_sessions_table.name, "key": {"token_hash": authorization["token_hash"]},
+         "update_expression": "SET #state = :redeemed, redeemed_at = :redeemed_at",
+         "condition": "#state = :active", "names": {"#state": "state"},
+         "values": {":active": "active", ":redeemed": "redeemed", ":redeemed_at": utc_now_iso()}},
+        {"table": app_sessions_table.name, "item": attempt, "condition": "attribute_not_exists(token_hash)"},
+        {"table": app_sessions_table.name, "item": pairing_v3_audit_item(correlation_id, attempt_id, route, "authorization_redeemed", 201, "pairing_redeemed", now), "condition": "attribute_not_exists(token_hash)"},
+    ]
+    if binding is None:
+        binding = {
+            "connector_id": binding_key_v3, "record_type": "pairing_v3_plugin_binding", "state": "active",
+            "active_connector_id": connector["connector_id"], "plugin_instance_id": request["plugin_instance_id"],
+            "plugin_public_key_fingerprint": request["fingerprint"], "jellyfin_server_id": request["jellyfin_server_id"],
+            "account_binding": claims["accountBinding"], "created_at": utc_now_iso(),
+        }
+        writes.extend((
+            {"table": home_connectors_table.name, "item": connector, "condition": "attribute_not_exists(connector_id)"},
+            {"table": home_connectors_table.name, "item": binding, "condition": "attribute_not_exists(connector_id)"},
+        ))
+    try:
+        pairing_v3_transact_write(writes)
+    except ClientError as error:
+        if not pairing_v3_transaction_conflict(error):
+            pairing_v3_log(correlation_id, attempt_id, route, "redemption_failed", 503, "cloud_unavailable")
+            return pairing_v3_response(503, "cloud_unavailable", correlation_id, retryable=True)
+        pairing_v3_log(correlation_id, attempt_id, route, "redemption_conflict", 409, "pairing_authorization_redeemed")
+        return pairing_v3_response(409, "pairing_authorization_redeemed", correlation_id)
+    pairing_v3_log(correlation_id, attempt_id, route, "authorization_redeemed", 201, "pairing_redeemed")
+    return pairing_v3_response(201, "pairing_redeemed", correlation_id, connectorId=connector["connector_id"], idempotent=existing_connector_binding)
+
+
+def pairing_attempt_status_v3(event, path):
+    route = "/v3/home-connectors/pairing/attempts/{pairingAttemptId}"
+    correlation_id = pairing_v3_correlation_id(event)
+    attempt_id = path.removeprefix("/v3/home-connectors/pairing/attempts/").strip()
+    body = parse_json_body(event)
+    if not isinstance(body, dict) or body.get("protocol") != PAIRING_V3_PROTOCOL:
+        return pairing_v3_response(400, "malformed_request", correlation_id)
+    try:
+        attempt_id = pairing_v3_canonical_uuid(attempt_id)
+        authorization_jti = pairing_v3_text(body.get("authorizationJti"))
+        request = pairing_v3_plugin_request(event, body, authorization_jti, "attempt-status")
+    except PairingV3CryptoError:
+        return pairing_v3_response(422, "invalid_pairing_authorization", correlation_id)
+    if request["pairing_attempt_id"] != attempt_id or app_sessions_table is None:
+        return pairing_v3_response(403, "binding_mismatch", correlation_id)
+    nonce = {"token_hash": pairing_v3_key("v3_nonce", f"{request['plugin_instance_id']}:{request['nonce']}"), "record_type": "pairing_v3_plugin_nonce", "expires_at": epoch_now() + PAIRING_V3_TERMINAL_RETENTION_SECONDS}
+    try:
+        app_sessions_table.put_item(Item=nonce, ConditionExpression="attribute_not_exists(token_hash)")
+    except ClientError:
+        return pairing_v3_response(409, "pairing_authorization_redeemed", correlation_id)
+    attempt = app_sessions_table.get_item(Key={"token_hash": pairing_v3_key("v3_attempt", f"{request['plugin_instance_id']}:{attempt_id}")}, ConsistentRead=True).get("Item")
+    if not attempt:
+        pairing_v3_log(correlation_id, attempt_id, route, "status_pending", 202, "pairing_status_pending")
+        return pairing_v3_response(202, "pairing_status_pending", correlation_id, retryable=True)
+    if not pairing_v3_constant_time_equal(str(attempt.get("authorization_jti_hash") or ""), secret_hash(authorization_jti)) or not pairing_v3_constant_time_equal(str(attempt.get("plugin_public_key_fingerprint") or ""), request["fingerprint"]):
+        return pairing_v3_response(403, "binding_mismatch", correlation_id)
+    pairing_v3_log(correlation_id, attempt_id, route, "status_redeemed", 200, "pairing_redeemed")
+    return pairing_v3_response(200, "pairing_redeemed", correlation_id, connectorId=attempt.get("connector_id"), idempotent=True)
 
 
 def _gateway_jwt_claims(event):
@@ -2587,7 +3151,33 @@ def revoke_home_connector(event, path):
     return response(200, {"state": "revoked", "connector_id": connector_id})
 
 
-def register_home_connector(event):
+def pairing_v3_profile_binding(connector, requested_profile_id):
+    """Resolve an existing or safely backfilled V3 profile binding.
+
+    New V3 redemptions persist the authoritative profile directly.  Connectors
+    enrolled before that field existed may backfill exactly once, but only
+    when the identity profile resolves to the same account and household
+    hashes already bound by the Pairing Authorization.
+    """
+    bound_profile_id = str((connector or {}).get("profile_id") or "").strip()
+    requested_profile_id = str(requested_profile_id or "").strip()
+    if bound_profile_id:
+        return bound_profile_id if not requested_profile_id or hmac.compare_digest(bound_profile_id, requested_profile_id) else ""
+    if not requested_profile_id or identity_profiles_table is None:
+        return ""
+    profile = identity_profiles_table.get_item(Key={"profile_id": requested_profile_id}, ConsistentRead=True).get("Item")
+    if not profile:
+        return ""
+    expected_account = pairing_v3_sha256_b64url(str(profile.get("account_id") or "").encode("utf-8"))
+    expected_family = pairing_v3_sha256_b64url(str(profile.get("household_id") or "").encode("utf-8"))
+    if not pairing_v3_constant_time_equal(str((connector or {}).get("account_binding") or ""), expected_account):
+        return ""
+    if not pairing_v3_constant_time_equal(str((connector or {}).get("family_binding") or ""), expected_family):
+        return ""
+    return requested_profile_id
+
+
+def register_home_connector(event, *, pairing_v3=False):
     if home_connectors_table is None:
         return response(500, {"state": "server_error", "message": "home connectors table is not configured"})
 
@@ -2596,19 +3186,23 @@ def register_home_connector(event):
     if body is None:
         return response(400, {"state": "bad_request", "message": "invalid JSON body"})
 
-    profile_id = str(body.get("profile_id") or "").strip()
+    requested_profile_id = str(body.get("profile_id") or "").strip()
 
-    if not profile_id:
+    if not pairing_v3 and not requested_profile_id:
         return response(400, {"state": "bad_request", "message": "profile_id is required"})
 
     connector_id = str(body.get("connector_id") or uuid.uuid4()).strip()
-    if not require_connector_auth(event, connector_id):
+    authenticated = require_pairing_v3_connector_auth(event, connector_id, body) if pairing_v3 else require_connector_auth(event, connector_id)
+    if not authenticated:
         return response(401, {"state": "connector_unauthorized"})
     now = utc_now_iso()
     now_epoch = epoch_now()
 
     existing = home_connectors_table.get_item(Key={"connector_id": connector_id}).get("Item")
-    if not existing or not hmac.compare_digest(str(existing.get("profile_id") or ""), profile_id):
+    if not existing:
+        return response(403, {"state": "connector_profile_mismatch"})
+    profile_id = pairing_v3_profile_binding(existing, requested_profile_id) if pairing_v3 else str(existing.get("profile_id") or "")
+    if not profile_id or (not pairing_v3 and not hmac.compare_digest(profile_id, requested_profile_id)):
         return response(403, {"state": "connector_profile_mismatch"})
     created_at = existing.get("created_at") if existing else now
 
@@ -2648,8 +3242,8 @@ def register_home_connector(event):
     })
 
 
-def connector_id_from_heartbeat_path(path):
-    prefix = "/v1/home-connectors/"
+def connector_id_from_heartbeat_path(path, *, pairing_v3=False):
+    prefix = "/v3/home-connectors/" if pairing_v3 else "/v1/home-connectors/"
     suffix = "/heartbeat"
 
     if path.startswith(prefix) and path.endswith(suffix):
@@ -2658,7 +3252,7 @@ def connector_id_from_heartbeat_path(path):
     return ""
 
 
-def heartbeat_home_connector(event, path):
+def heartbeat_home_connector(event, path, *, pairing_v3=False):
     if home_connectors_table is None:
         return response(500, {"state": "server_error", "message": "home connectors table is not configured"})
 
@@ -2667,19 +3261,20 @@ def heartbeat_home_connector(event, path):
     if body is None:
         return response(400, {"state": "bad_request", "message": "invalid JSON body"})
 
-    connector_id = connector_id_from_heartbeat_path(path) or str(body.get("connector_id") or "").strip()
+    connector_id = connector_id_from_heartbeat_path(path, pairing_v3=pairing_v3) or str(body.get("connector_id") or "").strip()
 
     if not connector_id:
         return response(400, {"state": "bad_request", "message": "connector_id is required"})
 
-    if not require_connector_auth(event, connector_id):
+    authenticated = require_pairing_v3_connector_auth(event, connector_id, body) if pairing_v3 else require_connector_auth(event, connector_id)
+    if not authenticated:
         return response(401, {"state": "connector_unauthorized"})
 
     existing = home_connectors_table.get_item(Key={"connector_id": connector_id}).get("Item")
 
-    bound_profile_id = str((existing or {}).get("profile_id") or "").strip()
-    requested_profile_id = str(body.get("profile_id") or bound_profile_id).strip()
-    if not bound_profile_id or not hmac.compare_digest(bound_profile_id, requested_profile_id):
+    requested_profile_id = str(body.get("profile_id") or "").strip()
+    bound_profile_id = pairing_v3_profile_binding(existing, requested_profile_id) if pairing_v3 else str((existing or {}).get("profile_id") or "").strip()
+    if not bound_profile_id or (not pairing_v3 and not hmac.compare_digest(bound_profile_id, requested_profile_id or bound_profile_id)):
         return response(403, {"state": "connector_profile_mismatch"})
     profile_id = bound_profile_id
 
@@ -3307,7 +3902,7 @@ def is_safe_remote_path(provider, path, query):
 
 
 def remote_request_path_id(path, suffix=""):
-    prefix = "/v1/remote-requests/"
+    prefix = "/v3/remote-requests/" if path.startswith("/v3/remote-requests/") else "/v1/remote-requests/"
 
     if path.startswith(prefix):
         value = path[len(prefix):]
@@ -3677,7 +4272,7 @@ def get_remote_request(event, path):
     return response(200, public_remote_request_item(item, include_payload=True))
 
 
-def claim_remote_request(event):
+def claim_remote_request(event, *, pairing_v3=False):
     if remote_requests_table is None:
         return response(500, {"state": "server_error", "message": "remote requests table is not configured"})
 
@@ -3691,7 +4286,8 @@ def claim_remote_request(event):
     if not connector_id:
         return response(400, {"state": "bad_request", "message": "connector_id is required"})
 
-    if not require_connector_auth(event, connector_id):
+    authenticated = require_pairing_v3_connector_auth(event, connector_id, body) if pairing_v3 else require_connector_auth(event, connector_id)
+    if not authenticated:
         return response(401, {"state": "connector_unauthorized"})
 
     result = remote_requests_table.query(
@@ -3742,7 +4338,7 @@ def claim_remote_request(event):
     return response(200, {"state": "empty"})
 
 
-def complete_remote_request(event, path):
+def complete_remote_request(event, path, *, pairing_v3=False):
     if remote_requests_table is None:
         return response(500, {"state": "server_error", "message": "remote requests table is not configured"})
 
@@ -3761,7 +4357,9 @@ def complete_remote_request(event, path):
     if not item:
         return response(404, {"state": "not_found", "request_id": request_id})
 
-    if not require_connector_auth(event, str(item.get("connector_id") or "")):
+    connector_id = str(item.get("connector_id") or "")
+    authenticated = require_pairing_v3_connector_auth(event, connector_id, body) if pairing_v3 else require_connector_auth(event, connector_id)
+    if not authenticated:
         return response(401, {"state": "connector_unauthorized"})
 
     body_connector_id = str(body.get("connector_id") or "").strip()
@@ -3854,7 +4452,7 @@ def complete_remote_request(event, path):
     })
 
 
-def fail_remote_request(event, path):
+def fail_remote_request(event, path, *, pairing_v3=False):
     if remote_requests_table is None:
         return response(500, {"state": "server_error", "message": "remote requests table is not configured"})
 
@@ -3873,7 +4471,9 @@ def fail_remote_request(event, path):
     if not item:
         return response(404, {"state": "not_found", "request_id": request_id})
 
-    if not require_connector_auth(event, str(item.get("connector_id") or "")):
+    connector_id = str(item.get("connector_id") or "")
+    authenticated = require_pairing_v3_connector_auth(event, connector_id, body) if pairing_v3 else require_connector_auth(event, connector_id)
+    if not authenticated:
         return response(401, {"state": "connector_unauthorized"})
 
     body_connector_id = str(body.get("connector_id") or "").strip()
@@ -4084,6 +4684,9 @@ def lambda_handler(event, context):
                 "/v2/household/invitations",
                 "/v2/household/invitations/{invitationId}/revoke",
                 "/v2/identity/join-household",
+                "/v3/home-connectors/pairing/authorizations",
+                "/v3/home-connectors/pairing/redemptions",
+                "/v3/home-connectors/pairing/attempts/{pairingAttemptId}",
                 "/v1/home-connectors/pairing/start",
                 "/v1/home-connectors/pairing/exchange",
                 "/v1/home-connectors/register",
@@ -4156,6 +4759,15 @@ def lambda_handler(event, context):
 
     if method == "POST" and path == "/v2/identity/join-household":
         return join_household(event)
+
+    if method == "POST" and path == "/v3/home-connectors/pairing/authorizations":
+        return issue_home_connector_pairing_authorization_v3(event)
+
+    if method == "POST" and path == "/v3/home-connectors/pairing/redemptions":
+        return redeem_home_connector_pairing_v3(event)
+
+    if method == "POST" and path.startswith("/v3/home-connectors/pairing/attempts/"):
+        return pairing_attempt_status_v3(event, path)
 
     if method == "POST" and path == "/v1/events":
         return save_event(event)
@@ -4231,6 +4843,24 @@ def lambda_handler(event, context):
 
     if method == "POST" and path.startswith("/v1/home-connectors/") and path.endswith("/revoke"):
         return revoke_home_connector(event, path)
+
+    if method == "POST" and path.startswith("/v3/home-connectors/") and path.endswith("/relay-ticket"):
+        return create_connector_relay_ticket(event, path, pairing_v3=True)
+
+    if method == "POST" and path == "/v3/home-connectors/register":
+        return register_home_connector(event, pairing_v3=True)
+
+    if method == "POST" and path.startswith("/v3/home-connectors/") and path.endswith("/heartbeat"):
+        return heartbeat_home_connector(event, path, pairing_v3=True)
+
+    if method == "POST" and path == "/v3/remote-requests/claim":
+        return claim_remote_request(event, pairing_v3=True)
+
+    if method == "POST" and path.startswith("/v3/remote-requests/") and path.endswith("/complete"):
+        return complete_remote_request(event, path, pairing_v3=True)
+
+    if method == "POST" and path.startswith("/v3/remote-requests/") and path.endswith("/fail"):
+        return fail_remote_request(event, path, pairing_v3=True)
 
     if method == "POST" and path.startswith("/v1/home-connectors/") and path.endswith("/relay-ticket"):
         return create_connector_relay_ticket(event, path)

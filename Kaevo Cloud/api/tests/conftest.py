@@ -7,7 +7,9 @@ import pytest
 
 
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src"
+API_ROOT = SRC.parent
 sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(API_ROOT))
 
 
 @pytest.fixture(autouse=True)

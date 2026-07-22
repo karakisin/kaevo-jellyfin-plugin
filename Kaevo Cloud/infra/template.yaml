@@ -347,6 +347,23 @@ Resources:
         - Key: KaevoDataClass
           Value: security-audit-reference-key
 
+  # A generated 43-character base64url-compatible value decodes to a 32-byte
+  # Ed25519 seed. The seed is never a SAM parameter, output, or source value.
+  # This follows the existing environment-scoped Secrets Manager convention.
+  KaevoPairingV3AuthorizationSigningSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub kaevo-cloud-${EnvironmentName}-pairing-v3-authorization-signing-seed
+      Description: Dev-scoped Ed25519 seed for Pairing V3 authorization signing
+      GenerateSecretString:
+        PasswordLength: 43
+        ExcludePunctuation: true
+      Tags:
+        - Key: KaevoDataClass
+          Value: pairing-v3-authorization-signing-key
+
   KaevoHomeConnectorsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -700,6 +717,8 @@ Resources:
           INSTALLATIONS_TABLE: !Ref KaevoInstallationsTable
           SECURITY_AUDIT_TABLE: !Ref KaevoSecurityAuditTable
           AUDIT_REFERENCE_SECRET_ARN: !Ref KaevoAuditReferenceSecret
+          PAIRING_V3_AUTHORIZATION_SIGNING_SEED: !Sub '{{resolve:secretsmanager:${KaevoPairingV3AuthorizationSigningSecret}:SecretString}}'
+          PAIRING_V3_AUTHORIZATION_KEY_ID: v3-dev-20260722-1
           PLAYBACK_GRANT_SIGNING_KEY: !Ref PlaybackGrantSigningKey
           PLAYBACK_RELAY_PUBLIC_URL: !Ref PlaybackRelayPublicUrl
           EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
@@ -752,6 +771,11 @@ Resources:
               Action:
                 - secretsmanager:GetSecretValue
               Resource: !Ref KaevoAuditReferenceSecret
+            - Sid: ReadPairingV3AuthorizationSigningKey
+              Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref KaevoPairingV3AuthorizationSigningSecret
         - S3CrudPolicy:
             BucketName: !Ref KaevoRemotePayloadsBucket
         - S3CrudPolicy:
@@ -947,6 +971,27 @@ Resources:
             Auth:
               Authorizer: KaevoOwnerAuthorizer
 
+        IssueHomeConnectorPairingAuthorizationV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/home-connectors/pairing/authorizations
+            Method: POST
+
+        RedeemHomeConnectorPairingAuthorizationV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/home-connectors/pairing/redemptions
+            Method: POST
+
+        GetHomeConnectorPairingAttemptV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/home-connectors/pairing/attempts/{pairingAttemptId}
+            Method: POST
+
         HouseholdInvitations:
           Type: HttpApi
           Properties:
@@ -1080,6 +1125,136 @@ Resources:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v1/remote-images/{provider}/{itemId}/{imageType}
             Method: GET
+
+  KaevoV3ConnectorControlLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-v3-connector-control
+      RetentionInDays: 30
+
+  KaevoV3ConnectorControlFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub kaevo-cloud-${EnvironmentName}-v3-connector-control
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KaevoV3ConnectorControlLeastPrivilege
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteOwnLambdaLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/kaevo-cloud-${EnvironmentName}-v3-connector-control:*
+              - Sid: ReadAndUpdateV3ConnectorRecords
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt KaevoHomeConnectorsTable.Arn
+              - Sid: ConsumeV3ConnectorRequestNonces
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt KaevoAppSessionsTable.Arn
+              - Sid: ResolveAuthoritativeProfileBinding
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !GetAtt KaevoIdentityProfilesTable.Arn
+              - Sid: ReadAndTransitionRemoteRequestRecords
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt KaevoRemoteRequestsTable.Arn
+              - Sid: QueryPendingRemoteRequestsByConnector
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource: !Sub ${KaevoRemoteRequestsTable.Arn}/index/connector_id-status_created_at-index
+              - Sid: StoreBoundedRemoteResponses
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub ${KaevoRemotePayloadsBucket.Arn}/remote-responses/*
+      Tags:
+        - Key: KaevoSecurityBoundary
+          Value: pairing-v3-connector-control
+
+  KaevoV3ConnectorControlFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - KaevoV3ConnectorControlLogGroup
+    Metadata:
+      BuildMethod: makefile
+      BuildArchitecture: arm64
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-v3-connector-control
+      CodeUri: ../api/
+      Handler: connector_control_handler.lambda_handler
+      Role: !GetAtt KaevoV3ConnectorControlFunctionRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Environment:
+        Variables:
+          KAEVO_ENV: !Ref EnvironmentName
+          HOME_CONNECTORS_TABLE: !Ref KaevoHomeConnectorsTable
+          REMOTE_REQUESTS_TABLE: !Ref KaevoRemoteRequestsTable
+          APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
+          IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
+          REMOTE_PAYLOADS_BUCKET: !Ref KaevoRemotePayloadsBucket
+          PLAYBACK_GRANT_SIGNING_KEY: !Ref PlaybackGrantSigningKey
+          PLAYBACK_RELAY_PUBLIC_URL: !Ref PlaybackRelayPublicUrl
+      Events:
+        RegisterHomeConnectorV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/home-connectors/register
+            Method: POST
+        HeartbeatHomeConnectorV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/home-connectors/{connectorId}/heartbeat
+            Method: POST
+        CreateConnectorRelayTicketV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/home-connectors/{connectorId}/relay-ticket
+            Method: POST
+        RemoteRequestClaimV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/remote-requests/claim
+            Method: POST
+        RemoteRequestCompleteV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/remote-requests/{requestId}/complete
+            Method: POST
+        RemoteRequestFailV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/remote-requests/{requestId}/fail
+            Method: POST
+      Tags:
+        KaevoSecurityBoundary: pairing-v3-connector-control
 
 Outputs:
   ApiUrl:
