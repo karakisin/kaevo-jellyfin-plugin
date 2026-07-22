@@ -46,6 +46,35 @@ public sealed class ProviderDestinationPolicyTests
     }
 
     [Fact]
+    public async Task AdministratorApprovedHighDockerPortIsPinned()
+    {
+        var approved = await Policy("192.168.40.10")
+            .ApproveAsync("seerr", "http://provider.test:30357", default);
+
+        Assert.Equal("http://provider.test:30357/", approved.BaseUri.ToString());
+        Assert.Equal(new[] { "192.168.40.10" }, approved.Addresses);
+    }
+
+    [Fact]
+    public async Task LegacyProviderWithoutPinnedAddressesRequiresReapproval()
+    {
+        var secret = new KaevoLocalProviderSecret(
+            "http://provider.test:30357",
+            "key",
+            true,
+            Array.Empty<string>());
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Policy("192.168.40.10").RevalidateAsync(
+                "seerr",
+                secret,
+                new Uri("http://provider.test:30357/api/v1/status"),
+                default));
+
+        Assert.Equal("providerDestinationReapprovalRequired", error.Message);
+    }
+
+    [Fact]
     public async Task ReorderedApprovedDnsSetProducesTheSameDeterministicConnectionOrder()
     {
         var secret = new KaevoLocalProviderSecret("http://provider.test:8989", "key", true, new[] { "192.168.40.10", "192.168.40.11" });
