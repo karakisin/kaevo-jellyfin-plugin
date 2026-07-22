@@ -235,6 +235,31 @@ public sealed class PairingV3ServiceTests : IDisposable
     }
 
     [Fact]
+    public void ConnectorResponseCanonicalDigestMatchesCloudForUnicodeProviderResults()
+    {
+        using var document = JsonDocument.Parse("""
+            {
+              "connector_id": "v3_example",
+              "http_status": 200,
+              "response": {
+                "results": [
+                  {
+                    "originalTitle": "千と千尋の神隠し",
+                    "title": "Amélie",
+                    "voteAverage": 7.5
+                  }
+                ]
+              },
+              "truncated": false
+            }
+            """);
+
+        Assert.Equal(
+            "0QXNRsD3hYWkaiiS6aZ4JVJdfSmBdq_fZrnZbbIGZDA",
+            KaevoPairingV3Crypto.CanonicalJsonDigest(document.RootElement));
+    }
+
+    [Fact]
     public async Task LostResponseRecoversThroughStatusAndConsumesDurably()
     {
         var cloud = new CapturingCloud(new("ambiguous_enrollment", Retryable: true)) { StatusResult = new("pairing_redeemed", "connector-1", Idempotent: true) };

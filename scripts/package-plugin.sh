@@ -34,7 +34,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Matches the connected app state in Jellyfin and securely supports administrator-approved private Docker and NAS provider ports.",
+  "changelog": "Keeps Pairing V3 response signatures valid for international Seerr titles so Search results can return through Cloud securely.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -42,7 +42,7 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.65.0"
+  "version": "0.2.66.0"
 }
 EOF
 

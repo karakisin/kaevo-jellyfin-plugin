@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Crypto.Signers;
@@ -103,7 +104,13 @@ internal static class KaevoPairingV3Crypto
     private static byte[] CanonicalJson(JsonElement element)
     {
         using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream)) WriteCanonical(writer, element);
+        // Cloud canonicalizes parsed JSON with ensure_ascii=false. Use the
+        // equivalent encoder so signed response bodies containing non-ASCII
+        // titles produce the same digest in .NET and Python.
+        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions
+        {
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        })) WriteCanonical(writer, element);
         return stream.ToArray();
     }
 
