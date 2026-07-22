@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -265,6 +266,37 @@ public sealed class PairingV3ServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task PostPairingConnectorTransportUsesOnlyV3ProofHeadersAndRoutes()
+    {
+        var capture = new ConnectorCaptureHandler();
+        var service = new KaevoPairingV3Service(Store(), new FakeCloud(), () => true,
+            () => JsonSerializer.Serialize(new Dictionary<string, string> { ["cloud-test"] = KaevoPairingV3Crypto.Base64Url(KaevoPairingV3Crypto.PublicKeyFromSeed(CloudSeed)) }),
+            () => "kaevo-cloud-dev", connectorHttp: new HttpClient(capture));
+        var start = await service.StartAsync("server-v3-01", "Jellyfin", "https://local", "user-1");
+        var token = Authorization(start, "user-1");
+        var challenge = await service.ChallengeAsync(start.TicketId, Attempt, KaevoPairingV3Crypto.HashText(token), Correlation);
+        await service.CompleteAsync(new Uri("https://cloud.example"), ValidCompletion(start, challenge, token));
+        var body = new { connector_id = "connector-1", profile_id = "profile-1", provider_status = new { } };
+
+        using var response = await service.SendConnectorRequestAsync(
+            new Uri("https://cloud.example"), HttpMethod.Post, "/v3/home-connectors/register", body);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("/v3/home-connectors/register", capture.Path);
+        Assert.Equal("1", capture.Headers["X-Kaevo-Plugin-Key-Id"]);
+        Assert.False(string.IsNullOrWhiteSpace(capture.Headers["X-Kaevo-Plugin-Timestamp"]));
+        Assert.False(string.IsNullOrWhiteSpace(capture.Headers["X-Kaevo-Plugin-Nonce"]));
+        Assert.False(string.IsNullOrWhiteSpace(capture.Headers["X-Kaevo-Plugin-Signature"]));
+        Assert.DoesNotContain("Authorization", capture.Headers.Keys);
+        Assert.DoesNotContain("DPoP", capture.Headers.Keys);
+        Assert.DoesNotContain(token, capture.Body);
+        Assert.Equal("/v3/remote-requests/claim", KaevoCloudConnectorService.PairingV3CloudPath("/v1/remote-requests/claim"));
+        Assert.Equal("/v3/home-connectors/connector-1/heartbeat", KaevoCloudConnectorService.PairingV3CloudPath("/v1/home-connectors/connector-1/heartbeat"));
+        Assert.Equal(string.Empty, KaevoCloudConnectorService.ProfileIdForCloud("legacy-profile", pairingV3Active: true));
+        Assert.Equal("legacy-profile", KaevoCloudConnectorService.ProfileIdForCloud("legacy-profile", pairingV3Active: false));
+    }
+
+    [Fact]
     public async Task ObservationsAreAllowlistedAndDoNotContainPairingSecrets()
     {
         var observations = new List<string>();
@@ -356,5 +388,23 @@ public sealed class PairingV3ServiceTests : IDisposable
         public KaevoPairingV3CloudResult StatusResult { get; init; } = new("pairing_status_pending", Retryable: true);
         public Task<KaevoPairingV3CloudResult> RedeemAsync(Uri _, KaevoPairingV3RedemptionRequest request, CancellationToken ___) { Redemption = request; return Task.FromResult(redemption); }
         public Task<KaevoPairingV3CloudResult> StatusAsync(Uri _, KaevoPairingV3StatusRequest request, CancellationToken ___) { Status = request; return Task.FromResult(StatusResult); }
+    }
+
+    private sealed class ConnectorCaptureHandler : HttpMessageHandler
+    {
+        public string Path { get; private set; } = string.Empty;
+        public string Body { get; private set; } = string.Empty;
+        public Dictionary<string, string> Headers { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Path = request.RequestUri?.AbsolutePath ?? string.Empty;
+            Body = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
+            foreach (var header in request.Headers) Headers[header.Key] = string.Join(",", header.Value);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"state\":\"online\",\"playback\":null}", Encoding.UTF8, "application/json")
+            };
+        }
     }
 }

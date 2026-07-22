@@ -42,7 +42,7 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.60.0"
+  "version": "0.2.64.0"
 }
 EOF
 

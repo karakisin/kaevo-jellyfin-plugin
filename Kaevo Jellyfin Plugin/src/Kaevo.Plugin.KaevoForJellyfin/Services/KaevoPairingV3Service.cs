@@ -113,13 +113,16 @@ public sealed class KaevoPairingV3Service
     private readonly Func<string> _verificationKeys;
     private readonly Func<string> _authorizationIssuer;
     private readonly Action<string, string, string, string, int, string> _observe;
+    private readonly HttpClient _connectorHttp;
 
     internal KaevoPairingV3Service(KaevoPairingV3Store store, IKaevoPairingV3CloudClient cloud, Func<bool> enabled,
-        Func<string> verificationKeys, Func<string>? authorizationIssuer = null, Action<string, string, string, string, int, string>? observe = null)
+        Func<string> verificationKeys, Func<string>? authorizationIssuer = null, Action<string, string, string, string, int, string>? observe = null,
+        HttpClient? connectorHttp = null)
     {
         _store = store; _cloud = cloud; _enabled = enabled; _verificationKeys = verificationKeys;
         _authorizationIssuer = authorizationIssuer ?? (() => string.Empty);
         _observe = observe ?? ((_, _, _, _, _, _) => { });
+        _connectorHttp = connectorHttp ?? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(15) };
     }
 
     internal static KaevoPairingV3Service ForPlugin(ILogger<KaevoPairingV3Service> logger) => new(KaevoPairingV3Store.ForPlugin(), new KaevoPairingV3CloudClient(),
@@ -293,8 +296,50 @@ public sealed class KaevoPairingV3Service
         var transcript = KaevoPairingV3Crypto.Transcript("connector-request", ("httpMethod", method.ToUpperInvariant()), ("canonicalRoute", canonicalRoute),
             ("bodyDigest", digest), ("timestamp", timestamp), ("nonce", nonce), ("connectorId", context.connector.ConnectorId),
             ("pluginInstanceId", context.identity.PluginInstanceId), ("pluginKeyId", keyId), ("pluginPublicKeyFingerprint", context.identity.Fingerprint));
-        var signature = KaevoPairingV3Crypto.Sign(KaevoPairingV3Crypto.Base64UrlDecode(context.identity.PrivateKeyBase64Url), transcript);
-        return new(context.connector.ConnectorId, keyId, timestamp, nonce, digest, signature);
+        var privateSeed = KaevoPairingV3Crypto.Base64UrlDecode(context.identity.PrivateKeyBase64Url);
+        try
+        {
+            var signature = KaevoPairingV3Crypto.Sign(privateSeed, transcript);
+            return new(context.connector.ConnectorId, keyId, timestamp, nonce, digest, signature);
+        }
+        finally { CryptographicOperations.ZeroMemory(privateSeed); }
+    }
+
+    internal Task<string> GetActiveConnectorIdAsync(CancellationToken cancellationToken = default) => _store.ReadAsync(state =>
+    {
+        var connector = state.Connector;
+        return connector is not null && connector.Status == "active" && connector.ProtocolVersion == KaevoPairingV3Crypto.Protocol
+            ? connector.ConnectorId
+            : string.Empty;
+    }, cancellationToken);
+
+    internal async Task<HttpResponseMessage> SendConnectorRequestAsync(
+        Uri cloudBase,
+        HttpMethod method,
+        string canonicalRoute,
+        object body,
+        CancellationToken cancellationToken = default)
+    {
+        var proof = await PrepareConnectorRequestAsync(method.Method, canonicalRoute, body, cancellationToken).ConfigureAwait(false);
+        var uri = new Uri(new Uri(cloudBase.ToString().TrimEnd('/') + "/"), canonicalRoute.TrimStart('/'));
+        var request = new HttpRequestMessage(method, uri)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(body, new JsonSerializerOptions(JsonSerializerDefaults.Web)), Encoding.UTF8, "application/json")
+        };
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Key-Id", proof.PluginKeyId);
+        request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Timestamp", proof.Timestamp);
+        request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Nonce", proof.Nonce);
+        request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Signature", proof.Signature);
+        try
+        {
+            return await _connectorHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            request.Dispose();
+            throw;
+        }
     }
 
     private async Task<KaevoPairingV3CloudResult> ApplyCloudResultAsync(string ticketId, string pairingAttemptId, string correlationId, KaevoPairingV3CloudResult result, CancellationToken cancellationToken)
