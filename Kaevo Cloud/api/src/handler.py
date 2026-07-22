@@ -115,6 +115,8 @@ PAIRING_V3_AUTHORIZATION_TTL_SECONDS = 60
 PAIRING_V3_TERMINAL_RETENTION_SECONDS = 24 * 60 * 60
 PAIRING_V3_AUDIT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 PAIRING_V3_PLUGIN_TIMESTAMP_SKEW_SECONDS = 60
+HOUSEHOLD_INVITATION_CODE_TTL_SECONDS = 15 * 60
+HOUSEHOLD_INVITATION_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
 dynamodb = boto3.resource("dynamodb")
 events_table = dynamodb.Table(EVENTS_TABLE) if EVENTS_TABLE else None
@@ -2409,6 +2411,90 @@ def ensure_nonproduction_family_entitlement(profile_id):
     return entitlement
 
 
+def household_invitation_code_expiration(invitation):
+    return int(invitation.get("code_expires_at") or invitation.get("expires_at") or 0)
+
+
+def household_invitation_response(invitation, join_code, *, state):
+    return response(201, {
+        "state": state,
+        "invitation_id": str(invitation.get("invitation_id") or ""),
+        "profile_id": str(invitation.get("profile_id") or ""),
+        "display_name": str(invitation.get("display_name") or "Household member"),
+        "profile_type": str(invitation.get("profile_type") or "adult"),
+        "join_code": join_code,
+        "join_url": f"kaevo://join?code={join_code}",
+        "expires_at": household_invitation_code_expiration(invitation),
+    })
+
+
+def create_parent_managed_kid_profile(session, display_name, owner_entitlement):
+    """Create a household kid profile without creating a child identity.
+
+    The owner can use this profile on an already-authorized device. A child
+    principal is added only if the owner later creates and the child redeems
+    a one-time invitation for this exact profile.
+    """
+    if not all((identity_profiles_table, principals_table, entitlements_table)):
+        return response(503, {"state": "identity_storage_unavailable"})
+    profile_id = f"profile_{secrets.token_urlsafe(24)}"
+    created_at = utc_now_iso()
+    profile = {
+        "profile_id": profile_id,
+        "account_id": str(session.get("account_id") or ""),
+        "household_id": str(session.get("household_id") or ""),
+        "owner_principal_id": str(session.get("principal_id") or ""),
+        "display_name": display_name,
+        "profile_type": "kid",
+        "role": "kid",
+        "state": "active",
+        "managed_by_owner": True,
+        "created_at": created_at,
+    }
+    entitlement = {
+        "profile_id": profile_id,
+        "entitlements_json": json.dumps(owner_entitlement, separators=(",", ":")),
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+    try:
+        dynamodb.meta.client.transact_write_items(TransactItems=[
+            {"Put": {
+                "TableName": identity_profiles_table.name,
+                "Item": profile,
+                "ConditionExpression": "attribute_not_exists(profile_id)",
+            }},
+            {"Put": {
+                "TableName": entitlements_table.name,
+                "Item": entitlement,
+                "ConditionExpression": "attribute_not_exists(profile_id)",
+            }},
+            {"Update": {
+                "TableName": principals_table.name,
+                "Key": {"principal_id": str(session.get("principal_id") or "")},
+                "UpdateExpression": "SET profile_ids = list_append(profile_ids, :profile)",
+                "ConditionExpression": "contains(profile_ids, :owner_profile) AND NOT contains(profile_ids, :managed_profile)",
+                "ExpressionAttributeValues": {
+                    ":profile": [profile_id],
+                    ":owner_profile": str(session.get("profile_id") or ""),
+                    ":managed_profile": profile_id,
+                },
+            }},
+        ])
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") in {
+            "ConditionalCheckFailedException", "TransactionCanceledException",
+        }:
+            return response(409, {"state": "profile_create_conflict"})
+        raise
+    return response(201, {
+        "state": "parent_managed_profile_created",
+        "profile_id": profile_id,
+        "display_name": display_name,
+        "profile_type": "kid",
+    })
+
+
 def create_household_invitation(event):
     session, error_response = owner_bound_session(event)
     if error_response:
@@ -2424,14 +2510,43 @@ def create_household_invitation(event):
     body = parse_json_body(event) or {}
     display_name = str(body.get("display_name") or "").strip()[:80]
     profile_type = str(body.get("profile_type") or "adult").strip().lower()
+    access_mode = str(body.get("access_mode") or "device_invitation").strip().lower()
     if not display_name or profile_type not in {"adult", "kid"}:
         return response(400, {"state": "invalid_invitation"})
+    if access_mode == "parent_managed":
+        if profile_type != "kid":
+            return response(400, {"state": "invalid_parent_managed_profile"})
+        return create_parent_managed_kid_profile(session, display_name, entitlement)
+    if access_mode != "device_invitation":
+        return response(400, {"state": "invalid_invitation_access_mode"})
+
+    requested_profile_id = str(body.get("profile_id") or "").strip()
+    managed_profile = None
+    if requested_profile_id:
+        if profile_type != "kid" or not re.fullmatch(r"profile_[A-Za-z0-9_-]{16,128}", requested_profile_id):
+            return response(400, {"state": "invalid_managed_profile"})
+        if identity_profiles_table is None:
+            return response(503, {"state": "identity_storage_unavailable"})
+        managed_profile = identity_profiles_table.get_item(
+            Key={"profile_id": requested_profile_id}, ConsistentRead=True,
+        ).get("Item")
+        if not managed_profile:
+            return response(404, {"state": "managed_profile_not_found"})
+        expected = (
+            hmac.compare_digest(str(managed_profile.get("account_id") or ""), str(session.get("account_id") or ""))
+            and hmac.compare_digest(str(managed_profile.get("household_id") or ""), str(session.get("household_id") or ""))
+            and hmac.compare_digest(str(managed_profile.get("owner_principal_id") or ""), str(session.get("principal_id") or ""))
+            and bool(managed_profile.get("managed_by_owner"))
+            and not str(managed_profile.get("member_principal_id") or "")
+        )
+        if not expected:
+            return response(403, {"state": "managed_profile_mismatch"})
     now = epoch_now()
-    expires_at = now + 15 * 60
+    code_expires_at = now + HOUSEHOLD_INVITATION_CODE_TTL_SECONDS
     raw_code = secrets.token_hex(5).upper()
     join_code = f"{raw_code[:5]}-{raw_code[5:]}"
     invitation_id = f"invite_{secrets.token_urlsafe(18)}"
-    profile_id = f"profile_{secrets.token_urlsafe(24)}"
+    profile_id = requested_profile_id or f"profile_{secrets.token_urlsafe(24)}"
     item = {
         "code_hash": _join_code_hash(join_code),
         "invitation_id": invitation_id,
@@ -2444,18 +2559,100 @@ def create_household_invitation(event):
         "profile_type": profile_type,
         "role": "kid" if profile_type == "kid" else "adult",
         "state": "pending",
+        "managed_profile": bool(managed_profile),
         "created_at": utc_now_iso(),
-        "expires_at": expires_at,
+        "code_expires_at": code_expires_at,
+        # DynamoDB TTL is cleanup, not the security expiration. Keeping the
+        # pending record longer lets an owner explicitly refresh an expired
+        # code without creating a duplicate household member.
+        "expires_at": now + HOUSEHOLD_INVITATION_RETENTION_SECONDS,
     }
-    household_invitations_table.put_item(Item=item, ConditionExpression="attribute_not_exists(code_hash)")
-    return response(201, {
-        "state": "invitation_created",
-        "invitation_id": invitation_id,
-        "display_name": display_name,
-        "join_code": join_code,
-        "join_url": f"kaevo://join?code={join_code}",
-        "expires_at": expires_at,
+    if managed_profile:
+        try:
+            dynamodb.meta.client.transact_write_items(TransactItems=[
+                {"Update": {
+                    "TableName": identity_profiles_table.name,
+                    "Key": {"profile_id": profile_id},
+                    "UpdateExpression": "SET pending_invitation_id = :invitation_id",
+                    "ConditionExpression": "attribute_not_exists(pending_invitation_id) AND attribute_not_exists(member_principal_id)",
+                    "ExpressionAttributeValues": {":invitation_id": invitation_id},
+                }},
+                {"Put": {
+                    "TableName": household_invitations_table.name,
+                    "Item": item,
+                    "ConditionExpression": "attribute_not_exists(code_hash)",
+                }},
+            ])
+        except ClientError as error:
+            if str((error.response or {}).get("Error", {}).get("Code") or "") in {
+                "ConditionalCheckFailedException", "TransactionCanceledException",
+            }:
+                return response(409, {"state": "managed_profile_invitation_exists"})
+            raise
+    else:
+        household_invitations_table.put_item(Item=item, ConditionExpression="attribute_not_exists(code_hash)")
+    return household_invitation_response(item, join_code, state="invitation_created")
+
+
+def refresh_household_invitation(event):
+    session, error_response = owner_bound_session(event)
+    if error_response:
+        return error_response
+    if household_invitations_table is None:
+        return response(503, {"state": "invitation_storage_unavailable"})
+    body = parse_json_body(event) or {}
+    invitation_id = str(body.get("invitation_id") or "").strip()
+    if not re.fullmatch(r"invite_[A-Za-z0-9_-]{8,128}", invitation_id):
+        return response(400, {"state": "invalid_invitation"})
+    household_id = str(session.get("household_id") or "")
+    records = household_invitations_table.scan(
+        FilterExpression=Attr("household_id").eq(household_id),
+    ).get("Items", [])
+    invitation = next((item for item in records if hmac.compare_digest(str(item.get("invitation_id") or ""), invitation_id)), None)
+    if not invitation:
+        return response(404, {"state": "invitation_not_found"})
+    current_state = str(invitation.get("state") or "pending")
+    if current_state == "consumed":
+        return response(409, {"state": "invitation_already_used"})
+    if current_state != "pending":
+        return response(409, {"state": "invitation_not_refreshable"})
+
+    now = epoch_now()
+    raw_code = secrets.token_hex(5).upper()
+    join_code = f"{raw_code[:5]}-{raw_code[5:]}"
+    refreshed = dict(invitation)
+    refreshed.update({
+        "code_hash": _join_code_hash(join_code),
+        "code_expires_at": now + HOUSEHOLD_INVITATION_CODE_TTL_SECONDS,
+        "expires_at": now + HOUSEHOLD_INVITATION_RETENTION_SECONDS,
+        "refreshed_at": utc_now_iso(),
     })
+    try:
+        dynamodb.meta.client.transact_write_items(TransactItems=[
+            {"Delete": {
+                "TableName": household_invitations_table.name,
+                "Key": {"code_hash": str(invitation["code_hash"])},
+                "ConditionExpression": "#state = :pending AND invitation_id = :invitation_id AND household_id = :household_id",
+                "ExpressionAttributeNames": {"#state": "state"},
+                "ExpressionAttributeValues": {
+                    ":pending": "pending",
+                    ":invitation_id": invitation_id,
+                    ":household_id": household_id,
+                },
+            }},
+            {"Put": {
+                "TableName": household_invitations_table.name,
+                "Item": refreshed,
+                "ConditionExpression": "attribute_not_exists(code_hash)",
+            }},
+        ])
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") in {
+            "ConditionalCheckFailedException", "TransactionCanceledException",
+        }:
+            return response(409, {"state": "invitation_refresh_conflict"})
+        raise
+    return household_invitation_response(refreshed, join_code, state="invitation_refreshed")
 
 
 def list_household_invitations(event):
@@ -2467,13 +2664,21 @@ def list_household_invitations(event):
     records = household_invitations_table.scan(
         FilterExpression=Attr("household_id").eq(str(session.get("household_id") or "")),
     ).get("Items", [])
-    public = [{
-        "invitation_id": str(item.get("invitation_id") or ""),
-        "display_name": str(item.get("display_name") or "Household member"),
-        "profile_type": str(item.get("profile_type") or "adult"),
-        "state": str(item.get("state") or "pending"),
-        "expires_at": int(item.get("expires_at") or 0),
-    } for item in records]
+    now = epoch_now()
+    public = []
+    for item in records:
+        state = str(item.get("state") or "pending")
+        code_expires_at = household_invitation_code_expiration(item)
+        if state == "pending" and code_expires_at < now:
+            state = "expired"
+        public.append({
+            "invitation_id": str(item.get("invitation_id") or ""),
+            "profile_id": str(item.get("profile_id") or ""),
+            "display_name": str(item.get("display_name") or "Household member"),
+            "profile_type": str(item.get("profile_type") or "adult"),
+            "state": state,
+            "expires_at": code_expires_at,
+        })
     return response(200, {"state": "invitations_listed", "invitations": public})
 
 
@@ -2490,7 +2695,28 @@ def revoke_household_invitation(event, path):
         return response(404, {"state": "invitation_not_found"})
     invitation["state"] = "revoked"
     invitation["revoked_at"] = utc_now_iso()
-    household_invitations_table.put_item(Item=invitation)
+    if bool(invitation.get("managed_profile")) and identity_profiles_table is not None:
+        try:
+            dynamodb.meta.client.transact_write_items(TransactItems=[
+                {"Put": {
+                    "TableName": household_invitations_table.name,
+                    "Item": invitation,
+                    "ConditionExpression": "#state = :pending",
+                    "ExpressionAttributeNames": {"#state": "state"},
+                    "ExpressionAttributeValues": {":pending": "pending"},
+                }},
+                {"Update": {
+                    "TableName": identity_profiles_table.name,
+                    "Key": {"profile_id": str(invitation.get("profile_id") or "")},
+                    "UpdateExpression": "REMOVE pending_invitation_id",
+                    "ConditionExpression": "pending_invitation_id = :invitation_id AND attribute_not_exists(member_principal_id)",
+                    "ExpressionAttributeValues": {":invitation_id": invitation_id},
+                }},
+            ])
+        except ClientError:
+            return response(409, {"state": "invitation_revoke_conflict"})
+    else:
+        household_invitations_table.put_item(Item=invitation)
     return response(200, {"state": "invitation_revoked"})
 
 
@@ -2513,7 +2739,7 @@ def join_household(event):
     code_hash = _join_code_hash(body.get("join_code"))
     invitation = household_invitations_table.get_item(Key={"code_hash": code_hash}, ConsistentRead=True).get("Item") if code_hash else None
     now = epoch_now()
-    if not invitation or invitation.get("state") != "pending" or int(invitation.get("expires_at") or 0) < now:
+    if not invitation or invitation.get("state") != "pending" or household_invitation_code_expiration(invitation) < now:
         return response(410, {"state": "invitation_invalid_or_expired"})
     created_at = utc_now_iso()
     profile_id = str(invitation["profile_id"])
@@ -2530,12 +2756,27 @@ def join_household(event):
         "profile_id": profile_id, "role": role, "authz_version": 1,
         "state": "active", "created_at": created_at,
     }
-    profile = {
+    is_managed_profile = bool(invitation.get("managed_profile"))
+    existing_managed_profile = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item") if is_managed_profile else None
+    if is_managed_profile and (
+        not existing_managed_profile
+        or not bool(existing_managed_profile.get("managed_by_owner"))
+        or str(existing_managed_profile.get("member_principal_id") or "")
+        or not hmac.compare_digest(str(existing_managed_profile.get("pending_invitation_id") or ""), str(invitation.get("invitation_id") or ""))
+    ):
+        return response(409, {"state": "managed_profile_binding_invalid"})
+    profile = dict(existing_managed_profile or {})
+    profile.update({
         "profile_id": profile_id, "account_id": account_id, "household_id": household_id,
         "owner_principal_id": str(invitation["owner_principal_id"]),
         "member_principal_id": subject, "display_name": str(invitation["display_name"]),
-        "profile_type": str(invitation["profile_type"]), "state": "active", "created_at": created_at,
-    }
+        "profile_type": str(invitation["profile_type"]), "state": "active",
+        "created_at": str((existing_managed_profile or {}).get("created_at") or created_at),
+        "device_access_enabled": True,
+    })
+    profile.pop("pending_invitation_id", None)
     consumed = dict(invitation)
     consumed.update({"state": "consumed", "consumed_at": created_at, "member_principal_id": subject})
     owner_entitlement, _ = load_entitlements_for_profile(str(invitation.get("owner_profile_id") or ""))
@@ -2548,21 +2789,31 @@ def join_household(event):
     transaction = [
         {"Put": {"TableName": PRINCIPALS_TABLE, "Item": principal, "ConditionExpression": "attribute_not_exists(principal_id)"}},
         {"Put": {"TableName": IDENTITY_MEMBERSHIPS_TABLE, "Item": membership, "ConditionExpression": "attribute_not_exists(principal_id)"}},
-        {"Put": {"TableName": IDENTITY_PROFILES_TABLE, "Item": profile, "ConditionExpression": "attribute_not_exists(profile_id)"}},
         {"Put": {"TableName": HOUSEHOLD_INVITATIONS_TABLE, "Item": consumed, "ConditionExpression": "#state = :pending", "ExpressionAttributeNames": {"#state": "state"}, "ExpressionAttributeValues": {":pending": "pending"}}},
-        {"Put": {"TableName": ENTITLEMENTS_TABLE, "Item": member_entitlement, "ConditionExpression": "attribute_not_exists(profile_id)"}},
-        {"Update": {
-            "TableName": PRINCIPALS_TABLE,
-            "Key": {"principal_id": str(invitation["owner_principal_id"])},
-            "UpdateExpression": "SET profile_ids = list_append(profile_ids, :profile)",
-            "ConditionExpression": "contains(profile_ids, :owner_profile) AND NOT contains(profile_ids, :joined_profile)",
-            "ExpressionAttributeValues": {
-                ":profile": [profile_id],
-                ":owner_profile": str(invitation["owner_profile_id"]),
-                ":joined_profile": profile_id,
-            },
-        }},
     ]
+    if is_managed_profile:
+        transaction.append({"Put": {
+            "TableName": IDENTITY_PROFILES_TABLE,
+            "Item": profile,
+            "ConditionExpression": "pending_invitation_id = :invitation_id AND attribute_not_exists(member_principal_id)",
+            "ExpressionAttributeValues": {":invitation_id": str(invitation.get("invitation_id") or "")},
+        }})
+    else:
+        transaction.extend([
+            {"Put": {"TableName": IDENTITY_PROFILES_TABLE, "Item": profile, "ConditionExpression": "attribute_not_exists(profile_id)"}},
+            {"Put": {"TableName": ENTITLEMENTS_TABLE, "Item": member_entitlement, "ConditionExpression": "attribute_not_exists(profile_id)"}},
+            {"Update": {
+                "TableName": PRINCIPALS_TABLE,
+                "Key": {"principal_id": str(invitation["owner_principal_id"])},
+                "UpdateExpression": "SET profile_ids = list_append(profile_ids, :profile)",
+                "ConditionExpression": "contains(profile_ids, :owner_profile) AND NOT contains(profile_ids, :joined_profile)",
+                "ExpressionAttributeValues": {
+                    ":profile": [profile_id],
+                    ":owner_profile": str(invitation["owner_profile_id"]),
+                    ":joined_profile": profile_id,
+                },
+            }},
+        ])
     try:
         dynamodb.meta.client.transact_write_items(TransactItems=transaction)
     except ClientError:
@@ -2692,6 +2943,10 @@ def refresh_app_session(event):
     session = authenticated_app_session(event)
     if not session:
         return response(401, {"state": "unauthorized"})
+    # DPoP-bound V2 access records own a separate rotating refresh token.
+    # A legacy bearer refresh must never revoke or replace one.
+    if session.get("record_type") == "access":
+        return response(409, {"state": "bound_session_refresh_required"})
     profile_id = str(session.get("profile_id") or "")
     entitlement, _ = load_entitlements_for_profile(profile_id)
     if not bool_value(entitlement.get("cloud_enabled"), False):
@@ -4751,6 +5006,8 @@ def lambda_handler(event, context):
     if path == "/v2/household/invitations":
         if method == "POST":
             return create_household_invitation(event)
+        if method == "PUT":
+            return refresh_household_invitation(event)
         if method == "GET":
             return list_household_invitations(event)
 

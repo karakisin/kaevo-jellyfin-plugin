@@ -998,8 +998,6 @@ Resources:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v2/household/invitations
             Method: ANY
-            Auth:
-              Authorizer: KaevoOwnerAuthorizer
 
         RevokeHouseholdInvitation:
           Type: HttpApi
@@ -1007,8 +1005,6 @@ Resources:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v2/household/invitations/{invitationId}/revoke
             Method: POST
-            Auth:
-              Authorizer: KaevoOwnerAuthorizer
 
         JoinHousehold:
           Type: HttpApi

@@ -267,3 +267,22 @@ def test_existing_online_plugin_migrates_and_rotates_session(monkeypatch):
     assert handler.get_app_session_status(event(bearer=old_token))["statusCode"] == 401
     assert handler.get_app_session_status(event(bearer=refreshed_body["session_token"]))["statusCode"] == 200
     assert handler.put_entitlements(event(bearer=refreshed_body["session_token"]))["statusCode"] == 401
+
+
+def test_legacy_refresh_cannot_rotate_a_dpop_bound_access_record(monkeypatch):
+    bound_access = {
+        "record_type": "access",
+        "state": "active",
+        "revoked": False,
+        "role": "owner",
+        "profile_id": "profile-owner",
+    }
+    monkeypatch.setattr(handler, "KAEVO_ENV", "dev")
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: bound_access)
+
+    result = handler.refresh_app_session({"headers": {}})
+
+    assert result["statusCode"] == 409
+    assert json.loads(result["body"]) == {"state": "bound_session_refresh_required"}
+    assert bound_access["state"] == "active"
+    assert bound_access["revoked"] is False
