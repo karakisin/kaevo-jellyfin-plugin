@@ -13,6 +13,7 @@ import uuid
 from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
@@ -69,6 +70,22 @@ from pairing_v3 import (
     verify_authorization as pairing_v3_verify_authorization,
     verify_ed25519 as pairing_v3_verify_ed25519,
 )
+from social_identity import (
+    SocialIdentityError,
+    authorization_url as social_authorization_url,
+    canonical_provider as canonical_social_provider,
+    decode_form_body as decode_social_form_body,
+    exchange_code as exchange_social_code,
+    identity_is_linked as social_identity_is_linked,
+    link_provider_identity,
+    new_attempt as new_social_link_attempt,
+    parse_cognito_identities,
+    provider_name as social_provider_name,
+    resolve_cognito_username,
+    resolve_signing_key as resolve_social_signing_key,
+    state_key as social_state_key,
+    validate_identity_token as validate_social_identity_token,
+)
 
 
 SERVICE_NAME = "kaevo-cloud"
@@ -92,11 +109,16 @@ IDENTITY_HOUSEHOLDS_TABLE = os.environ.get("IDENTITY_HOUSEHOLDS_TABLE")
 IDENTITY_PROFILES_TABLE = os.environ.get("IDENTITY_PROFILES_TABLE")
 HOUSEHOLD_INVITATIONS_TABLE = os.environ.get("HOUSEHOLD_INVITATIONS_TABLE")
 DEV_API_KEY = os.environ.get("DEV_API_KEY")
+PUBLIC_API_BASE_URL = os.environ.get("PUBLIC_API_BASE_URL", "").strip()
 KAEVO_ENV = os.environ.get("KAEVO_ENV", "dev").strip().lower()
 PLAYBACK_GRANT_SIGNING_KEY = os.environ.get("PLAYBACK_GRANT_SIGNING_KEY", "")
 PLAYBACK_RELAY_PUBLIC_URL = os.environ.get("PLAYBACK_RELAY_PUBLIC_URL", "").rstrip("/")
 PAIRING_V3_AUTHORIZATION_SIGNING_SEED = os.environ.get("PAIRING_V3_AUTHORIZATION_SIGNING_SEED", "")
 PAIRING_V3_AUTHORIZATION_KEY_ID = os.environ.get("PAIRING_V3_AUTHORIZATION_KEY_ID", "v3-dev-1")
+COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
+GOOGLE_IDENTITY_PROVIDER_SECRET_ARN = os.environ.get("GOOGLE_IDENTITY_PROVIDER_SECRET_ARN", "")
+APPLE_IDENTITY_PROVIDER_SECRET_ARN = os.environ.get("APPLE_IDENTITY_PROVIDER_SECRET_ARN", "")
+SOCIAL_IDENTITY_LINK_CALLBACK_URL = os.environ.get("SOCIAL_IDENTITY_LINK_CALLBACK_URL", "")
 
 MAX_BATCH_EVENTS = 50
 CONNECTOR_ONLINE_WINDOW_SECONDS = 120
@@ -134,6 +156,9 @@ identity_memberships_table = dynamodb.Table(IDENTITY_MEMBERSHIPS_TABLE) if IDENT
 identity_households_table = dynamodb.Table(IDENTITY_HOUSEHOLDS_TABLE) if IDENTITY_HOUSEHOLDS_TABLE else None
 identity_profiles_table = dynamodb.Table(IDENTITY_PROFILES_TABLE) if IDENTITY_PROFILES_TABLE else None
 household_invitations_table = dynamodb.Table(HOUSEHOLD_INVITATIONS_TABLE) if HOUSEHOLD_INVITATIONS_TABLE else None
+cognito_client = boto3.client("cognito-idp")
+secrets_client = boto3.client("secretsmanager")
+_social_provider_secret_cache = {}
 
 
 DEFAULT_PROFILE_SETTINGS = {
@@ -391,9 +416,45 @@ def authenticated_app_session(event):
 
 
 def request_absolute_url(event):
-    forwarded_proto = str(header_value(event, "x-forwarded-proto") or "https").split(",")[0].strip()
-    host = str(header_value(event, "x-forwarded-host") or header_value(event, "host") or "").split(",")[0].strip()
     path = str(event.get("rawPath") or event.get("path") or "/")
+    if not path.startswith("/"):
+        path = f"/{path}"
+
+    if PUBLIC_API_BASE_URL:
+        public_base = urlsplit(PUBLIC_API_BASE_URL)
+        if (
+            public_base.scheme != "https"
+            or not public_base.hostname
+            or public_base.username
+            or public_base.password
+            or public_base.query
+            or public_base.fragment
+        ):
+            raise IdentityError("invalid_public_api_origin", 503)
+        request_context = event.get("requestContext") or {}
+        stage = str(request_context.get("stage") or "").strip("/")
+        stage_prefix = f"/{stage}/" if stage and stage != "$default" else ""
+        if stage_prefix and path.startswith(stage_prefix):
+            path = f"/{path[len(stage_prefix):]}"
+        origin = f"{public_base.scheme}://{public_base.netloc}"
+        base_path = public_base.path.rstrip("/")
+        return f"{origin}{base_path}{path}"
+
+    request_context = event.get("requestContext") or {}
+    gateway_domain = str(request_context.get("domainName") or "").strip()
+    if gateway_domain:
+        # API Gateway supplies requestContext.domainName from the matched
+        # execute-api or custom domain. Prefer that trusted value over
+        # client-controlled forwarding headers so DPoP remains bound to the
+        # public URL without permitting host-header substitution.
+        forwarded_proto = "https"
+        host = gateway_domain
+    else:
+        # Preserve local/disposable test support for events that do not pass
+        # through API Gateway. Production HTTP API events always take the
+        # trusted requestContext path above.
+        forwarded_proto = str(header_value(event, "x-forwarded-proto") or "https").split(",")[0].strip()
+        host = str(header_value(event, "x-forwarded-host") or header_value(event, "host") or "").split(",")[0].strip()
     return f"{forwarded_proto}://{host}{path}"
 
 
@@ -1897,6 +1958,207 @@ def owner_bound_session(event):
     if session.get("role") != "owner":
         return None, response(403, {"state": "owner_required"})
     return session, None
+
+
+def social_provider_credentials(provider):
+    canonical = canonical_social_provider(provider)
+    secret_arn = (
+        GOOGLE_IDENTITY_PROVIDER_SECRET_ARN
+        if canonical == "google"
+        else APPLE_IDENTITY_PROVIDER_SECRET_ARN
+    )
+    if not secret_arn:
+        raise SocialIdentityError("identity_provider_unavailable", 503)
+    cached = _social_provider_secret_cache.get(secret_arn)
+    if cached is not None:
+        return cached
+    try:
+        raw = secrets_client.get_secret_value(SecretId=secret_arn).get("SecretString")
+        document = json.loads(str(raw or ""))
+    except Exception as error:
+        raise SocialIdentityError("identity_provider_unavailable", 503) from error
+    required = {"client_id", "client_secret"} if canonical == "google" else {"client_id", "team_id", "key_id", "private_key"}
+    if not isinstance(document, dict) or any(not str(document.get(key) or "").strip() for key in required):
+        raise SocialIdentityError("identity_provider_unavailable", 503)
+    minimized = {key: str(document[key]) for key in required}
+    _social_provider_secret_cache[secret_arn] = minimized
+    return minimized
+
+
+def social_link_redirect(state):
+    # The custom-scheme callback contains no provider subject, OAuth code,
+    # token, email, account, household, or attempt identifier.
+    return {
+        "statusCode": 302,
+        "headers": {
+            "location": f"kaevo://oauth/social-link?state={state}",
+            "cache-control": "no-store",
+            "content-security-policy": "default-src 'none'",
+            "referrer-policy": "no-referrer",
+        },
+        "body": "",
+    }
+
+
+def linked_social_providers(event):
+    session, error_response = owner_bound_session(event)
+    if error_response:
+        return error_response
+    if not COGNITO_USER_POOL_ID:
+        return response(503, {"state": "identity_provider_unavailable"})
+    try:
+        username = resolve_cognito_username(
+            cognito_client,
+            user_pool_id=COGNITO_USER_POOL_ID,
+            subject=str(session.get("principal_id") or ""),
+        )
+        user = cognito_client.admin_get_user(UserPoolId=COGNITO_USER_POOL_ID, Username=username)
+        names = {str(item.get("providerName") or "") for item in parse_cognito_identities(user.get("UserAttributes") or [])}
+        providers = [provider for provider, name in (("apple", "SignInWithApple"), ("google", "Google")) if name in names]
+        return response(200, {"state": "social_identity_links", "providers": providers})
+    except SocialIdentityError as error:
+        return response(error.status_code, {"state": error.reason})
+    except Exception:
+        return response(503, {"state": "identity_provider_unavailable"})
+
+
+def start_social_identity_link(event):
+    session, error_response = owner_bound_session(event)
+    if error_response:
+        return error_response
+    body = parse_json_body(event)
+    if body is None or body.get("confirmed") is not True:
+        return response(400, {"state": "explicit_confirmation_required"})
+    if app_sessions_table is None or not COGNITO_USER_POOL_ID or not SOCIAL_IDENTITY_LINK_CALLBACK_URL:
+        return response(503, {"state": "identity_provider_unavailable"})
+    try:
+        provider = canonical_social_provider(body.get("provider"))
+        credentials = social_provider_credentials(provider)
+        username = resolve_cognito_username(
+            cognito_client,
+            user_pool_id=COGNITO_USER_POOL_ID,
+            subject=str(session.get("principal_id") or ""),
+        )
+        current = cognito_client.admin_get_user(UserPoolId=COGNITO_USER_POOL_ID, Username=username)
+        if any(str(item.get("providerName") or "") == social_provider_name(provider) for item in parse_cognito_identities(current.get("UserAttributes") or [])):
+            return response(409, {"state": "identity_provider_already_linked"})
+        item, oauth_state = new_social_link_attempt(
+            provider=provider,
+            session=session,
+            callback_url=SOCIAL_IDENTITY_LINK_CALLBACK_URL,
+        )
+        app_sessions_table.put_item(
+            Item=item,
+            ConditionExpression="attribute_not_exists(token_hash)",
+        )
+        url = social_authorization_url(
+            provider,
+            credentials,
+            callback_url=SOCIAL_IDENTITY_LINK_CALLBACK_URL,
+            state=oauth_state,
+            nonce=str(item["oauth_nonce"]),
+        )
+        return response(201, {
+            "state": "social_identity_authorization_required",
+            "provider": provider,
+            "authorization_url": url,
+            "expires_at": int(item["expires_at"]),
+        })
+    except SocialIdentityError as error:
+        return response(error.status_code, {"state": error.reason})
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return response(409, {"state": "social_identity_link_conflict"})
+        return response(503, {"state": "identity_provider_unavailable"})
+    except Exception:
+        return response(503, {"state": "identity_provider_unavailable"})
+
+
+def social_identity_link_callback(event):
+    if app_sessions_table is None or not COGNITO_USER_POOL_ID:
+        return social_link_redirect("failed")
+    method = method_for(event)
+    try:
+        values = (
+            decode_social_form_body(str(event.get("body") or ""), is_base64=bool(event.get("isBase64Encoded")))
+            if method == "POST"
+            else {key: str(value) for key, value in query_params(event).items()}
+        )
+        oauth_state = str(values.get("state") or "")
+        code = str(values.get("code") or "")
+        if not oauth_state or not code or values.get("error"):
+            raise SocialIdentityError("invalid_identity_provider_response")
+        key = social_state_key(oauth_state)
+        item = app_sessions_table.get_item(Key={"token_hash": key}, ConsistentRead=True).get("Item")
+        if not item or item.get("record_type") != "social_identity_link":
+            raise SocialIdentityError("social_identity_link_expired", 410)
+        if item.get("state") == "linked":
+            return social_link_redirect("linked")
+        if item.get("state") != "pending" or int(item.get("expires_at") or 0) < epoch_now():
+            raise SocialIdentityError("social_identity_link_expired", 410)
+        app_sessions_table.update_item(
+            Key={"token_hash": key},
+            UpdateExpression="SET #state = :exchanging",
+            ConditionExpression="#state = :pending",
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={":pending": "pending", ":exchanging": "exchanging"},
+        )
+        provider = canonical_social_provider(item.get("provider"))
+        credentials = social_provider_credentials(provider)
+        identity_token = exchange_social_code(
+            provider,
+            credentials,
+            code=code,
+            callback_url=str(item.get("callback_url") or ""),
+        )
+        provider_identity = validate_social_identity_token(
+            provider,
+            identity_token,
+            credentials,
+            expected_nonce=str(item.get("oauth_nonce") or ""),
+            key_resolver=resolve_social_signing_key,
+        )
+        # The audit record is durably committed before the external identity
+        # mutation.  If audit storage is unavailable, the link is not made.
+        audit = prepare_security_audit(
+            event,
+            str(item.get("household_id") or ""),
+            "identity_provider_link_authorized",
+            str(item.get("principal_id") or ""),
+            target_id=provider_identity.subject,
+            target_type="provider_subject",
+            result="started",
+        )
+        commit_security_audit(audit)
+        link_provider_identity(
+            cognito_client,
+            user_pool_id=COGNITO_USER_POOL_ID,
+            destination_subject=str(item.get("principal_id") or ""),
+            identity=provider_identity,
+        )
+        app_sessions_table.update_item(
+            Key={"token_hash": key},
+            UpdateExpression="SET #state = :linked, linked_at_epoch = :now REMOVE oauth_nonce, callback_url",
+            ConditionExpression="#state = :exchanging",
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={":exchanging": "exchanging", ":linked": "linked", ":now": epoch_now()},
+        )
+        return social_link_redirect("linked")
+    except Exception:
+        # No exception text is logged or returned because OAuth/provider errors
+        # can carry credential material.  A fresh explicit attempt is required.
+        try:
+            if 'key' in locals():
+                app_sessions_table.update_item(
+                    Key={"token_hash": key},
+                    UpdateExpression="SET #state = :failed REMOVE oauth_nonce, callback_url",
+                    ConditionExpression="#state = :exchanging",
+                    ExpressionAttributeNames={"#state": "state"},
+                    ExpressionAttributeValues={":exchanging": "exchanging", ":failed": "failed"},
+                )
+        except Exception:
+            pass
+        return social_link_redirect("failed")
 
 
 # Pairing V3 is intentionally implemented beside, rather than inside, the
@@ -4939,6 +5201,8 @@ def lambda_handler(event, context):
                 "/v2/household/invitations",
                 "/v2/household/invitations/{invitationId}/revoke",
                 "/v2/identity/join-household",
+                "/v2/identity/social-links",
+                "/v2/identity/social-links/callback",
                 "/v3/home-connectors/pairing/authorizations",
                 "/v3/home-connectors/pairing/redemptions",
                 "/v3/home-connectors/pairing/attempts/{pairingAttemptId}",
@@ -5016,6 +5280,15 @@ def lambda_handler(event, context):
 
     if method == "POST" and path == "/v2/identity/join-household":
         return join_household(event)
+
+    if path == "/v2/identity/social-links":
+        if method == "GET":
+            return linked_social_providers(event)
+        if method == "POST":
+            return start_social_identity_link(event)
+
+    if path == "/v2/identity/social-links/callback" and method in {"GET", "POST"}:
+        return social_identity_link_callback(event)
 
     if method == "POST" and path == "/v3/home-connectors/pairing/authorizations":
         return issue_home_connector_pairing_authorization_v3(event)

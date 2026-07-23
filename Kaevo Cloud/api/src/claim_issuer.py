@@ -108,10 +108,21 @@ def _validate_native_configuration(client: Mapping[str, Any]) -> None:
     }
     if "ClientSecret" in client or any(client.get(key) is not value for key, value in required.items()):
         raise AuthorityError("unexpected_native_client_configuration")
+    expected_identity_providers = ["COGNITO"]
+    provider_flags = (
+        ("EXPECTED_NATIVE_GOOGLE_ENABLED", "Google"),
+        ("EXPECTED_NATIVE_APPLE_ENABLED", "SignInWithApple"),
+    )
+    for environment_name, provider_name in provider_flags:
+        configured = os.environ.get(environment_name, "false")
+        if configured not in {"true", "false"}:
+            raise AuthorityError("unexpected_native_client_configuration")
+        if configured == "true":
+            expected_identity_providers.append(provider_name)
     exact_lists = {
         "AllowedOAuthFlows": ["code"],
         "AllowedOAuthScopes": ["openid"],
-        "SupportedIdentityProviders": ["COGNITO"],
+        "SupportedIdentityProviders": expected_identity_providers,
         "CallbackURLs": [callback_uri],
         "LogoutURLs": [logout_uri],
         "ExplicitAuthFlows": ["ALLOW_REFRESH_TOKEN_AUTH"],

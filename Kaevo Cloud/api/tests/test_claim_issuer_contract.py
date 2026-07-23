@@ -64,6 +64,8 @@ def issuer_environment(monkeypatch):
         "EXPECTED_NATIVE_CLIENT_NAME": "kaevo-security-stage-native-oidc",
         "EXPECTED_NATIVE_CALLBACK_URI": "kaevo-security-stage://oauth/callback",
         "EXPECTED_NATIVE_LOGOUT_URI": "kaevo-security-stage://oauth/logout",
+        "EXPECTED_NATIVE_GOOGLE_ENABLED": "false",
+        "EXPECTED_NATIVE_APPLE_ENABLED": "false",
     }
     for key, value in values.items():
         monkeypatch.setenv(key, value)
@@ -164,6 +166,29 @@ def test_native_hosted_auth_receives_equivalent_authoritative_claims():
     main = issue_claims(event(), dynamodb=dynamo, cognito=FakeCognito())
     native = issue_claims(native_event(), dynamodb=dynamo, cognito=native_cognito())
     assert native["response"]["claimsAndScopeOverrideDetails"] == main["response"]["claimsAndScopeOverrideDetails"]
+
+
+def test_native_social_providers_are_accepted_only_when_explicitly_configured(monkeypatch):
+    monkeypatch.setenv("EXPECTED_NATIVE_GOOGLE_ENABLED", "true")
+    monkeypatch.setenv("EXPECTED_NATIVE_APPLE_ENABLED", "true")
+    dynamo, _ = graph()
+    result = issue_claims(
+        native_event(),
+        dynamodb=dynamo,
+        cognito=native_cognito(SupportedIdentityProviders=["COGNITO", "Google", "SignInWithApple"]),
+    )
+    assert "claimsAndScopeOverrideDetails" in result["response"]
+
+
+@pytest.mark.parametrize("environment_name", [
+    "EXPECTED_NATIVE_GOOGLE_ENABLED",
+    "EXPECTED_NATIVE_APPLE_ENABLED",
+])
+def test_native_social_provider_configuration_fails_closed_on_invalid_flag(monkeypatch, environment_name):
+    monkeypatch.setenv(environment_name, "enabled")
+    dynamo, _ = graph()
+    with pytest.raises(AuthorityError, match="unexpected_native_client_configuration"):
+        issue_claims(native_event(), dynamodb=dynamo, cognito=native_cognito())
 
 
 def test_unenrolled_native_hosted_auth_receives_only_enrollment_marker():
