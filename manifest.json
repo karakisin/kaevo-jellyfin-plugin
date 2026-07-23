@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.67.0",
+        "changelog": "Refreshes a revoked local Jellyfin connector credential from an elevated, signed-in Kaevo session without sending it to Kaevo Cloud.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.67/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "ae45cd7a84baad58b5d193d74cdc42cd",
+        "timestamp": "2026-07-23T20:52:17Z"
+      },
+      {
         "version": "0.2.66.0",
         "changelog": "Keeps Pairing V3 response signatures valid for international Seerr titles so Search results can return through Cloud securely.",
         "targetAbi": "10.11.0.0",
