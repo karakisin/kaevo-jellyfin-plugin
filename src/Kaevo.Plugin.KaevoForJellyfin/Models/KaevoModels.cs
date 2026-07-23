@@ -44,6 +44,16 @@ public sealed record KaevoLifecycleOwnerRequest(string OwnerAccessToken);
 
 public sealed record KaevoLifecycleResponse(string State, int CredentialVersion);
 
+/// <summary>
+/// An elevated local Jellyfin session can replace only the connector's own
+/// Jellyfin credential. The token never leaves the home server.
+/// </summary>
+public sealed record KaevoJellyfinCredentialRefreshRequest(
+    string JellyfinUserId,
+    string JellyfinAccessToken);
+
+public sealed record KaevoJellyfinCredentialRefreshResponse(string State);
+
 public sealed record KaevoLocalPairingStartResponse(
     string Code,
     DateTimeOffset ExpiresAtUtc,

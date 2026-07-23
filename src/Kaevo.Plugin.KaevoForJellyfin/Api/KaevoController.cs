@@ -19,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
-    private const string PluginVersion = "0.2.66";
+    private const string PluginVersion = "0.2.67";
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey)>(StringComparer.OrdinalIgnoreCase)
         {
@@ -432,6 +432,50 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     private static bool ValidAdminAction(string value) => string.Equals(value, "lifecycle", StringComparison.Ordinal);
     private static bool ValidOwnerToken(string value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 8192 && !value.Any(char.IsWhiteSpace);
     private static bool TryCloudUri(string value, out Uri uri) => KaevoCloudEndpointPolicy.TryNormalize(value, out uri);
+
+    /// <summary>
+    /// Refreshes the local connector credential after Jellyfin revokes an
+    /// access token. This is deliberately local, elevation-protected, and
+    /// does not send the Jellyfin credential to Kaevo Cloud.
+    /// </summary>
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("cloud/jellyfin-credential/refresh")]
+    public async Task<ActionResult<KaevoJellyfinCredentialRefreshResponse>> RefreshJellyfinCredential(
+        [FromBody] KaevoJellyfinCredentialRefreshRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.JellyfinUserId)
+            || request.JellyfinUserId.Length > 256
+            || request.JellyfinUserId.Any(char.IsWhiteSpace)
+            || string.IsNullOrWhiteSpace(request.JellyfinAccessToken)
+            || request.JellyfinAccessToken.Length > 8192)
+        {
+            return BadRequest(new KaevoJellyfinCredentialRefreshResponse("invalid"));
+        }
+
+        var configuration = KaevoPlugin.Instance?.Configuration;
+        if (configuration is null)
+        {
+            return StatusCode(503, new KaevoJellyfinCredentialRefreshResponse("unavailable"));
+        }
+
+        var existing = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (existing is null)
+        {
+            return Conflict(new KaevoJellyfinCredentialRefreshResponse("connector_not_paired"));
+        }
+
+        await _secretStore.WriteAsync(existing with
+        {
+            JellyfinApiKey = request.JellyfinAccessToken
+        }, cancellationToken).ConfigureAwait(false);
+
+        configuration.JellyfinUserId = request.JellyfinUserId;
+        KaevoPlugin.Instance?.SaveConfiguration();
+        _cloudState.Set("connecting");
+        _cloudState.SignalConfigurationChanged();
+        return Ok(new KaevoJellyfinCredentialRefreshResponse("connecting"));
+    }
 
     [Authorize(Policy = "RequiresElevation")]
     [HttpGet("providers/status")]
