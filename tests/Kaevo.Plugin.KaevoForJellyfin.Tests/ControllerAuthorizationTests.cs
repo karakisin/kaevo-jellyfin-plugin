@@ -20,6 +20,7 @@ public sealed class ControllerAuthorizationTests
 
     [Theory]
     [InlineData(nameof(KaevoController.ActivateCloud))]
+    [InlineData(nameof(KaevoController.RefreshJellyfinCredential))]
     [InlineData(nameof(KaevoController.GetProviderStatus))]
     [InlineData(nameof(KaevoController.ProvisionProvider))]
     [InlineData(nameof(KaevoController.PairLifecycle))]
