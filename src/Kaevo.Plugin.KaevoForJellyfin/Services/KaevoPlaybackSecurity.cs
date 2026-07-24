@@ -32,6 +32,8 @@ internal static partial class KaevoPlaybackSecurity
     private const int MaximumQueryParameters = 96;
     private const int MaximumQueryValueLength = 4096;
     private const int MaximumEncodedQueryLength = 32 * 1024;
+    private const string PairingV3PlaybackGrantType = "kaevo-playback-grant+jwt";
+    private const string PairingV3PlaybackGrantAudience = "kaevo-home-connectors-playback-v3";
     private sealed record ActivePlaybackGrant(PlaybackGrant Grant, long ActivatedAt, long LastSeenAt);
     private static readonly ConcurrentDictionary<string, ActivePlaybackGrant> ActiveGrants = new(StringComparer.Ordinal);
 
@@ -48,9 +50,16 @@ internal static partial class KaevoPlaybackSecurity
         Segment
     }
 
-    public static PlaybackGrant VerifyGrant(string token, string grantKey, string connectorId, long? nowEpoch = null)
+    public static PlaybackGrant VerifyGrant(
+        string token,
+        string grantKey,
+        string connectorId,
+        long? nowEpoch = null,
+        bool pairingV3Active = false,
+        string pairingV3VerificationKeysJson = "",
+        string pairingV3Issuer = "")
     {
-        if (grantKey.Length < 32)
+        if (!pairingV3Active && grantKey.Length < 32)
         {
             throw new InvalidOperationException("playbackConnectorGrantKeyTooShort");
         }
@@ -81,13 +90,24 @@ internal static partial class KaevoPlaybackSecurity
             throw new InvalidOperationException("playbackGrantSignatureInvalid");
         }
 
-        var canonical = JsonSerializer.Serialize(new SortedDictionary<string, JsonElement>(payload, StringComparer.Ordinal));
-        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(grantKey));
-        var expected = hmac.ComputeHash(Encoding.UTF8.GetBytes(canonical));
-        var supplied = Base64UrlDecode(signatureElement.GetString() ?? string.Empty);
-        if (!CryptographicOperations.FixedTimeEquals(expected, supplied))
+        if (pairingV3Active)
         {
-            throw new InvalidOperationException("playbackGrantSignatureInvalid");
+            VerifyPairingV3HomeSignature(
+                signatureElement.GetString() ?? string.Empty,
+                payload,
+                pairingV3VerificationKeysJson,
+                pairingV3Issuer);
+        }
+        else
+        {
+            var canonical = JsonSerializer.Serialize(new SortedDictionary<string, JsonElement>(payload, StringComparer.Ordinal));
+            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(grantKey));
+            var expected = hmac.ComputeHash(Encoding.UTF8.GetBytes(canonical));
+            var supplied = Base64UrlDecode(signatureElement.GetString() ?? string.Empty);
+            if (!CryptographicOperations.FixedTimeEquals(expected, supplied))
+            {
+                throw new InvalidOperationException("playbackGrantSignatureInvalid");
+            }
         }
 
         var expiresAt = RequiredInt64(payload, "exp");
@@ -131,6 +151,62 @@ internal static partial class KaevoPlaybackSecurity
         ActiveGrants[tokenHash] = new ActivePlaybackGrant(grant, now, now);
         TrimActiveGrants(now);
         return grant;
+    }
+
+    private static void VerifyPairingV3HomeSignature(
+        string signature,
+        IReadOnlyDictionary<string, JsonElement> payload,
+        string verificationKeysJson,
+        string expectedIssuer)
+    {
+        try
+        {
+            var parts = signature.Split('.');
+            if (parts.Length != 3) throw new InvalidOperationException();
+            using var header = JsonDocument.Parse(KaevoPairingV3Crypto.Base64UrlDecode(parts[0]));
+            using var claims = JsonDocument.Parse(KaevoPairingV3Crypto.Base64UrlDecode(parts[1]));
+            if (header.RootElement.GetProperty("alg").GetString() != "EdDSA"
+                || header.RootElement.GetProperty("typ").GetString() != PairingV3PlaybackGrantType)
+            {
+                throw new InvalidOperationException();
+            }
+            var keyId = header.RootElement.GetProperty("kid").GetString() ?? string.Empty;
+            var verificationKeys = JsonSerializer.Deserialize<Dictionary<string, string>>(
+                verificationKeysJson,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            if (verificationKeys is null
+                || !verificationKeys.TryGetValue(keyId, out var encodedKey)
+                || !KaevoPairingV3Crypto.Verify(
+                    KaevoPairingV3Crypto.Base64UrlDecode(encodedKey),
+                    Encoding.ASCII.GetBytes(parts[0] + "." + parts[1]),
+                    parts[2]))
+            {
+                throw new InvalidOperationException();
+            }
+            var root = claims.RootElement;
+            if (root.GetProperty("iss").GetString() != expectedIssuer
+                || root.GetProperty("aud").GetString() != PairingV3PlaybackGrantAudience
+                || root.GetProperty("protocol").GetString() != KaevoPairingV3Crypto.Protocol)
+            {
+                throw new InvalidOperationException();
+            }
+            var signedClaims = JsonSerializer.Serialize(new SortedDictionary<string, JsonElement>(
+                root.EnumerateObject().ToDictionary(property => property.Name, property => property.Value, StringComparer.Ordinal),
+                StringComparer.Ordinal));
+            var suppliedPayload = JsonSerializer.Serialize(new SortedDictionary<string, JsonElement>(
+                payload.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
+                StringComparer.Ordinal));
+            if (!CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(signedClaims),
+                Encoding.UTF8.GetBytes(suppliedPayload)))
+            {
+                throw new InvalidOperationException();
+            }
+        }
+        catch (Exception)
+        {
+            throw new InvalidOperationException("playbackGrantSignatureInvalid");
+        }
     }
 
     internal static void ResetActiveGrantsForTests() => ActiveGrants.Clear();

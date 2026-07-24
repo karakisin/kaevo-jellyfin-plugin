@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.68.0",
+        "changelog": "Adds V3 Cloud-signed playback-grant verification while preserving legacy connector grants.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.68/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "684db2b67132dca598d714968b0f4efe",
+        "timestamp": "2026-07-24T11:16:43Z"
+      },
+      {
         "version": "0.2.67.0",
         "changelog": "Refreshes a revoked local Jellyfin connector credential from an elevated, signed-in Kaevo session without sending it to Kaevo Cloud.",
         "targetAbi": "10.11.0.0",
