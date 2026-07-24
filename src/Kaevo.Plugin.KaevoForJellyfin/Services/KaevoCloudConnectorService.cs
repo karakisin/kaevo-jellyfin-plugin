@@ -15,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.66";
+    private const string PluginVersion = "0.2.68";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -1605,7 +1605,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var cancellationToken = context.Token;
         try
         {
-            var grant = KaevoPlaybackSecurity.VerifyGrant(message.Grant!, secrets.PlaybackGrantKey, configuration.ConnectorId);
+            var grant = KaevoPlaybackSecurity.VerifyGrant(
+                message.Grant!,
+                secrets.PlaybackGrantKey,
+                configuration.ConnectorId,
+                pairingV3Active: _pairingV3Active,
+                pairingV3VerificationKeysJson: configuration.PairingV3CloudAuthorizationVerificationKeysJson,
+                pairingV3Issuer: configuration.PairingV3CloudAuthorizationIssuer);
             var resolved = KaevoPlaybackSecurity.Resolve(grant, message.Method ?? "GET", message.Path ?? string.Empty, message.Query, message.Range);
             using var local = new HttpRequestMessage(resolved.Method, BuildLocalUri(configuration, resolved.PathAndQuery, null));
             local.Headers.Add("X-Emby-Token", secrets.JellyfinApiKey);
