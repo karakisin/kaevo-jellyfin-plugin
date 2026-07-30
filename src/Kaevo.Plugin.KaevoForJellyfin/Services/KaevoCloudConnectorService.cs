@@ -15,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.68";
+    private const string PluginVersion = "0.2.69";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -404,7 +404,12 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
         if (request.Path == "/kaevo/internal/main-snapshot")
         {
-            return await ReadMainSnapshotAsync(configuration, secrets, request.Query, cancellationToken).ConfigureAwait(false);
+            return await ReadMainSnapshotAsync(
+                configuration,
+                secrets,
+                request.ProfileId,
+                request.Query,
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (!IsAllowedMetadataPath(request.Path) || HasUnsafeQuery(request.Query))
@@ -610,6 +615,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         if (operation is "jellyfin.mark_played" or "jellyfin.mark_unplayed" or "jellyfin.favorite" or "jellyfin.unfavorite")
         {
             var itemId = RequireItemId(parameters);
+            var jellyfinUserId = RequireBoundJellyfinUserId(
+                configuration,
+                request,
+                "profileJellyfinBindingMissing");
             var (method, suffix) = operation switch
             {
                 "jellyfin.mark_played" => (HttpMethod.Post, "UserPlayedItems"),
@@ -617,7 +626,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 "jellyfin.favorite" => (HttpMethod.Post, "UserFavoriteItems"),
                 _ => (HttpMethod.Delete, "UserFavoriteItems")
             };
-            var path = $"/{suffix}/{itemId}?userId={Uri.EscapeDataString(configuration.JellyfinUserId)}";
+            var path = $"/{suffix}/{itemId}?userId={Uri.EscapeDataString(jellyfinUserId)}";
             await SendLocalAsync(configuration, secrets, method, path, null, null, cancellationToken).ConfigureAwait(false);
             return new CommandResult(200, JsonSerializer.SerializeToElement(new
             {
@@ -1204,6 +1213,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         CancellationToken cancellationToken)
     {
         var itemId = RequireItemId(parameters);
+        var jellyfinUserId = RequireBoundJellyfinUserId(
+            configuration,
+            request,
+            "profileJellyfinBindingMissing");
         var deviceId = parameters.TryGetValue("device_id", out var device) ? device.GetString() ?? string.Empty : string.Empty;
         if (!SafeIdentifierRegex().IsMatch(deviceId))
         {
@@ -1223,7 +1236,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             && compatibility.GetBoolean();
         var body = new
         {
-            UserId = configuration.JellyfinUserId,
+            UserId = jellyfinUserId,
             AudioStreamIndex = audioStreamIndex,
             SubtitleStreamIndex = subtitleStreamIndex,
             MaxStreamingBitrate = maxBitrate,
@@ -1237,7 +1250,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         };
         var playbackInfoQuery = new List<string>
         {
-            $"UserId={Uri.EscapeDataString(configuration.JellyfinUserId)}"
+            $"UserId={Uri.EscapeDataString(jellyfinUserId)}"
         };
         if (audioStreamIndex is not null)
         {
@@ -1362,19 +1375,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private async Task<CommandResult> ReadMainSnapshotAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
+        string? cloudProfileId,
         IReadOnlyDictionary<string, JsonElement>? query,
         CancellationToken cancellationToken)
     {
-        var userId = QueryString(query, "userId");
-        if (string.IsNullOrWhiteSpace(userId))
-        {
-            userId = configuration.JellyfinUserId;
-        }
-
-        if (!ItemIdRegex().IsMatch(userId))
-        {
-            throw new InvalidOperationException("snapshotUserInvalid");
-        }
+        var userId = RequireBoundJellyfinUserId(
+            configuration,
+            cloudProfileId,
+            "profileJellyfinBindingMissing");
 
         var moviesLimit = Math.Clamp(QueryInt(query, "moviesLimit", 80), 1, 80);
         var showsLimit = Math.Clamp(QueryInt(query, "showsLimit", 80), 1, 80);
@@ -1898,6 +1906,29 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return !string.IsNullOrWhiteSpace(value)
             ? value
             : throw new InvalidOperationException(error);
+    }
+
+    private static string RequireBoundJellyfinUserId(
+        PluginConfiguration configuration,
+        CloudRequest request,
+        string error) =>
+        RequireBoundJellyfinUserId(configuration, request.ProfileId, error);
+
+    private static string RequireBoundJellyfinUserId(
+        PluginConfiguration configuration,
+        string? cloudProfileId,
+        string error)
+    {
+        if (!KaevoProfileJellyfinBindingStore.TryResolve(
+                configuration,
+                cloudProfileId,
+                out var jellyfinUserId)
+            || !ItemIdRegex().IsMatch(jellyfinUserId))
+        {
+            throw new InvalidOperationException(error);
+        }
+
+        return jellyfinUserId;
     }
 
     private static object OptimizerJobResult(OptimizerJob job)

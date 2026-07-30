@@ -7,6 +7,18 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 public sealed class RelayRequestContextTests
 {
     [Fact]
+    public void CloudRequestDeserializesAuthoritativeProfileIdentity()
+    {
+        const string profileId = "profile-member-1";
+        var request = JsonSerializer.Deserialize<CloudRequest>(
+            $$"""{"request_id":"request-1","method":"GET","provider":"jellyfin","path":"/kaevo/internal/main-snapshot","profile_id":"{{profileId}}"}""",
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.NotNull(request);
+        Assert.Equal(profileId, request.ProfileId);
+    }
+
+    [Fact]
     public void BodyAcknowledgementControlMessageDeserializesWithRequestBinding()
     {
         const string requestId = "12345678-1234-1234-1234-123456789012";

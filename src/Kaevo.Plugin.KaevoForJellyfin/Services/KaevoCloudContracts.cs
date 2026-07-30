@@ -22,7 +22,8 @@ internal sealed record CloudRequest(
     [property: JsonPropertyName("path")] string Path,
     [property: JsonPropertyName("query")] Dictionary<string, JsonElement>? Query,
     [property: JsonPropertyName("operation")] string? Operation,
-    [property: JsonPropertyName("parameters")] Dictionary<string, JsonElement>? Parameters);
+    [property: JsonPropertyName("parameters")] Dictionary<string, JsonElement>? Parameters,
+    [property: JsonPropertyName("profile_id")] string? ProfileId = null);
 
 internal sealed record RelayTicketResponse(
     [property: JsonPropertyName("relay_ticket")] string RelayTicket);
