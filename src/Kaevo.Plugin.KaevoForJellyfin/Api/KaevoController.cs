@@ -19,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
-    private const string PluginVersion = "0.2.71";
+    private const string PluginVersion = "0.2.72";
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey)>(StringComparer.OrdinalIgnoreCase)
         {
@@ -545,7 +545,9 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             return BadRequest(new KaevoProfileJellyfinBindingResponse("invalid"));
         }
 
-        if (!JellyfinUserExists(Guid.ParseExact(normalizedUserId, "N")))
+        if (!KaevoJellyfinUserLookup.Exists(
+                _userManager,
+                Guid.ParseExact(normalizedUserId, "N")))
         {
             return NotFound(new KaevoProfileJellyfinBindingResponse("jellyfin_user_not_found"));
         }
@@ -737,18 +739,6 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             Recursive = true,
             IncludeItemTypes = new[] { kind }
         });
-    }
-
-    private bool JellyfinUserExists(Guid expectedId)
-    {
-        try
-        {
-            return _userManager.GetUserById(expectedId) is not null;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
     }
 
     private IReadOnlyList<KaevoItemMetadata> QueryMetadata(BaseItemKind kind, int limit)
