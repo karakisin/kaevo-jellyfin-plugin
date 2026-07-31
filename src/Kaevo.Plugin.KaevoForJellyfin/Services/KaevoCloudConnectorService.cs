@@ -15,11 +15,12 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.73";
+    private const string PluginVersion = "0.2.74";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
     private const int ControlRequestConcurrency = 4;
+    private static readonly object ProfileBindingSync = new();
     private static readonly HashSet<string> SupportedLocalProviders = new(StringComparer.OrdinalIgnoreCase)
     {
         "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr"
@@ -335,6 +336,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         try
         {
+            ApplyAuthoritativeProfileProviderBinding(configuration, request);
             // Provider settings can be saved while the long-running connector is
             // already online. Re-read the owner-only secret file for every claim
             // so health checks, searches, and mutations all use the same current
@@ -361,6 +363,76 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 new { connector_id = configuration.ConnectorId, message = SanitizeError(exception), details = new { } },
                 cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    internal static void ApplyAuthoritativeProfileProviderBinding(
+        PluginConfiguration configuration,
+        CloudRequest request)
+    {
+        lock (ProfileBindingSync)
+        {
+            var update = AuthoritativeProfileProviderBindingUpdate(
+                configuration.ConnectorId,
+                configuration.ProfileJellyfinBindingsJson,
+                configuration.ProfileId,
+                configuration.JellyfinUserId,
+                request);
+            if (!update.Changed)
+            {
+                return;
+            }
+            configuration.ProfileJellyfinBindingsJson = update.BindingsJson;
+            KaevoPlugin.Instance?.SaveConfiguration();
+        }
+    }
+
+    internal static (string BindingsJson, bool Changed) AuthoritativeProfileProviderBindingUpdate(
+        string connectorId,
+        string? bindingsJson,
+        string? pairedProfileId,
+        string? pairedJellyfinUserId,
+        CloudRequest request)
+    {
+        var binding = request.ProfileProviderBinding;
+        if (binding is null)
+        {
+            return (bindingsJson ?? string.Empty, false);
+        }
+        if (!string.Equals(binding.Provider, "jellyfin", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(binding.ConnectorId, connectorId, StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(request.ProfileId)
+            || !KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                binding.ProviderUserId,
+                out var authoritativeUserId))
+        {
+            throw new InvalidOperationException("profileProviderBindingInvalid");
+        }
+
+        if (KaevoProfileJellyfinBindingStore.TryResolve(
+                bindingsJson,
+                pairedProfileId,
+                pairedJellyfinUserId,
+                request.ProfileId,
+                out var existingUserId))
+        {
+            if (!string.Equals(existingUserId, authoritativeUserId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("profileJellyfinBindingConflict");
+            }
+            return (bindingsJson ?? string.Empty, false);
+        }
+
+        var result = KaevoProfileJellyfinBindingStore.TryBindWithResult(
+            bindingsJson,
+            request.ProfileId,
+            authoritativeUserId,
+            out var updatedBindingsJson);
+        if (result != KaevoProfileJellyfinBindingWriteResult.Bound)
+        {
+            throw new InvalidOperationException(
+                KaevoProfileJellyfinBindingStore.ResponseState(result));
+        }
+        return (updatedBindingsJson, true);
     }
 
     private async Task<CommandResult> ExecuteReadAsync(

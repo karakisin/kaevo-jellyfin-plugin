@@ -23,7 +23,13 @@ internal sealed record CloudRequest(
     [property: JsonPropertyName("query")] Dictionary<string, JsonElement>? Query,
     [property: JsonPropertyName("operation")] string? Operation,
     [property: JsonPropertyName("parameters")] Dictionary<string, JsonElement>? Parameters,
-    [property: JsonPropertyName("profile_id")] string? ProfileId = null);
+    [property: JsonPropertyName("profile_id")] string? ProfileId = null,
+    [property: JsonPropertyName("profile_provider_binding")] CloudProfileProviderBinding? ProfileProviderBinding = null);
+
+internal sealed record CloudProfileProviderBinding(
+    [property: JsonPropertyName("provider")] string Provider,
+    [property: JsonPropertyName("connector_id")] string ConnectorId,
+    [property: JsonPropertyName("provider_user_id")] string ProviderUserId);
 
 internal sealed record RelayTicketResponse(
     [property: JsonPropertyName("relay_ticket")] string RelayTicket);
