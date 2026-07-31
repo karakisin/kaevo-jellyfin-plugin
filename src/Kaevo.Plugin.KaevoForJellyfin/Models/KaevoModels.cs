@@ -136,6 +136,14 @@ public sealed record KaevoProviderProvisionResponse(
     string State,
     string Provider);
 
+public sealed record KaevoSeerrJellyfinUserProvisionRequest(
+    string JellyfinUserId,
+    int Permissions);
+
+public sealed record KaevoSeerrJellyfinUserProvisionResponse(
+    string State,
+    int? SeerrUserId = null);
+
 public sealed record KaevoProviderStatusResponse(
     string Provider,
     string DisplayName,

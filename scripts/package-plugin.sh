@@ -34,7 +34,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 printf '%s\n' \
     '{' \
     '  "category": "General",' \
-    '  "changelog": "Fixes Jellyfin 10.11 profile binding by resolving exact user IDs through the runtime-compatible user contract.",' \
+    '  "changelog": "Lets Kaevo provision one exact Jellyfin member into Seerr through the paired plugin without exposing Seerr administrator credentials to an iPhone.",' \
     '  "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",' \
     '  "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",' \
     '  "name": "Kaevo",' \
@@ -42,7 +42,7 @@ printf '%s\n' \
     '  "owner": "Kaevo",' \
     '  "targetAbi": "10.11.0.0",' \
     "  \"timestamp\": \"$TIMESTAMP\"," \
-    '  "version": "0.2.72.0"' \
+    '  "version": "0.2.73.0"' \
     '}' > "$PLUGIN_DIR/meta.json"
 
 NORMALIZED_TIMESTAMP="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$TIMESTAMP" '+%Y%m%d%H%M.%S')"

@@ -19,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
-    private const string PluginVersion = "0.2.72";
+    private const string PluginVersion = "0.2.73";
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey)>(StringComparer.OrdinalIgnoreCase)
         {
@@ -45,6 +45,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     private readonly KaevoLocalPairingService _localPairing;
     private readonly KaevoPairingV3Service _pairingV3;
     private readonly KaevoProviderPolicyAuditStore _providerAudit;
+    private readonly KaevoSeerrIdentityProvisioningService _seerrIdentityProvisioning;
 
     public KaevoController(
         ILibraryManager libraryManager,
@@ -57,7 +58,8 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         KaevoConnectorLifecycleStore lifecycleStore,
         KaevoLocalPairingService localPairing,
         KaevoPairingV3Service pairingV3,
-        KaevoProviderPolicyAuditStore providerAudit)
+        KaevoProviderPolicyAuditStore providerAudit,
+        KaevoSeerrIdentityProvisioningService seerrIdentityProvisioning)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
@@ -70,6 +72,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         _localPairing = localPairing;
         _pairingV3 = pairingV3;
         _providerAudit = providerAudit;
+        _seerrIdentityProvisioning = seerrIdentityProvisioning;
     }
 
     public void OnActionExecuting(ActionExecutingContext context)
@@ -693,6 +696,41 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             "approved",
             cancellationToken).ConfigureAwait(false);
         return Ok(new KaevoProviderProvisionResponse(request.Enabled ? "ready" : "disabled", provider));
+    }
+
+    /// <summary>
+    /// Imports one exact Jellyfin identity into Seerr and grants only the
+    /// requested media-request bits. Seerr administrator credentials remain
+    /// inside the paired plugin and are never returned to the app.
+    /// </summary>
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("providers/seerr/jellyfin-user")]
+    public async Task<ActionResult<KaevoSeerrJellyfinUserProvisionResponse>> ProvisionSeerrJellyfinUser(
+        [FromBody] KaevoSeerrJellyfinUserProvisionRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                request.JellyfinUserId,
+                out var normalizedUserId)
+            || !KaevoSeerrIdentityProvisioningService.IsSafeRequestPermissionMask(request.Permissions))
+        {
+            return BadRequest(new KaevoSeerrJellyfinUserProvisionResponse("invalid"));
+        }
+
+        var secrets = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (secrets?.GetProvider("seerr") is not { Enabled: true })
+        {
+            return Conflict(new KaevoSeerrJellyfinUserProvisionResponse("seerr_not_configured"));
+        }
+
+        var response = await _seerrIdentityProvisioning.EnsureJellyfinUserAccessAsync(
+            secrets,
+            normalizedUserId,
+            request.Permissions,
+            cancellationToken).ConfigureAwait(false);
+        return response.State == "ready"
+            ? Ok(response)
+            : StatusCode(502, response);
     }
 
     [HttpGet("media-scan")]
