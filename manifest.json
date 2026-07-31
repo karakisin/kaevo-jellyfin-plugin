@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.72.0",
+        "changelog": "Fixes Jellyfin 10.11 profile binding by resolving exact user IDs through the runtime-compatible user contract.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.72/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "1155feb5360909e643327487cb39e0f8",
+        "timestamp": "2026-07-31T08:33:39Z"
+      },
+      {
         "version": "0.2.71.0",
         "changelog": "Adds exact, non-identifying profile-binding diagnostics so Kaevo prevents incomplete media setup before it creates a household member.",
         "targetAbi": "10.11.0.0",
