@@ -70,6 +70,16 @@ public sealed class ProfileJellyfinBindingStoreTests
             MemberUserId,
             out var bindingsJson));
         Assert.Equal("{damaged", bindingsJson);
+        Assert.Equal(
+            KaevoProfileJellyfinBindingWriteResult.BindingStoreInvalid,
+            KaevoProfileJellyfinBindingStore.TryBindWithResult(
+                "{damaged",
+                "member-profile",
+                MemberUserId,
+                out _));
+        Assert.Equal(
+            "binding_store_invalid",
+            KaevoProfileJellyfinBindingStore.ProfileBindingState("{damaged"));
     }
 
     [Fact]
@@ -117,6 +127,17 @@ public sealed class ProfileJellyfinBindingStoreTests
             MemberUserId,
             out var unchanged));
         Assert.Equal(bindingsJson, unchanged);
+        Assert.Equal(
+            KaevoProfileJellyfinBindingWriteResult.JellyfinUserAlreadyBound,
+            KaevoProfileJellyfinBindingStore.TryBindWithResult(
+                bindingsJson,
+                "second-profile",
+                MemberUserId,
+                out _));
+        Assert.Equal(
+            "jellyfin_user_already_bound",
+            KaevoProfileJellyfinBindingStore.ResponseState(
+                KaevoProfileJellyfinBindingWriteResult.JellyfinUserAlreadyBound));
     }
 
     [Fact]

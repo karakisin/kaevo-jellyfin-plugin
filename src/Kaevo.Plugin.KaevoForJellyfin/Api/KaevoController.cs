@@ -19,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
-    private const string PluginVersion = "0.2.70";
+    private const string PluginVersion = "0.2.71";
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey)>(StringComparer.OrdinalIgnoreCase)
         {
@@ -123,7 +123,8 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             relay.LastConnectedUtc,
             relay.ConnectedChannels,
             "hls-bounded-buffer-v3",
-            configuration.OptimizerExecutionEnabled));
+            configuration.OptimizerExecutionEnabled,
+            KaevoProfileJellyfinBindingStore.ProfileBindingState(configuration)));
     }
 
     [HttpGet("cloud/status")]
@@ -555,12 +556,14 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             return StatusCode(503, new KaevoProfileJellyfinBindingResponse("unavailable"));
         }
 
-        if (!KaevoProfileJellyfinBindingStore.TryBind(
+        var bindingResult = KaevoProfileJellyfinBindingStore.TryBindWithResult(
                 configuration,
                 request.CloudProfileId,
-                normalizedUserId))
+                normalizedUserId);
+        if (bindingResult != KaevoProfileJellyfinBindingWriteResult.Bound)
         {
-            return BadRequest(new KaevoProfileJellyfinBindingResponse("invalid"));
+            return BadRequest(new KaevoProfileJellyfinBindingResponse(
+                KaevoProfileJellyfinBindingStore.ResponseState(bindingResult)));
         }
 
         KaevoPlugin.Instance?.SaveConfiguration();

@@ -3,6 +3,15 @@ using Kaevo.Plugin.KaevoForJellyfin.Configuration;
 
 namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
+internal enum KaevoProfileJellyfinBindingWriteResult
+{
+    Bound,
+    InvalidRequest,
+    BindingStoreInvalid,
+    BindingCapacityReached,
+    JellyfinUserAlreadyBound
+}
+
 internal static class KaevoProfileJellyfinBindingStore
 {
     private const int MaximumBindings = 256;
@@ -53,22 +62,42 @@ internal static class KaevoProfileJellyfinBindingStore
     internal static bool TryBind(
         PluginConfiguration configuration,
         string? cloudProfileId,
+        string? jellyfinUserId) =>
+        TryBindWithResult(configuration, cloudProfileId, jellyfinUserId)
+            == KaevoProfileJellyfinBindingWriteResult.Bound;
+
+    /// <summary>
+    /// Persists one exact Cloud-profile-to-Jellyfin-user binding and preserves
+    /// a non-identifying failure state when it cannot be saved.
+    /// </summary>
+    internal static KaevoProfileJellyfinBindingWriteResult TryBindWithResult(
+        PluginConfiguration configuration,
+        string? cloudProfileId,
         string? jellyfinUserId)
     {
-        if (!TryBind(
+        var result = TryBindWithResult(
                 configuration.ProfileJellyfinBindingsJson,
                 cloudProfileId,
                 jellyfinUserId,
-                out var updatedBindingsJson))
+                out var updatedBindingsJson);
+        if (result != KaevoProfileJellyfinBindingWriteResult.Bound)
         {
-            return false;
+            return result;
         }
 
         configuration.ProfileJellyfinBindingsJson = updatedBindingsJson;
-        return true;
+        return KaevoProfileJellyfinBindingWriteResult.Bound;
     }
 
     internal static bool TryBind(
+        string? bindingsJson,
+        string? cloudProfileId,
+        string? jellyfinUserId,
+        out string updatedBindingsJson) =>
+        TryBindWithResult(bindingsJson, cloudProfileId, jellyfinUserId, out updatedBindingsJson)
+            == KaevoProfileJellyfinBindingWriteResult.Bound;
+
+    internal static KaevoProfileJellyfinBindingWriteResult TryBindWithResult(
         string? bindingsJson,
         string? cloudProfileId,
         string? jellyfinUserId,
@@ -78,7 +107,7 @@ internal static class KaevoProfileJellyfinBindingStore
         if (!ValidProfileId(cloudProfileId)
             || !TryNormalizeJellyfinUserId(jellyfinUserId, out var normalizedUserId))
         {
-            return false;
+            return KaevoProfileJellyfinBindingWriteResult.InvalidRequest;
         }
 
         Dictionary<string, string> bindings;
@@ -88,12 +117,12 @@ internal static class KaevoProfileJellyfinBindingStore
         }
         else if (!TryRead(bindingsJson, out bindings))
         {
-            return false;
+            return KaevoProfileJellyfinBindingWriteResult.BindingStoreInvalid;
         }
 
         if (!bindings.ContainsKey(cloudProfileId!) && bindings.Count >= MaximumBindings)
         {
-            return false;
+            return KaevoProfileJellyfinBindingWriteResult.BindingCapacityReached;
         }
 
         if (bindings.Any(entry =>
@@ -102,15 +131,34 @@ internal static class KaevoProfileJellyfinBindingStore
         {
             // One Jellyfin identity can back only one Cloud profile. Sharing
             // it would merge profile-scoped libraries, playback, and policy.
-            return false;
+            return KaevoProfileJellyfinBindingWriteResult.JellyfinUserAlreadyBound;
         }
 
         bindings[cloudProfileId!] = normalizedUserId;
         updatedBindingsJson = JsonSerializer.Serialize(
             bindings.OrderBy(entry => entry.Key, StringComparer.Ordinal)
                 .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal));
-        return true;
+        return KaevoProfileJellyfinBindingWriteResult.Bound;
     }
+
+    internal static string ProfileBindingState(PluginConfiguration configuration) =>
+        ProfileBindingState(configuration.ProfileJellyfinBindingsJson);
+
+    internal static string ProfileBindingState(string? bindingsJson) =>
+        string.IsNullOrWhiteSpace(bindingsJson)
+            || TryRead(bindingsJson, out _)
+            ? "ready"
+            : "binding_store_invalid";
+
+    internal static string ResponseState(KaevoProfileJellyfinBindingWriteResult result) => result switch
+    {
+        KaevoProfileJellyfinBindingWriteResult.Bound => "bound",
+        KaevoProfileJellyfinBindingWriteResult.InvalidRequest => "invalid_request",
+        KaevoProfileJellyfinBindingWriteResult.BindingStoreInvalid => "binding_store_invalid",
+        KaevoProfileJellyfinBindingWriteResult.BindingCapacityReached => "binding_capacity_reached",
+        KaevoProfileJellyfinBindingWriteResult.JellyfinUserAlreadyBound => "jellyfin_user_already_bound",
+        _ => "invalid_request"
+    };
 
     internal static bool TryUnbind(
         PluginConfiguration configuration,
