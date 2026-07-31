@@ -96,7 +96,69 @@ internal static class KaevoProfileJellyfinBindingStore
             return false;
         }
 
+        if (bindings.Any(entry =>
+                !string.Equals(entry.Key, cloudProfileId, StringComparison.Ordinal)
+                && string.Equals(entry.Value, normalizedUserId, StringComparison.Ordinal)))
+        {
+            // One Jellyfin identity can back only one Cloud profile. Sharing
+            // it would merge profile-scoped libraries, playback, and policy.
+            return false;
+        }
+
         bindings[cloudProfileId!] = normalizedUserId;
+        updatedBindingsJson = JsonSerializer.Serialize(
+            bindings.OrderBy(entry => entry.Key, StringComparer.Ordinal)
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal));
+        return true;
+    }
+
+    internal static bool TryUnbind(
+        PluginConfiguration configuration,
+        string? cloudProfileId,
+        string? jellyfinUserId)
+    {
+        if (!TryUnbind(
+                configuration.ProfileJellyfinBindingsJson,
+                cloudProfileId,
+                jellyfinUserId,
+                out var updatedBindingsJson))
+        {
+            return false;
+        }
+
+        configuration.ProfileJellyfinBindingsJson = updatedBindingsJson;
+        return true;
+    }
+
+    internal static bool TryUnbind(
+        string? bindingsJson,
+        string? cloudProfileId,
+        string? jellyfinUserId,
+        out string updatedBindingsJson)
+    {
+        updatedBindingsJson = bindingsJson ?? string.Empty;
+        if (!ValidProfileId(cloudProfileId)
+            || !TryNormalizeJellyfinUserId(jellyfinUserId, out var normalizedUserId)
+            || string.IsNullOrWhiteSpace(bindingsJson)
+            || !TryRead(bindingsJson, out var bindings))
+        {
+            return false;
+        }
+
+        if (!bindings.TryGetValue(cloudProfileId!, out var existingUserId))
+        {
+            // Exact absence is idempotent only when the same Jellyfin identity
+            // is not bound to a different profile.
+            return !bindings.Any(entry =>
+                string.Equals(entry.Value, normalizedUserId, StringComparison.Ordinal));
+        }
+
+        if (!string.Equals(existingUserId, normalizedUserId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        bindings.Remove(cloudProfileId!);
         updatedBindingsJson = JsonSerializer.Serialize(
             bindings.OrderBy(entry => entry.Key, StringComparer.Ordinal)
                 .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal));

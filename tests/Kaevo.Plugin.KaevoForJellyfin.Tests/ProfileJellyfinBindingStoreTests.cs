@@ -101,4 +101,50 @@ public sealed class ProfileJellyfinBindingStoreTests
         Assert.Equal(OwnerUserId, owner);
         Assert.Equal(MemberUserId, member);
     }
+
+    [Fact]
+    public void OneJellyfinIdentityCannotBackTwoCloudProfiles()
+    {
+        Assert.True(KaevoProfileJellyfinBindingStore.TryBind(
+            string.Empty,
+            "first-profile",
+            MemberUserId,
+            out var bindingsJson));
+
+        Assert.False(KaevoProfileJellyfinBindingStore.TryBind(
+            bindingsJson,
+            "second-profile",
+            MemberUserId,
+            out var unchanged));
+        Assert.Equal(bindingsJson, unchanged);
+    }
+
+    [Fact]
+    public void ExactUnbindIsIdempotentAndCannotRemoveAnotherIdentity()
+    {
+        Assert.True(KaevoProfileJellyfinBindingStore.TryBind(
+            string.Empty,
+            "member-profile",
+            MemberUserId,
+            out var bindingsJson));
+
+        Assert.False(KaevoProfileJellyfinBindingStore.TryUnbind(
+            bindingsJson,
+            "member-profile",
+            OwnerUserId,
+            out var unchanged));
+        Assert.Equal(bindingsJson, unchanged);
+
+        Assert.True(KaevoProfileJellyfinBindingStore.TryUnbind(
+            bindingsJson,
+            "member-profile",
+            MemberUserId,
+            out var emptyBindings));
+        Assert.True(KaevoProfileJellyfinBindingStore.TryUnbind(
+            emptyBindings,
+            "member-profile",
+            MemberUserId,
+            out var stillEmpty));
+        Assert.Equal(emptyBindings, stillEmpty);
+    }
 }

@@ -19,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
-    private const string PluginVersion = "0.2.69";
+    private const string PluginVersion = "0.2.70";
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey)>(StringComparer.OrdinalIgnoreCase)
         {
@@ -567,6 +567,40 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         return Ok(new KaevoProfileJellyfinBindingResponse("bound"));
     }
 
+    /// <summary>
+    /// Removes one exact Cloud-profile-to-Jellyfin-user binding. The caller
+    /// must prove both immutable identifiers; names are never accepted.
+    /// </summary>
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpDelete("cloud/profile-jellyfin-binding")]
+    public ActionResult<KaevoProfileJellyfinBindingResponse> UnbindProfileJellyfinIdentity(
+        [FromBody] KaevoProfileJellyfinBindingRequest request)
+    {
+        if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                request.JellyfinUserId,
+                out var normalizedUserId))
+        {
+            return BadRequest(new KaevoProfileJellyfinBindingResponse("invalid"));
+        }
+
+        var configuration = KaevoPlugin.Instance?.Configuration;
+        if (configuration is null)
+        {
+            return StatusCode(503, new KaevoProfileJellyfinBindingResponse("unavailable"));
+        }
+
+        if (!KaevoProfileJellyfinBindingStore.TryUnbind(
+                configuration,
+                request.CloudProfileId,
+                normalizedUserId))
+        {
+            return Conflict(new KaevoProfileJellyfinBindingResponse("binding_mismatch"));
+        }
+
+        KaevoPlugin.Instance?.SaveConfiguration();
+        return Ok(new KaevoProfileJellyfinBindingResponse("unbound"));
+    }
+
     [Authorize(Policy = "RequiresElevation")]
     [HttpGet("providers/status")]
     public async Task<ActionResult<IReadOnlyList<KaevoProviderStatusResponse>>> GetProviderStatus(
@@ -706,10 +740,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     {
         try
         {
-            var users = _userManager.GetType().GetProperty("Users")?.GetValue(_userManager) as IEnumerable;
-            return users?.Cast<object>().Any(user =>
-                user.GetType().GetProperty("Id")?.GetValue(user) is Guid id
-                && id == expectedId) == true;
+            return _userManager.GetUserById(expectedId) is not null;
         }
         catch (Exception)
         {

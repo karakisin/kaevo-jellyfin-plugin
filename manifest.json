@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.70.0",
+        "changelog": "Adds protected exact profile-to-Jellyfin unbinding for permanent profile cleanup and prevents one Jellyfin user from being shared across Cloud profiles.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.70/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "ad9752fbcdb35f20826f810729e5fbcf",
+        "timestamp": "2026-07-31T04:37:00Z"
+      },
+      {
         "version": "0.2.69.0",
         "changelog": "Adds exact Cloud-profile-to-Jellyfin-user binding so household members receive only their own authorized library identity.",
         "targetAbi": "10.11.0.0",

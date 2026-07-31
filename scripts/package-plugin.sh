@@ -34,7 +34,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 printf '%s\n' \
     '{' \
     '  "category": "General",' \
-    '  "changelog": "Adds exact Cloud-profile-to-Jellyfin-user binding so household members receive only their own authorized library identity.",' \
+    '  "changelog": "Adds protected exact profile-to-Jellyfin unbinding for permanent profile cleanup and prevents one Jellyfin user from being shared across Cloud profiles.",' \
     '  "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",' \
     '  "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",' \
     '  "name": "Kaevo",' \
@@ -42,7 +42,7 @@ printf '%s\n' \
     '  "owner": "Kaevo",' \
     '  "targetAbi": "10.11.0.0",' \
     "  \"timestamp\": \"$TIMESTAMP\"," \
-    '  "version": "0.2.69.0"' \
+    '  "version": "0.2.70.0"' \
     '}' > "$PLUGIN_DIR/meta.json"
 
 NORMALIZED_TIMESTAMP="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$TIMESTAMP" '+%Y%m%d%H%M.%S')"
