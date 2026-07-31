@@ -9,7 +9,7 @@ metadata access without requiring a separate Kaevo server installation.
 - Jellyfin: `10.11.x`
 - .NET target: `net8.0`
 - Foundation baseline: `0.1.0`
-- Current repository build: `0.2.69`
+- Current repository build: `0.2.70`
 - Supported phase: local metadata, app-guided Cloud activation, and guarded remote playback
 
 Current endpoints:
@@ -22,6 +22,7 @@ Current endpoints:
 - `GET /kaevo/main-snapshot`
 - `POST /kaevo/cloud/activate` (authenticated Jellyfin administrator only)
 - `PUT /kaevo/cloud/profile-jellyfin-binding` (elevated Jellyfin administrator only)
+- `DELETE /kaevo/cloud/profile-jellyfin-binding` (elevated Jellyfin administrator only; exact identifiers required)
 - `GET /kaevo/providers/status` (authenticated Jellyfin administrator only)
 - `POST /kaevo/providers/{provider}` (authenticated Jellyfin administrator only)
 
