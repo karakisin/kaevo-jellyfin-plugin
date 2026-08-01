@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.76.0",
+        "changelog": "Allows an Owner to repair one exact stale profile-to-Jellyfin link only after Kaevo Cloud verifies the previous same-household profile is inactive or deleted.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.76/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "ba7319a429bec4e971ec9c3b450d0a17",
+        "timestamp": "2026-08-01T02:57:13Z"
+      },
+      {
         "version": "0.2.75.0",
         "changelog": "Lets Kaevo Cloud recover one exact profile-to-Jellyfin binding from the paired plugin without display-name matching, pairing again, or sharing owner credentials.",
         "targetAbi": "10.11.0.0",
