@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.79.0",
+        "changelog": "Adds signed, profile-bound member media capability enforcement for Household Username Auth V1 without an Owner fallback.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.79/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "fff148cfa1e8acf431ee93f83ed66ea0",
+        "timestamp": "2026-08-01T20:26:40Z"
+      },
+      {
         "version": "0.2.78.0",
         "changelog": "Adds guarded Owner-authorized claims for a confirmed unbound Jellyfin user while refusing active, unrelated, and ambiguous bindings.",
         "targetAbi": "10.11.0.0",
