@@ -278,6 +278,14 @@ internal static class KaevoProfileJellyfinBindingStore
         var normalizedExpectedSourceProfileId = string.IsNullOrWhiteSpace(expectedSourceProfileId)
             ? null
             : expectedSourceProfileId;
+        if (bindings.TryGetValue(targetProfileId!, out var alreadyBoundUserId)
+            && string.Equals(alreadyBoundUserId, normalizedUserId, StringComparison.Ordinal)
+            && string.Equals(actualSourceProfileId, targetProfileId, StringComparison.Ordinal))
+        {
+            // Duplicate delivery after the exact CAS move preserves every
+            // unrelated binding and reports the idempotent outcome.
+            return KaevoProfileJellyfinBindingReassignmentResult.AlreadyBound;
+        }
         if (!string.Equals(actualSourceProfileId, normalizedExpectedSourceProfileId, StringComparison.Ordinal))
         {
             return KaevoProfileJellyfinBindingReassignmentResult.OwnerMismatch;

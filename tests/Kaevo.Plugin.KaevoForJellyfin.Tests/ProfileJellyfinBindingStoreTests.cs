@@ -277,4 +277,33 @@ public sealed class ProfileJellyfinBindingStoreTests
                 out var unchanged));
         Assert.Equal(created, unchanged);
     }
+
+    [Fact]
+    public void ReassignmentRetryIsIdempotentAfterTheExactCasMove()
+    {
+        Assert.True(KaevoProfileJellyfinBindingStore.TryBind(
+            string.Empty,
+            "stale-profile",
+            MemberUserId,
+            out var bindingsJson));
+
+        Assert.Equal(
+            KaevoProfileJellyfinBindingReassignmentResult.Reassigned,
+            KaevoProfileJellyfinBindingStore.TryReassignExactOwner(
+                bindingsJson,
+                "stale-profile",
+                "member-profile",
+                MemberUserId,
+                out var moved));
+
+        Assert.Equal(
+            KaevoProfileJellyfinBindingReassignmentResult.AlreadyBound,
+            KaevoProfileJellyfinBindingStore.TryReassignExactOwner(
+                moved,
+                "stale-profile",
+                "member-profile",
+                MemberUserId,
+                out var retried));
+        Assert.Equal(moved, retried);
+    }
 }
