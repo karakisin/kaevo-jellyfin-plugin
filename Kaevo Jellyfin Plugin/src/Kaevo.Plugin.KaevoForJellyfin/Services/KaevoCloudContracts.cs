@@ -24,12 +24,24 @@ internal sealed record CloudRequest(
     [property: JsonPropertyName("operation")] string? Operation,
     [property: JsonPropertyName("parameters")] Dictionary<string, JsonElement>? Parameters,
     [property: JsonPropertyName("profile_id")] string? ProfileId = null,
-    [property: JsonPropertyName("profile_provider_binding")] CloudProfileProviderBinding? ProfileProviderBinding = null);
+    [property: JsonPropertyName("profile_provider_binding")] CloudProfileProviderBinding? ProfileProviderBinding = null,
+    [property: JsonPropertyName("member_media_capability")] string? MemberMediaCapability = null,
+    [property: JsonPropertyName("member_media_context")] CloudMemberMediaContext? MemberMediaContext = null,
+    [property: JsonIgnore] string? ResolvedMemberJellyfinUserId = null);
 
 internal sealed record CloudProfileProviderBinding(
     [property: JsonPropertyName("provider")] string Provider,
     [property: JsonPropertyName("connector_id")] string ConnectorId,
     [property: JsonPropertyName("provider_user_id")] string ProviderUserId);
+
+/// <summary>
+/// Cloud-to-plugin context contains only opaque, signed-claim comparable
+/// handles. It is not an alternate source of member authority.
+/// </summary>
+internal sealed record CloudMemberMediaContext(
+    [property: JsonPropertyName("principal_handle")] string PrincipalHandle,
+    [property: JsonPropertyName("household_handle")] string HouseholdHandle,
+    [property: JsonPropertyName("device_installation_handle")] string DeviceInstallationHandle);
 
 internal sealed record RelayTicketResponse(
     [property: JsonPropertyName("relay_ticket")] string RelayTicket);

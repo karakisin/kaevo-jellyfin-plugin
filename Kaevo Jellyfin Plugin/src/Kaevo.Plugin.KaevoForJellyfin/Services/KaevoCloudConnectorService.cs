@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -15,7 +16,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.78";
+    private const string PluginVersion = "0.2.79";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -336,7 +337,32 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         try
         {
-            ApplyAuthoritativeProfileProviderBinding(configuration, request);
+            KaevoResolvedMemberMediaCapability? memberCapability = null;
+            if (!string.IsNullOrWhiteSpace(request.MemberMediaCapability))
+            {
+                // A username-auth request is authorization-only. It may never
+                // carry a binding mutation alongside a media capability.
+                if (request.ProfileProviderBinding is not null)
+                {
+                    throw new InvalidOperationException("memberMediaBindingMutationNotAllowed");
+                }
+                memberCapability = RequireMemberMediaCapability(configuration, request);
+                EnsureMemberRequestTargetsExactUser(request, memberCapability.JellyfinUserId);
+                await EnsureMemberCapabilityUserActiveAsync(
+                    configuration,
+                    secrets,
+                    memberCapability.JellyfinUserId,
+                    cancellationToken).ConfigureAwait(false);
+                request = request with { ResolvedMemberJellyfinUserId = memberCapability.JellyfinUserId };
+            }
+            else
+            {
+                if (request.MemberMediaContext is not null)
+                {
+                    throw new InvalidOperationException("memberMediaCapabilityRequired");
+                }
+                ApplyAuthoritativeProfileProviderBinding(configuration, request);
+            }
             // Provider settings can be saved while the long-running connector is
             // already online. Re-read the owner-only secret file for every claim
             // so health checks, searches, and mutations all use the same current
@@ -362,6 +388,118 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 $"/v1/remote-requests/{Uri.EscapeDataString(request.RequestId)}/fail",
                 new { connector_id = configuration.ConnectorId, message = SanitizeError(exception), details = new { } },
                 cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    internal static KaevoResolvedMemberMediaCapability RequireMemberMediaCapability(
+        PluginConfiguration configuration,
+        CloudRequest request,
+        long? nowEpoch = null)
+        => RequireMemberMediaCapability(
+            configuration.PairingV3Enabled,
+            configuration.ConnectorId,
+            configuration.ProfileJellyfinBindingsJson,
+            configuration.PairingV3CloudAuthorizationVerificationKeysJson,
+            configuration.PairingV3CloudAuthorizationIssuer,
+            request,
+            nowEpoch);
+
+    internal static KaevoResolvedMemberMediaCapability RequireMemberMediaCapability(
+        bool pairingV3Enabled,
+        string connectorId,
+        string? bindingsJson,
+        string verificationKeysJson,
+        string issuer,
+        CloudRequest request,
+        long? nowEpoch = null)
+    {
+        if (!pairingV3Enabled
+            || request.MemberMediaContext is null
+            || request.ProfileProviderBinding is not null
+            || string.IsNullOrWhiteSpace(request.ProfileId)
+            || !string.Equals(request.Provider, "jellyfin", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("memberMediaCapabilityInvalid");
+        }
+
+        var scopes = RequiredMemberScopes(request);
+        return KaevoMemberMediaCapabilityVerifier.Verify(
+            request.MemberMediaCapability,
+            new KaevoMemberMediaCapabilityContext(
+                connectorId,
+                request.ProfileId,
+                request.MemberMediaContext.PrincipalHandle,
+                request.MemberMediaContext.HouseholdHandle,
+                request.MemberMediaContext.DeviceInstallationHandle,
+                scopes,
+                bindingsJson),
+            verificationKeysJson,
+            issuer,
+            nowEpoch);
+    }
+
+    internal static IReadOnlyCollection<string> RequiredMemberScopes(CloudRequest request)
+    {
+        if (request.Method == "GET")
+        {
+            if (request.Path == "/kaevo/internal/main-snapshot")
+            {
+                // Continue-watching is user progress, not ordinary catalog
+                // metadata, so it needs a separate explicit scope.
+                return new[] { "metadata.read", "progress.read" };
+            }
+            if (request.Path == "/kaevo/internal/image")
+            {
+                return new[] { "metadata.read" };
+            }
+            if (UserViewsRegex().IsMatch(request.Path) || UserItemsRegex().IsMatch(request.Path))
+            {
+                return new[] { "library.read" };
+            }
+        }
+
+        var operation = request.Operation ?? request.Path.Replace("/commands/", string.Empty, StringComparison.Ordinal);
+        return operation switch
+        {
+            "jellyfin.search" => new[] { "search.read" },
+            "jellyfin.prepare_playback" => new[] { "playback.start" },
+            "jellyfin.playback_started" or "jellyfin.playback_progress" or "jellyfin.playback_stopped" => new[] { "playback.report", "progress.write" },
+            "jellyfin.mark_played" or "jellyfin.mark_unplayed" or "jellyfin.favorite" or "jellyfin.unfavorite" => new[] { "progress.write" },
+            _ => throw new InvalidOperationException("memberMediaOperationNotAllowed")
+        };
+    }
+
+    internal static void EnsureMemberRequestTargetsExactUser(CloudRequest request, string jellyfinUserId)
+    {
+        if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(jellyfinUserId, out var normalizedUserId))
+        {
+            throw new InvalidOperationException("memberMediaCapabilityInvalid");
+        }
+        var match = MemberUserPathRegex().Match(request.Path);
+        if (match.Success
+            && !string.Equals(match.Groups["user"].Value, normalizedUserId, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("memberMediaJellyfinUserMismatch");
+        }
+    }
+
+    private async Task EnsureMemberCapabilityUserActiveAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string jellyfinUserId,
+        CancellationToken cancellationToken)
+    {
+        var response = await SendLocalAsync(
+            configuration,
+            secrets,
+            HttpMethod.Get,
+            $"/Users/{jellyfinUserId}",
+            null,
+            null,
+            cancellationToken).ConfigureAwait(false);
+        if (!KaevoMemberMediaUserState.IsActive(response.Payload))
+        {
+            throw new InvalidOperationException("memberMediaJellyfinUserInactive");
         }
     }
 
@@ -464,6 +602,12 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 cancellationToken).ConfigureAwait(false);
         }
 
+        if (!string.IsNullOrWhiteSpace(request.MemberMediaCapability))
+        {
+            var exactUserId = RequireBoundJellyfinUserId(configuration, request, "memberMediaBindingChanged");
+            EnsureMemberRequestTargetsExactUser(request, exactUserId);
+        }
+
         if (request.Path == "/kaevo/internal/image")
         {
             if (!configuration.RemoteArtworkEnabled)
@@ -471,7 +615,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 throw new InvalidOperationException("remoteArtworkDisabled");
             }
 
-            return await ReadArtworkAsync(configuration, secrets, request.Query, cancellationToken).ConfigureAwait(false);
+            return await ReadArtworkAsync(configuration, secrets, request, cancellationToken).ConfigureAwait(false);
         }
 
         if (request.Path == "/kaevo/internal/main-snapshot")
@@ -863,6 +1007,15 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             return await PreparePlaybackAsync(configuration, secrets, request, parameters, cancellationToken).ConfigureAwait(false);
         }
 
+        if (operation == "jellyfin.search")
+        {
+            if (string.IsNullOrWhiteSpace(request.MemberMediaCapability))
+            {
+                throw new InvalidOperationException("memberMediaCapabilityRequired");
+            }
+            return await SearchMemberMediaAsync(configuration, secrets, request, parameters, cancellationToken).ConfigureAwait(false);
+        }
+
         if (operation is "jellyfin.mark_played" or "jellyfin.mark_unplayed" or "jellyfin.favorite" or "jellyfin.unfavorite")
         {
             var itemId = RequireItemId(parameters);
@@ -921,6 +1074,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             }
 
             var itemId = RequireItemId(parameters);
+            var boundJellyfinUserId = !string.IsNullOrWhiteSpace(request.MemberMediaCapability)
+                ? RequireBoundJellyfinUserId(configuration, request, "memberMediaBindingChanged")
+                : null;
             var mediaSourceId = RequireString(parameters, "media_source_id", 128);
             var playSessionId = RequireString(parameters, "play_session_id", 128);
             var positionTicks = parameters.TryGetValue("position_ticks", out var ticksElement)
@@ -934,15 +1090,20 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 "jellyfin.playback_progress" => "/Sessions/Playing/Progress",
                 _ => "/Sessions/Playing/Stopped"
             };
-            await SendLocalAsync(configuration, secrets, HttpMethod.Post, endpoint, null, new
+            var progressPayload = new Dictionary<string, object?>
             {
-                ItemId = itemId,
-                MediaSourceId = mediaSourceId,
-                PlaySessionId = playSessionId,
-                PositionTicks = positionTicks,
-                IsPaused = isPaused,
-                CanSeek = true
-            }, cancellationToken).ConfigureAwait(false);
+                ["ItemId"] = itemId,
+                ["MediaSourceId"] = mediaSourceId,
+                ["PlaySessionId"] = playSessionId,
+                ["PositionTicks"] = positionTicks,
+                ["IsPaused"] = isPaused,
+                ["CanSeek"] = true
+            };
+            if (!string.IsNullOrWhiteSpace(boundJellyfinUserId))
+            {
+                progressPayload["UserId"] = boundJellyfinUserId;
+            }
+            await SendLocalAsync(configuration, secrets, HttpMethod.Post, endpoint, null, progressPayload, cancellationToken).ConfigureAwait(false);
             return CompleteCommand(request, operation, new { item_id = itemId, position_ticks = positionTicks, applied = true });
         }
 
@@ -1106,7 +1267,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             requestId = request.RequestId,
             state = "complete",
-            operation,
+            operation = "jellyfin.search",
             result
         }, JsonOptions), false);
     }
@@ -1474,6 +1635,21 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return result;
     }
 
+    private static string RequireSearchTerm(IReadOnlyDictionary<string, JsonElement> parameters)
+    {
+        if (!parameters.TryGetValue("query", out var value)
+            || value.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException("memberMediaSearchInvalid");
+        }
+        var query = value.GetString()?.Trim() ?? string.Empty;
+        if (query.Length is < 1 or > 160 || query.Any(char.IsControl))
+        {
+            throw new InvalidOperationException("memberMediaSearchInvalid");
+        }
+        return query;
+    }
+
     private static int[] RequirePositiveIds(IReadOnlyDictionary<string, JsonElement> parameters, string key)
     {
         if (!parameters.TryGetValue(key, out var value) || value.ValueKind != JsonValueKind.Array)
@@ -1594,17 +1770,79 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }, JsonOptions), false);
     }
 
+    private async Task<CommandResult> SearchMemberMediaAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        CloudRequest request,
+        IReadOnlyDictionary<string, JsonElement> parameters,
+        CancellationToken cancellationToken)
+    {
+        var query = RequireSearchTerm(parameters);
+        var limit = parameters.TryGetValue("limit", out var limitValue) && limitValue.TryGetInt32(out var supplied)
+            ? Math.Clamp(supplied, 1, 100)
+            : 30;
+        var jellyfinUserId = RequireBoundJellyfinUserId(
+            configuration,
+            request,
+            "profileJellyfinBindingMissing");
+        var response = await SendLocalAsync(
+            configuration,
+            secrets,
+            HttpMethod.Get,
+            $"/Users/{jellyfinUserId}/Items",
+            new Dictionary<string, JsonElement>
+            {
+                ["SearchTerm"] = JsonSerializer.SerializeToElement(query),
+                ["Recursive"] = JsonSerializer.SerializeToElement(true),
+                ["StartIndex"] = JsonSerializer.SerializeToElement(0),
+                ["Limit"] = JsonSerializer.SerializeToElement(limit),
+                ["EnableUserData"] = JsonSerializer.SerializeToElement(true),
+                ["EnableImages"] = JsonSerializer.SerializeToElement(true),
+                ["Fields"] = JsonSerializer.SerializeToElement("Overview,Genres,MediaSources,MediaStreams,PrimaryImageAspectRatio")
+            },
+            null,
+            cancellationToken).ConfigureAwait(false);
+        return new CommandResult(200, JsonSerializer.SerializeToElement(new
+        {
+            requestId = request.RequestId,
+            state = "complete",
+            operation = "jellyfin.search",
+            result = response.Payload
+        }, JsonOptions), response.Truncated);
+    }
+
     private async Task<CommandResult> ReadArtworkAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
-        IReadOnlyDictionary<string, JsonElement>? query,
+        CloudRequest request,
         CancellationToken cancellationToken)
     {
+        var query = request.Query;
         var itemId = QueryString(query, "item_id");
         var imageType = QueryString(query, "image_type");
         if (!ItemIdRegex().IsMatch(itemId) || imageType is not ("Primary" or "Backdrop" or "Logo" or "Thumb"))
         {
             throw new InvalidOperationException("remoteArtworkRequestInvalid");
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.MemberMediaCapability))
+        {
+            // The connector's administrator credential is used only after a
+            // user-scoped item lookup has proved this item is visible to the
+            // exact capability-resolved Jellyfin account.
+            var jellyfinUserId = RequireBoundJellyfinUserId(configuration, request, "memberMediaBindingChanged");
+            await SendLocalAsync(
+                configuration,
+                secrets,
+                HttpMethod.Get,
+                $"/Users/{jellyfinUserId}/Items/{itemId}",
+                new Dictionary<string, JsonElement>
+                {
+                    ["EnableUserData"] = JsonSerializer.SerializeToElement(false),
+                    ["EnableImages"] = JsonSerializer.SerializeToElement(false)
+                },
+                null,
+                cancellationToken).ConfigureAwait(false);
         }
 
         var requestedWidth = Math.Clamp(QueryInt(query, "max_width", 600), 1, RemoteArtworkMaximumDimension);
@@ -2194,8 +2432,28 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private static string RequireBoundJellyfinUserId(
         PluginConfiguration configuration,
         CloudRequest request,
-        string error) =>
-        RequireBoundJellyfinUserId(configuration, request.ProfileId, error);
+        string error)
+    {
+        if (!string.IsNullOrWhiteSpace(request.MemberMediaCapability))
+        {
+            // Re-verify against the current authoritative map at each local
+            // provider boundary. This prevents a later binding change from
+            // silently falling back through the legacy owner compatibility
+            // fields between capability verification and execution.
+            var capability = RequireMemberMediaCapability(configuration, request);
+            if (!string.IsNullOrWhiteSpace(request.ResolvedMemberJellyfinUserId)
+                && !CryptographicOperations.FixedTimeEquals(
+                    Encoding.ASCII.GetBytes(request.ResolvedMemberJellyfinUserId),
+                    Encoding.ASCII.GetBytes(capability.JellyfinUserId)))
+            {
+                throw new InvalidOperationException("memberMediaBindingChanged");
+            }
+            return capability.JellyfinUserId;
+        }
+
+        var jellyfinUserId = RequireBoundJellyfinUserId(configuration, request.ProfileId, error);
+        return jellyfinUserId;
+    }
 
     private static string RequireBoundJellyfinUserId(
         PluginConfiguration configuration,
@@ -2456,6 +2714,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
     [GeneratedRegex("^/Users/[0-9a-fA-F]{32}/Items(?:/[0-9a-fA-F]{32})?(?:/Resume)?$", RegexOptions.CultureInvariant)]
     private static partial Regex UserItemsRegex();
+
+    [GeneratedRegex("^/Users/(?<user>[0-9a-fA-F]{32})(?:/|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex MemberUserPathRegex();
 
     [GeneratedRegex("^/Shows/[0-9a-fA-F]{32}/(Seasons|Episodes)$", RegexOptions.CultureInvariant)]
     private static partial Regex ShowRouteRegex();

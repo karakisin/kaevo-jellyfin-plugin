@@ -534,11 +534,103 @@ internal static class KaevoProfileJellyfinBindingStore
         return true;
     }
 
+    /// <summary>
+    /// Resolves a member capability only from the durable binding map.  The
+    /// older single-owner compatibility fields are intentionally excluded: a
+    /// username-auth member must never inherit the connector owner's identity.
+    /// </summary>
+    internal static bool TryResolveMemberCapabilityBinding(
+        string? bindingsJson,
+        string? cloudProfileId,
+        string? bindingHandle,
+        string? bindingRevision,
+        out string jellyfinUserId)
+    {
+        jellyfinUserId = string.Empty;
+        if (!ValidProfileId(cloudProfileId)
+            || string.IsNullOrWhiteSpace(bindingHandle)
+            || string.IsNullOrWhiteSpace(bindingRevision)
+            || string.IsNullOrWhiteSpace(bindingsJson)
+            || !TryRead(bindingsJson, out var bindings)
+            || !bindings.TryGetValue(cloudProfileId!, out var mappedUserId)
+            || !TryNormalizeJellyfinUserId(mappedUserId, out var normalizedUserId))
+        {
+            return false;
+        }
+
+        var expectedHandle = MemberBindingHandle(cloudProfileId!, normalizedUserId);
+        var expectedRevision = MemberBindingRevision(cloudProfileId!, normalizedUserId);
+        if (!FixedEquals(bindingHandle, expectedHandle)
+            || !FixedEquals(bindingRevision, expectedRevision))
+        {
+            return false;
+        }
+
+        jellyfinUserId = normalizedUserId;
+        return true;
+    }
+
+    internal static string OpaqueHandle(string domain, string value)
+    {
+        if (string.IsNullOrWhiteSpace(domain) || string.IsNullOrWhiteSpace(value)
+            || domain.Any(char.IsWhiteSpace) || domain.Any(char.IsControl)
+            || value.Any(char.IsControl))
+        {
+            throw new InvalidOperationException("memberMediaCapabilityInvalid");
+        }
+        return "sha256:" + Base64Url(SHA256.HashData(Encoding.UTF8.GetBytes(
+            "kaevo-member-media-v1/" + domain + "\0" + value)));
+    }
+
+    internal static string MemberBindingRevision(string cloudProfileId, string jellyfinUserId)
+    {
+        if (!ValidProfileId(cloudProfileId)
+            || !TryNormalizeJellyfinUserId(jellyfinUserId, out var normalizedUserId))
+        {
+            throw new InvalidOperationException("memberMediaCapabilityInvalid");
+        }
+        return "sha256:" + Base64Url(SHA256.HashData(Encoding.UTF8.GetBytes(
+            "kaevo-member-media-v1/binding-revision\0" + cloudProfileId + "\0" + normalizedUserId)));
+    }
+
+    internal static string MemberBindingHandle(string cloudProfileId, string jellyfinUserId)
+    {
+        if (!ValidProfileId(cloudProfileId)
+            || !TryNormalizeJellyfinUserId(jellyfinUserId, out var normalizedUserId))
+        {
+            throw new InvalidOperationException("memberMediaCapabilityInvalid");
+        }
+        return "sha256:" + Base64Url(SHA256.HashData(Encoding.UTF8.GetBytes(
+            "kaevo-member-media-v1/binding\0" + cloudProfileId + "\0" + normalizedUserId)));
+    }
+
+    internal static bool ValidMemberCapabilityContext(KaevoMemberMediaCapabilityContext context) =>
+        context is not null
+        && ValidProfileId(context.ProfileId)
+        && !string.IsNullOrWhiteSpace(context.ConnectorId)
+        && context.ConnectorId.Length <= 256
+        && context.RequiredScopes is { Count: > 0 }
+        && ValidOpaqueHandle(context.PrincipalHandle)
+        && ValidOpaqueHandle(context.HouseholdHandle)
+        && ValidOpaqueHandle(context.DeviceInstallationHandle);
+
     private static bool ValidProfileId(string? value) =>
         !string.IsNullOrWhiteSpace(value)
         && value.Length <= 256
         && !value.Any(char.IsWhiteSpace)
         && !value.Any(char.IsControl);
+
+    private static bool ValidOpaqueHandle(string? value) =>
+        value is { Length: 50 }
+        && value.StartsWith("sha256:", StringComparison.Ordinal)
+        && value[7..].All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
+
+    private static bool FixedEquals(string actual, string expected) =>
+        actual.Length == expected.Length
+        && CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(actual), Encoding.ASCII.GetBytes(expected));
+
+    private static string Base64Url(byte[] value) => Convert.ToBase64String(value)
+        .TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static bool TryRead(string json, out Dictionary<string, string> bindings)
     {
