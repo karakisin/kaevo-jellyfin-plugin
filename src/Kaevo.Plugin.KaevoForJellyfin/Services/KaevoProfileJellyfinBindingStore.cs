@@ -12,6 +12,27 @@ internal enum KaevoProfileJellyfinBindingWriteResult
     JellyfinUserAlreadyBound
 }
 
+internal enum KaevoProfileJellyfinBindingOwnerLookupResult
+{
+    Found,
+    Missing,
+    InvalidRequest,
+    BindingStoreInvalid,
+    Ambiguous
+}
+
+internal enum KaevoProfileJellyfinBindingReassignmentResult
+{
+    Reassigned,
+    AlreadyBound,
+    InvalidRequest,
+    BindingStoreInvalid,
+    BindingCapacityReached,
+    OwnerMismatch,
+    OwnerAmbiguous,
+    TargetAlreadyBound
+}
+
 internal static class KaevoProfileJellyfinBindingStore
 {
     private const int MaximumBindings = 256;
@@ -160,6 +181,131 @@ internal static class KaevoProfileJellyfinBindingStore
         _ => "invalid_request"
     };
 
+    internal static KaevoProfileJellyfinBindingOwnerLookupResult FindExactOwner(
+        string? bindingsJson,
+        string? jellyfinUserId,
+        out string sourceProfileId)
+    {
+        sourceProfileId = string.Empty;
+        if (!TryNormalizeJellyfinUserId(jellyfinUserId, out var normalizedUserId))
+        {
+            return KaevoProfileJellyfinBindingOwnerLookupResult.InvalidRequest;
+        }
+
+        if (string.IsNullOrWhiteSpace(bindingsJson))
+        {
+            return KaevoProfileJellyfinBindingOwnerLookupResult.Missing;
+        }
+        if (!TryRead(bindingsJson, out var bindings))
+        {
+            return KaevoProfileJellyfinBindingOwnerLookupResult.BindingStoreInvalid;
+        }
+
+        var owners = bindings
+            .Where(entry => string.Equals(entry.Value, normalizedUserId, StringComparison.Ordinal))
+            .Select(entry => entry.Key)
+            .Take(2)
+            .ToArray();
+        if (owners.Length == 0)
+        {
+            return KaevoProfileJellyfinBindingOwnerLookupResult.Missing;
+        }
+        if (owners.Length != 1)
+        {
+            return KaevoProfileJellyfinBindingOwnerLookupResult.Ambiguous;
+        }
+
+        sourceProfileId = owners[0];
+        return KaevoProfileJellyfinBindingOwnerLookupResult.Found;
+    }
+
+    internal static KaevoProfileJellyfinBindingReassignmentResult TryReassignExactOwner(
+        PluginConfiguration configuration,
+        string? expectedSourceProfileId,
+        string? targetProfileId,
+        string? jellyfinUserId)
+    {
+        var result = TryReassignExactOwner(
+            configuration.ProfileJellyfinBindingsJson,
+            expectedSourceProfileId,
+            targetProfileId,
+            jellyfinUserId,
+            out var updatedBindingsJson);
+        if (result == KaevoProfileJellyfinBindingReassignmentResult.Reassigned)
+        {
+            configuration.ProfileJellyfinBindingsJson = updatedBindingsJson;
+        }
+        return result;
+    }
+
+    internal static KaevoProfileJellyfinBindingReassignmentResult TryReassignExactOwner(
+        string? bindingsJson,
+        string? expectedSourceProfileId,
+        string? targetProfileId,
+        string? jellyfinUserId,
+        out string updatedBindingsJson)
+    {
+        updatedBindingsJson = bindingsJson ?? string.Empty;
+        if (!ValidProfileId(targetProfileId)
+            || !TryNormalizeJellyfinUserId(jellyfinUserId, out var normalizedUserId)
+            || (!string.IsNullOrWhiteSpace(expectedSourceProfileId)
+                && !ValidProfileId(expectedSourceProfileId)))
+        {
+            return KaevoProfileJellyfinBindingReassignmentResult.InvalidRequest;
+        }
+
+        Dictionary<string, string> bindings;
+        if (string.IsNullOrWhiteSpace(bindingsJson))
+        {
+            bindings = new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+        else if (!TryRead(bindingsJson, out bindings))
+        {
+            return KaevoProfileJellyfinBindingReassignmentResult.BindingStoreInvalid;
+        }
+
+        var owners = bindings
+            .Where(entry => string.Equals(entry.Value, normalizedUserId, StringComparison.Ordinal))
+            .Select(entry => entry.Key)
+            .Take(2)
+            .ToArray();
+        if (owners.Length > 1)
+        {
+            return KaevoProfileJellyfinBindingReassignmentResult.OwnerAmbiguous;
+        }
+
+        var actualSourceProfileId = owners.SingleOrDefault();
+        var normalizedExpectedSourceProfileId = string.IsNullOrWhiteSpace(expectedSourceProfileId)
+            ? null
+            : expectedSourceProfileId;
+        if (!string.Equals(actualSourceProfileId, normalizedExpectedSourceProfileId, StringComparison.Ordinal))
+        {
+            return KaevoProfileJellyfinBindingReassignmentResult.OwnerMismatch;
+        }
+
+        if (bindings.TryGetValue(targetProfileId!, out var targetUserId))
+        {
+            if (!string.Equals(targetUserId, normalizedUserId, StringComparison.Ordinal))
+            {
+                return KaevoProfileJellyfinBindingReassignmentResult.TargetAlreadyBound;
+            }
+            return KaevoProfileJellyfinBindingReassignmentResult.AlreadyBound;
+        }
+
+        if (actualSourceProfileId is null && bindings.Count >= MaximumBindings)
+        {
+            return KaevoProfileJellyfinBindingReassignmentResult.BindingCapacityReached;
+        }
+
+        if (actualSourceProfileId is not null)
+        {
+            bindings.Remove(actualSourceProfileId);
+        }
+        bindings[targetProfileId!] = normalizedUserId;
+        updatedBindingsJson = Serialize(bindings);
+        return KaevoProfileJellyfinBindingReassignmentResult.Reassigned;
+    }
+
     internal static bool TryUnbind(
         PluginConfiguration configuration,
         string? cloudProfileId,
@@ -256,4 +402,9 @@ internal static class KaevoProfileJellyfinBindingStore
             return false;
         }
     }
+
+    private static string Serialize(Dictionary<string, string> bindings) =>
+        JsonSerializer.Serialize(
+            bindings.OrderBy(entry => entry.Key, StringComparer.Ordinal)
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal));
 }

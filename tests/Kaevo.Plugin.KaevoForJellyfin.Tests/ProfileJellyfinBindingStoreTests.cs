@@ -168,4 +168,113 @@ public sealed class ProfileJellyfinBindingStoreTests
             out var stillEmpty));
         Assert.Equal(emptyBindings, stillEmpty);
     }
+
+    [Fact]
+    public void ExactReassignmentMovesOnlyTheExpectedStaleOwner()
+    {
+        Assert.True(KaevoProfileJellyfinBindingStore.TryBind(
+            string.Empty,
+            "owner-profile",
+            OwnerUserId,
+            out var bindingsJson));
+        Assert.True(KaevoProfileJellyfinBindingStore.TryBind(
+            bindingsJson,
+            "stale-profile",
+            MemberUserId,
+            out bindingsJson));
+
+        Assert.Equal(
+            KaevoProfileJellyfinBindingOwnerLookupResult.Found,
+            KaevoProfileJellyfinBindingStore.FindExactOwner(
+                bindingsJson,
+                MemberUserId,
+                out var sourceProfileId));
+        Assert.Equal("stale-profile", sourceProfileId);
+
+        Assert.Equal(
+            KaevoProfileJellyfinBindingReassignmentResult.Reassigned,
+            KaevoProfileJellyfinBindingStore.TryReassignExactOwner(
+                bindingsJson,
+                "stale-profile",
+                "member-profile",
+                MemberUserId,
+                out var reassigned));
+        Assert.True(KaevoProfileJellyfinBindingStore.TryResolve(
+            reassigned,
+            null,
+            null,
+            "member-profile",
+            out var member));
+        Assert.Equal(MemberUserId, member);
+        Assert.False(KaevoProfileJellyfinBindingStore.TryResolve(
+            reassigned,
+            null,
+            null,
+            "stale-profile",
+            out _));
+        Assert.True(KaevoProfileJellyfinBindingStore.TryResolve(
+            reassigned,
+            null,
+            null,
+            "owner-profile",
+            out var owner));
+        Assert.Equal(OwnerUserId, owner);
+    }
+
+    [Fact]
+    public void ReassignmentFailsClosedWhenOwnerChangedOrTargetIsOccupied()
+    {
+        Assert.True(KaevoProfileJellyfinBindingStore.TryBind(
+            string.Empty,
+            "actual-owner",
+            MemberUserId,
+            out var bindingsJson));
+        Assert.True(KaevoProfileJellyfinBindingStore.TryBind(
+            bindingsJson,
+            "target-profile",
+            OwnerUserId,
+            out bindingsJson));
+
+        Assert.Equal(
+            KaevoProfileJellyfinBindingReassignmentResult.OwnerMismatch,
+            KaevoProfileJellyfinBindingStore.TryReassignExactOwner(
+                bindingsJson,
+                "stale-owner",
+                "new-target",
+                MemberUserId,
+                out var ownerMismatch));
+        Assert.Equal(bindingsJson, ownerMismatch);
+
+        Assert.Equal(
+            KaevoProfileJellyfinBindingReassignmentResult.TargetAlreadyBound,
+            KaevoProfileJellyfinBindingStore.TryReassignExactOwner(
+                bindingsJson,
+                "actual-owner",
+                "target-profile",
+                MemberUserId,
+                out var targetOccupied));
+        Assert.Equal(bindingsJson, targetOccupied);
+    }
+
+    [Fact]
+    public void ReassignmentWithoutExpectedOwnerRequiresExactAbsence()
+    {
+        Assert.Equal(
+            KaevoProfileJellyfinBindingReassignmentResult.Reassigned,
+            KaevoProfileJellyfinBindingStore.TryReassignExactOwner(
+                string.Empty,
+                null,
+                "member-profile",
+                MemberUserId,
+                out var created));
+        Assert.Equal(
+            KaevoProfileJellyfinBindingReassignmentResult.OwnerMismatch,
+            KaevoProfileJellyfinBindingStore.TryReassignExactOwner(
+                created,
+                null,
+                "other-profile",
+                MemberUserId,
+                out var unchanged));
+        Assert.Equal(created, unchanged);
+    }
 }

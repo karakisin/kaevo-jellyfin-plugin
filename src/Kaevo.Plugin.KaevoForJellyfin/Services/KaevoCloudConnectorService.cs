@@ -15,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.75";
+    private const string PluginVersion = "0.2.76";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -501,6 +501,101 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         var operation = request.Operation ?? request.Path.Replace("/commands/", string.Empty, StringComparison.Ordinal);
         var parameters = request.Parameters ?? new Dictionary<string, JsonElement>();
+        if (operation == "jellyfin.inspect_profile_binding_owner")
+        {
+            var jellyfinUserId = RequireString(
+                parameters,
+                "jellyfin_user_id",
+                "profileJellyfinBindingUserInvalid");
+            var lookup = KaevoProfileJellyfinBindingStore.FindExactOwner(
+                configuration.ProfileJellyfinBindingsJson,
+                jellyfinUserId,
+                out var sourceProfileId);
+            return lookup switch
+            {
+                KaevoProfileJellyfinBindingOwnerLookupResult.Found => CompleteCommand(
+                    request,
+                    operation,
+                    new
+                    {
+                        provider = "jellyfin",
+                        owner_state = "found",
+                        source_profile_id = sourceProfileId
+                    }),
+                KaevoProfileJellyfinBindingOwnerLookupResult.Missing => CompleteCommand(
+                    request,
+                    operation,
+                    new
+                    {
+                        provider = "jellyfin",
+                        owner_state = "missing",
+                        source_profile_id = (string?)null
+                    }),
+                KaevoProfileJellyfinBindingOwnerLookupResult.BindingStoreInvalid =>
+                    throw new InvalidOperationException("binding_store_invalid"),
+                KaevoProfileJellyfinBindingOwnerLookupResult.Ambiguous =>
+                    throw new InvalidOperationException("profileJellyfinBindingOwnerAmbiguous"),
+                _ => throw new InvalidOperationException("profileJellyfinBindingUserInvalid")
+            };
+        }
+
+        if (operation == "jellyfin.reassign_stale_profile_binding")
+        {
+            var jellyfinUserId = RequireString(
+                parameters,
+                "jellyfin_user_id",
+                "profileJellyfinBindingUserInvalid");
+            var targetProfileId = RequireString(
+                parameters,
+                "target_profile_id",
+                "profileJellyfinBindingTargetInvalid");
+            var expectedSourceProfileId = parameters.TryGetValue("expected_source_profile_id", out var sourceElement)
+                && sourceElement.ValueKind == JsonValueKind.String
+                    ? sourceElement.GetString()
+                    : null;
+            if (!string.Equals(targetProfileId, request.ProfileId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("profileJellyfinBindingTargetMismatch");
+            }
+
+            KaevoProfileJellyfinBindingReassignmentResult reassignment;
+            lock (ProfileBindingSync)
+            {
+                reassignment = KaevoProfileJellyfinBindingStore.TryReassignExactOwner(
+                    configuration,
+                    expectedSourceProfileId,
+                    targetProfileId,
+                    jellyfinUserId);
+                if (reassignment == KaevoProfileJellyfinBindingReassignmentResult.Reassigned)
+                {
+                    KaevoPlugin.Instance?.SaveConfiguration();
+                }
+            }
+
+            return reassignment switch
+            {
+                KaevoProfileJellyfinBindingReassignmentResult.Reassigned => CompleteCommand(
+                    request,
+                    operation,
+                    new { provider = "jellyfin", state = "reassigned" }),
+                KaevoProfileJellyfinBindingReassignmentResult.AlreadyBound => CompleteCommand(
+                    request,
+                    operation,
+                    new { provider = "jellyfin", state = "already_bound" }),
+                KaevoProfileJellyfinBindingReassignmentResult.BindingStoreInvalid =>
+                    throw new InvalidOperationException("binding_store_invalid"),
+                KaevoProfileJellyfinBindingReassignmentResult.OwnerMismatch =>
+                    throw new InvalidOperationException("profileJellyfinBindingOwnerChanged"),
+                KaevoProfileJellyfinBindingReassignmentResult.OwnerAmbiguous =>
+                    throw new InvalidOperationException("profileJellyfinBindingOwnerAmbiguous"),
+                KaevoProfileJellyfinBindingReassignmentResult.TargetAlreadyBound =>
+                    throw new InvalidOperationException("profileJellyfinBindingTargetAlreadyBound"),
+                KaevoProfileJellyfinBindingReassignmentResult.BindingCapacityReached =>
+                    throw new InvalidOperationException("binding_capacity_reached"),
+                _ => throw new InvalidOperationException("profileJellyfinBindingReassignmentInvalid")
+            };
+        }
+
         if (operation == "jellyfin.recover_profile_binding")
         {
             var jellyfinUserId = RecoverExactProfileJellyfinUserId(configuration, request);

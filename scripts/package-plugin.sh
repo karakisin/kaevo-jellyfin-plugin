@@ -34,7 +34,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Lets Kaevo Cloud recover one exact profile-to-Jellyfin binding from the paired plugin without display-name matching, pairing again, or sharing owner credentials.",
+  "changelog": "Allows an Owner to repair one exact stale profile-to-Jellyfin link only after Kaevo Cloud verifies the previous same-household profile is inactive or deleted.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -42,7 +42,7 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.75.0"
+  "version": "0.2.76.0"
 }
 EOF
 
