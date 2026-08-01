@@ -14,7 +14,8 @@ public sealed record KaevoStatusResponse(
     DateTimeOffset? LastPlaybackRelayConnectedUtc,
     int PlaybackRelayChannels,
     string PlaybackRelayProtocol,
-    bool OptimizerExecution);
+    bool OptimizerExecution,
+    string ProfileBindingState);
 
 public sealed record KaevoCloudPairingStatus(
     string State,
@@ -43,6 +44,22 @@ public sealed record KaevoLifecyclePairRequest(
 public sealed record KaevoLifecycleOwnerRequest(string OwnerAccessToken);
 
 public sealed record KaevoLifecycleResponse(string State, int CredentialVersion);
+
+/// <summary>
+/// An elevated local Jellyfin session can replace only the connector's own
+/// Jellyfin credential. The token never leaves the home server.
+/// </summary>
+public sealed record KaevoJellyfinCredentialRefreshRequest(
+    string JellyfinUserId,
+    string JellyfinAccessToken);
+
+public sealed record KaevoJellyfinCredentialRefreshResponse(string State);
+
+public sealed record KaevoProfileJellyfinBindingRequest(
+    string CloudProfileId,
+    string JellyfinUserId);
+
+public sealed record KaevoProfileJellyfinBindingResponse(string State);
 
 public sealed record KaevoLocalPairingStartResponse(
     string Code,
@@ -80,6 +97,12 @@ public sealed record KaevoPairingV3StatusResponse(
     string Protocol,
     bool RequiresReauthentication);
 
+/// <summary>
+/// A minimal acknowledgement for reactivating an already-paired V3 connector.
+/// It deliberately does not expose connector, account, or pairing material.
+/// </summary>
+public sealed record KaevoPairingV3ReconnectResponse(string State);
+
 public sealed record KaevoPairingV3ChallengeRequest(
     string Protocol,
     string TicketId,
@@ -112,6 +135,14 @@ public sealed record KaevoProviderProvisionRequest(
 public sealed record KaevoProviderProvisionResponse(
     string State,
     string Provider);
+
+public sealed record KaevoSeerrJellyfinUserProvisionRequest(
+    string JellyfinUserId,
+    int Permissions);
+
+public sealed record KaevoSeerrJellyfinUserProvisionResponse(
+    string State,
+    int? SeerrUserId = null);
 
 public sealed record KaevoProviderStatusResponse(
     string Provider,

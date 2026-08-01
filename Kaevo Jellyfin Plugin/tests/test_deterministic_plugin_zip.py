@@ -22,15 +22,23 @@ class DeterministicPluginZipTests(unittest.TestCase):
             first.mkdir()
             second.mkdir()
             metadata = b'{"timestamp":"2026-07-18T21:51:05Z"}\n'
-            assembly = b"deterministic-assembly"
+            assemblies = {
+                "Kaevo.Plugin.KaevoForJellyfin.dll": b"deterministic-assembly",
+                "QRCoder.dll": b"deterministic-qr-dependency",
+                "BouncyCastle.Cryptography.dll": b"deterministic-crypto-dependency",
+            }
             (first / "meta.json").write_bytes(metadata)
-            (first / "Kaevo.Plugin.KaevoForJellyfin.dll").write_bytes(assembly)
-            (second / "Kaevo.Plugin.KaevoForJellyfin.dll").write_bytes(assembly)
+            for name, contents in assemblies.items():
+                (first / name).write_bytes(contents)
+            for name, contents in reversed(tuple(assemblies.items())):
+                (second / name).write_bytes(contents)
             (second / "meta.json").write_bytes(metadata)
             os.chmod(first / "meta.json", 0o600)
-            os.chmod(first / "Kaevo.Plugin.KaevoForJellyfin.dll", 0o700)
+            for name in assemblies:
+                os.chmod(first / name, 0o700)
             os.chmod(second / "meta.json", 0o644)
-            os.chmod(second / "Kaevo.Plugin.KaevoForJellyfin.dll", 0o644)
+            for name in assemblies:
+                os.chmod(second / name, 0o644)
             first_zip, second_zip = root / "first.zip", root / "second.zip"
             MODULE.create_archive(first, first_zip)
             MODULE.create_archive(second, second_zip)

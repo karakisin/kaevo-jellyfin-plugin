@@ -19,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
-    private const string PluginVersion = "0.2.66";
+    private const string PluginVersion = "0.2.78";
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey)>(StringComparer.OrdinalIgnoreCase)
         {
@@ -45,6 +45,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     private readonly KaevoLocalPairingService _localPairing;
     private readonly KaevoPairingV3Service _pairingV3;
     private readonly KaevoProviderPolicyAuditStore _providerAudit;
+    private readonly KaevoSeerrIdentityProvisioningService _seerrIdentityProvisioning;
 
     public KaevoController(
         ILibraryManager libraryManager,
@@ -57,7 +58,8 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         KaevoConnectorLifecycleStore lifecycleStore,
         KaevoLocalPairingService localPairing,
         KaevoPairingV3Service pairingV3,
-        KaevoProviderPolicyAuditStore providerAudit)
+        KaevoProviderPolicyAuditStore providerAudit,
+        KaevoSeerrIdentityProvisioningService seerrIdentityProvisioning)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
@@ -70,6 +72,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         _localPairing = localPairing;
         _pairingV3 = pairingV3;
         _providerAudit = providerAudit;
+        _seerrIdentityProvisioning = seerrIdentityProvisioning;
     }
 
     public void OnActionExecuting(ActionExecutingContext context)
@@ -123,7 +126,8 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             relay.LastConnectedUtc,
             relay.ConnectedChannels,
             "hls-bounded-buffer-v3",
-            configuration.OptimizerExecutionEnabled));
+            configuration.OptimizerExecutionEnabled,
+            KaevoProfileJellyfinBindingStore.ProfileBindingState(configuration)));
     }
 
     [HttpGet("cloud/status")]
@@ -223,6 +227,10 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             var completion = new KaevoPairingV3Completion(request.Protocol, request.TicketId, request.PairingAttemptId, request.ChallengeId,
                 request.ChallengeNonce, request.ChallengeResponseSignature, request.Authorization, request.JellyfinUserId, request.CorrelationId);
             var result = await _pairingV3.CompleteAsync(cloud, completion, cancellationToken).ConfigureAwait(false);
+            if (result.Code == "pairing_redeemed" && !string.IsNullOrWhiteSpace(result.ConnectorId))
+            {
+                ActivateExistingPairingV3Connector(result.ConnectorId);
+            }
             return StatusCode(StatusForV3(result.Code), new { protocol = KaevoPairingV3Crypto.Protocol, code = result.Code, retryable = result.Retryable, connectorId = result.ConnectorId, idempotent = result.Idempotent, correlationId });
         }
         catch (KaevoPairingV3Exception exception) { return V3Error(exception, StatusForV3(exception.Code)); }
@@ -278,6 +286,52 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         }
         catch (KaevoPairingV3Exception exception) { return V3Error(exception, StatusForV3(exception.Code)); }
         catch (Exception) { return V3Error(new KaevoPairingV3Exception("unexpected_internal_error"), 500); }
+    }
+
+    /// <summary>
+    /// Restarts the Cloud connector for a completed V3 pairing without issuing
+    /// a QR code, changing any binding, or creating another connector.
+    /// </summary>
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("v3/pairing/reconnect")]
+    public async Task<ActionResult<KaevoPairingV3ReconnectResponse>> ReconnectPairingV3(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var connectorId = await _pairingV3.GetActiveConnectorIdAsync(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(connectorId))
+            {
+                return Conflict(new KaevoPairingV3ReconnectResponse("not_paired"));
+            }
+            if (!ActivateExistingPairingV3Connector(connectorId))
+            {
+                return StatusCode(503, new KaevoPairingV3ReconnectResponse("unavailable"));
+            }
+            return Ok(new KaevoPairingV3ReconnectResponse("connecting"));
+        }
+        catch
+        {
+            return StatusCode(503, new KaevoPairingV3ReconnectResponse("unavailable"));
+        }
+    }
+
+    private bool ActivateExistingPairingV3Connector(string connectorId)
+    {
+        var configuration = KaevoPlugin.Instance?.Configuration;
+        if (configuration is null
+            || !configuration.PairingV3Enabled
+            || !TryCloudUri(configuration.CloudBaseUrl, out _)
+            || string.IsNullOrWhiteSpace(connectorId))
+        {
+            return false;
+        }
+
+        configuration.ConnectorId = connectorId;
+        configuration.CloudConnectorEnabled = true;
+        KaevoPlugin.Instance?.SaveConfiguration();
+        _cloudState.Set("connecting");
+        _cloudState.SignalConfigurationChanged();
+        return true;
     }
 
     private ActionResult V3Error(KaevoPairingV3Exception exception, int status) => StatusCode(status, new { protocol = KaevoPairingV3Crypto.Protocol, code = exception.Code, retryable = exception.Retryable });
@@ -433,6 +487,128 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     private static bool ValidOwnerToken(string value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 8192 && !value.Any(char.IsWhiteSpace);
     private static bool TryCloudUri(string value, out Uri uri) => KaevoCloudEndpointPolicy.TryNormalize(value, out uri);
 
+    /// <summary>
+    /// Refreshes the local connector credential after Jellyfin revokes an
+    /// access token. This is deliberately local, elevation-protected, and
+    /// does not send the Jellyfin credential to Kaevo Cloud.
+    /// </summary>
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("cloud/jellyfin-credential/refresh")]
+    public async Task<ActionResult<KaevoJellyfinCredentialRefreshResponse>> RefreshJellyfinCredential(
+        [FromBody] KaevoJellyfinCredentialRefreshRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.JellyfinUserId)
+            || request.JellyfinUserId.Length > 256
+            || request.JellyfinUserId.Any(char.IsWhiteSpace)
+            || string.IsNullOrWhiteSpace(request.JellyfinAccessToken)
+            || request.JellyfinAccessToken.Length > 8192)
+        {
+            return BadRequest(new KaevoJellyfinCredentialRefreshResponse("invalid"));
+        }
+
+        var configuration = KaevoPlugin.Instance?.Configuration;
+        if (configuration is null)
+        {
+            return StatusCode(503, new KaevoJellyfinCredentialRefreshResponse("unavailable"));
+        }
+
+        var existing = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (existing is null)
+        {
+            return Conflict(new KaevoJellyfinCredentialRefreshResponse("connector_not_paired"));
+        }
+
+        await _secretStore.WriteAsync(existing with
+        {
+            JellyfinApiKey = request.JellyfinAccessToken
+        }, cancellationToken).ConfigureAwait(false);
+
+        configuration.JellyfinUserId = request.JellyfinUserId;
+        KaevoPlugin.Instance?.SaveConfiguration();
+        _cloudState.Set("connecting");
+        _cloudState.SignalConfigurationChanged();
+        return Ok(new KaevoJellyfinCredentialRefreshResponse("connecting"));
+    }
+
+    /// <summary>
+    /// Binds one authoritative Cloud profile to one existing Jellyfin user.
+    /// This is local-administrator only: Cloud relay traffic cannot create or
+    /// redirect a household member's Jellyfin identity.
+    /// </summary>
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPut("cloud/profile-jellyfin-binding")]
+    public ActionResult<KaevoProfileJellyfinBindingResponse> BindProfileJellyfinIdentity(
+        [FromBody] KaevoProfileJellyfinBindingRequest request)
+    {
+        if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                request.JellyfinUserId,
+                out var normalizedUserId))
+        {
+            return BadRequest(new KaevoProfileJellyfinBindingResponse("invalid"));
+        }
+
+        if (!KaevoJellyfinUserLookup.Exists(
+                _userManager,
+                Guid.ParseExact(normalizedUserId, "N")))
+        {
+            return NotFound(new KaevoProfileJellyfinBindingResponse("jellyfin_user_not_found"));
+        }
+
+        var configuration = KaevoPlugin.Instance?.Configuration;
+        if (configuration is null)
+        {
+            return StatusCode(503, new KaevoProfileJellyfinBindingResponse("unavailable"));
+        }
+
+        var bindingResult = KaevoProfileJellyfinBindingStore.TryBindWithResult(
+                configuration,
+                request.CloudProfileId,
+                normalizedUserId);
+        if (bindingResult != KaevoProfileJellyfinBindingWriteResult.Bound)
+        {
+            return BadRequest(new KaevoProfileJellyfinBindingResponse(
+                KaevoProfileJellyfinBindingStore.ResponseState(bindingResult)));
+        }
+
+        KaevoPlugin.Instance?.SaveConfiguration();
+        return Ok(new KaevoProfileJellyfinBindingResponse("bound"));
+    }
+
+    /// <summary>
+    /// Removes one exact Cloud-profile-to-Jellyfin-user binding. The caller
+    /// must prove both immutable identifiers; names are never accepted.
+    /// </summary>
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpDelete("cloud/profile-jellyfin-binding")]
+    public ActionResult<KaevoProfileJellyfinBindingResponse> UnbindProfileJellyfinIdentity(
+        [FromBody] KaevoProfileJellyfinBindingRequest request)
+    {
+        if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                request.JellyfinUserId,
+                out var normalizedUserId))
+        {
+            return BadRequest(new KaevoProfileJellyfinBindingResponse("invalid"));
+        }
+
+        var configuration = KaevoPlugin.Instance?.Configuration;
+        if (configuration is null)
+        {
+            return StatusCode(503, new KaevoProfileJellyfinBindingResponse("unavailable"));
+        }
+
+        if (!KaevoProfileJellyfinBindingStore.TryUnbind(
+                configuration,
+                request.CloudProfileId,
+                normalizedUserId))
+        {
+            return Conflict(new KaevoProfileJellyfinBindingResponse("binding_mismatch"));
+        }
+
+        KaevoPlugin.Instance?.SaveConfiguration();
+        return Ok(new KaevoProfileJellyfinBindingResponse("unbound"));
+    }
+
     [Authorize(Policy = "RequiresElevation")]
     [HttpGet("providers/status")]
     public async Task<ActionResult<IReadOnlyList<KaevoProviderStatusResponse>>> GetProviderStatus(
@@ -520,6 +696,41 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             "approved",
             cancellationToken).ConfigureAwait(false);
         return Ok(new KaevoProviderProvisionResponse(request.Enabled ? "ready" : "disabled", provider));
+    }
+
+    /// <summary>
+    /// Imports one exact Jellyfin identity into Seerr and grants only the
+    /// requested media-request bits. Seerr administrator credentials remain
+    /// inside the paired plugin and are never returned to the app.
+    /// </summary>
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("providers/seerr/jellyfin-user")]
+    public async Task<ActionResult<KaevoSeerrJellyfinUserProvisionResponse>> ProvisionSeerrJellyfinUser(
+        [FromBody] KaevoSeerrJellyfinUserProvisionRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                request.JellyfinUserId,
+                out var normalizedUserId)
+            || !KaevoSeerrIdentityProvisioningService.IsSafeRequestPermissionMask(request.Permissions))
+        {
+            return BadRequest(new KaevoSeerrJellyfinUserProvisionResponse("invalid"));
+        }
+
+        var secrets = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (secrets?.GetProvider("seerr") is not { Enabled: true })
+        {
+            return Conflict(new KaevoSeerrJellyfinUserProvisionResponse("seerr_not_configured"));
+        }
+
+        var response = await _seerrIdentityProvisioning.EnsureJellyfinUserAccessAsync(
+            secrets,
+            normalizedUserId,
+            request.Permissions,
+            cancellationToken).ConfigureAwait(false);
+        return response.State == "ready"
+            ? Ok(response)
+            : StatusCode(502, response);
     }
 
     [HttpGet("media-scan")]

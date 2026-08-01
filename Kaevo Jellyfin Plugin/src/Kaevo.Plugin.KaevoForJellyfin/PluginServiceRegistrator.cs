@@ -17,6 +17,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton(provider => KaevoPairingV3Service.ForPlugin(provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<KaevoPairingV3Service>>()));
         serviceCollection.AddSingleton<KaevoProviderDestinationPolicy>();
         serviceCollection.AddSingleton<KaevoProviderTransport>();
+        serviceCollection.AddSingleton<KaevoSeerrIdentityProvisioningService>();
         serviceCollection.AddSingleton<KaevoProviderPolicyAuditStore>();
         serviceCollection.AddSingleton<KaevoOptimizerCoordinator>();
         serviceCollection.AddHostedService<KaevoCloudConnectorService>();

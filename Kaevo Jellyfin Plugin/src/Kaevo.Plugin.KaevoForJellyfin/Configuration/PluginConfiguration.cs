@@ -22,6 +22,10 @@ public sealed class PluginConfiguration : BasePluginConfiguration
 
     public string JellyfinUserId { get; set; } = string.Empty;
 
+    // Exact Cloud profile -> Jellyfin user bindings. New household members must
+    // never inherit the connector owner's Jellyfin identity by fallback.
+    public string ProfileJellyfinBindingsJson { get; set; } = string.Empty;
+
     public bool RemoteMetadataEnabled { get; set; } = true;
 
     public bool RemoteArtworkEnabled { get; set; } = true;
@@ -53,4 +57,8 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     // The issuer is an explicit deployment binding, not a user-supplied
     // routing value. Empty means V3 remains fail-closed.
     public string PairingV3CloudAuthorizationIssuer { get; set; } = string.Empty;
+
+    // Opaque correlations for explicit Owner-authorized claims. The canonical
+    // profile-to-user map remains the only binding authority.
+    public string ProfileJellyfinBindingClaimOperationsJson { get; set; } = string.Empty;
 }

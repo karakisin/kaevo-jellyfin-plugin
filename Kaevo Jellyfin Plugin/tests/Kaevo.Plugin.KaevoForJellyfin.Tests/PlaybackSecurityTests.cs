@@ -32,6 +32,28 @@ public sealed class PlaybackSecurityTests
     }
 
     [Fact]
+    public void V3GrantUsesCloudPublicKeyAndNeverRequiresLegacyConnectorSecret()
+    {
+        KaevoPlaybackSecurity.ResetActiveGrantsForTests();
+        var seed = Enumerable.Repeat((byte)7, 32).ToArray();
+        var keyId = "v3-test-1";
+        var keys = JsonSerializer.Serialize(new Dictionary<string, string>
+        {
+            [keyId] = KaevoPairingV3Crypto.Base64Url(KaevoPairingV3Crypto.PublicKeyFromSeed(seed))
+        });
+
+        var grant = KaevoPlaybackSecurity.VerifyGrant(
+            V3Token(seed, keyId),
+            string.Empty,
+            ConnectorId,
+            pairingV3Active: true,
+            pairingV3VerificationKeysJson: keys,
+            pairingV3Issuer: "kaevo-cloud-dev");
+
+        Assert.Equal(ItemId, grant.ItemId);
+    }
+
+    [Fact]
     public void DirectPlayAllowsOnlyStreamAndBindsQuery()
     {
         KaevoPlaybackSecurity.ResetActiveGrantsForTests();
@@ -287,6 +309,43 @@ public sealed class PlaybackSecurityTests
         payload["home_sig"] = signature;
         var encoded = Base64Url(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload)));
         return encoded + ".outer-signature-not-validated-by-home";
+    }
+
+    private static string V3Token(byte[] seed, string keyId)
+    {
+        var issuedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var payload = new SortedDictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["aud"] = "kaevo-home-connectors-playback-v3",
+            ["connector_id"] = ConnectorId,
+            ["device_id"] = "ios-device-1",
+            ["exp"] = issuedAt + 120,
+            ["grant_id"] = "v3-grant-1",
+            ["iat"] = issuedAt,
+            ["iss"] = "kaevo-cloud-dev",
+            ["item_id"] = ItemId,
+            ["max_bitrate"] = 40_000_000,
+            ["max_concurrent"] = 1,
+            ["media_source_id"] = "source-1",
+            ["mode"] = "transcode",
+            ["nbf"] = issuedAt - 5,
+            ["nonce"] = "nonce-abcdefghijklmnopqrstuvwx",
+            ["playback_session_id"] = "session-1",
+            ["profile_id"] = "profile-1",
+            ["protocol"] = KaevoPairingV3Crypto.Protocol,
+            ["v"] = 1
+        };
+        var header = new SortedDictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["alg"] = "EdDSA",
+            ["kid"] = keyId,
+            ["typ"] = "kaevo-playback-grant+jwt"
+        };
+        var encodedHeader = Base64Url(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(header)));
+        var encodedPayload = Base64Url(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload)));
+        var homeSignature = KaevoPairingV3Crypto.Sign(seed, Encoding.ASCII.GetBytes(encodedHeader + "." + encodedPayload));
+        payload["home_sig"] = encodedHeader + "." + encodedPayload + "." + homeSignature;
+        return Base64Url(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload))) + ".outer-signature-not-validated-by-home";
     }
 
     private static string Base64Url(byte[] value)
