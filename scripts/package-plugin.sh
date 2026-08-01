@@ -31,19 +31,20 @@ cp "$BUILD_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/"
 cp "$BUILD_DIR/QRCoder.dll" "$PLUGIN_DIR/"
 cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 
-printf '%s\n' \
-    '{' \
-    '  "category": "General",' \
-    '  "changelog": "Restores an exact server-authorized Cloud profile to its Jellyfin identity on joined devices without pairing again or sharing owner credentials.",' \
-    '  "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",' \
-    '  "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",' \
-    '  "name": "Kaevo",' \
-    '  "overview": "Secure Kaevo Cloud access for Jellyfin",' \
-    '  "owner": "Kaevo",' \
-    '  "targetAbi": "10.11.0.0",' \
-    "  \"timestamp\": \"$TIMESTAMP\"," \
-    '  "version": "0.2.74.0"' \
-    '}' > "$PLUGIN_DIR/meta.json"
+cat > "$PLUGIN_DIR/meta.json" <<EOF
+{
+  "category": "General",
+  "changelog": "Lets Kaevo Cloud recover one exact profile-to-Jellyfin binding from the paired plugin without display-name matching, pairing again, or sharing owner credentials.",
+  "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
+  "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
+  "name": "Kaevo",
+  "overview": "Secure Kaevo Cloud access for Jellyfin",
+  "owner": "Kaevo",
+  "targetAbi": "10.11.0.0",
+  "timestamp": "$TIMESTAMP",
+  "version": "0.2.75.0"
+}
+EOF
 
 NORMALIZED_TIMESTAMP="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$TIMESTAMP" '+%Y%m%d%H%M.%S')"
 touch -t "$NORMALIZED_TIMESTAMP" "$PLUGIN_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/QRCoder.dll" "$PLUGIN_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/meta.json"

@@ -7,6 +7,58 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 public sealed class RelayRequestContextTests
 {
     [Fact]
+    public void RecoveryCommandReturnsOnlyExactProfileBinding()
+    {
+        const string profileId = "profile-member-1";
+        const string userId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var request = new CloudRequest(
+            "request-1", "COMMAND", "home_server", "/commands/jellyfin.recover_profile_binding",
+            null, "jellyfin.recover_profile_binding", null, profileId);
+
+        var recovered = KaevoCloudConnectorService.RecoverExactProfileJellyfinUserId(
+            "{\"profile-member-1\":\"" + userId + "\"}",
+            null,
+            null,
+            request);
+
+        Assert.Equal(userId, recovered);
+    }
+
+    [Fact]
+    public void RecoveryCommandNeverFallsBackToOwnerForMember()
+    {
+        var request = new CloudRequest(
+            "request-1", "COMMAND", "home_server", "/commands/jellyfin.recover_profile_binding",
+            null, "jellyfin.recover_profile_binding", null, "profile-member-1");
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            KaevoCloudConnectorService.RecoverExactProfileJellyfinUserId(
+                string.Empty,
+                "profile-owner-1",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                request));
+
+        Assert.Equal("profileJellyfinBindingMissing", error.Message);
+    }
+
+    [Fact]
+    public void RecoveryCommandFailsClosedForCorruptAuthoritativeMap()
+    {
+        var request = new CloudRequest(
+            "request-1", "COMMAND", "home_server", "/commands/jellyfin.recover_profile_binding",
+            null, "jellyfin.recover_profile_binding", null, "profile-member-1");
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            KaevoCloudConnectorService.RecoverExactProfileJellyfinUserId(
+                "not-json",
+                "profile-member-1",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                request));
+
+        Assert.Equal("profileJellyfinBindingMissing", error.Message);
+    }
+
+    [Fact]
     public void CloudRequestDeserializesAuthoritativeProfileIdentity()
     {
         const string profileId = "profile-member-1";

@@ -15,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.74";
+    private const string PluginVersion = "0.2.75";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -501,6 +501,16 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         var operation = request.Operation ?? request.Path.Replace("/commands/", string.Empty, StringComparison.Ordinal);
         var parameters = request.Parameters ?? new Dictionary<string, JsonElement>();
+        if (operation == "jellyfin.recover_profile_binding")
+        {
+            var jellyfinUserId = RecoverExactProfileJellyfinUserId(configuration, request);
+            return CompleteCommand(request, operation, new
+            {
+                provider = "jellyfin",
+                provider_user_id = jellyfinUserId
+            });
+        }
+
         if (operation == "optimizer.scan")
         {
             if (!configuration.MediaScanEnabled)
@@ -887,6 +897,38 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
 
         throw new InvalidOperationException("remoteCommandNotAllowed");
+    }
+
+    internal static string RecoverExactProfileJellyfinUserId(
+        PluginConfiguration configuration,
+        CloudRequest request)
+    {
+        return RecoverExactProfileJellyfinUserId(
+            configuration.ProfileJellyfinBindingsJson,
+            configuration.ProfileId,
+            configuration.JellyfinUserId,
+            request);
+    }
+
+    internal static string RecoverExactProfileJellyfinUserId(
+        string? bindingsJson,
+        string? legacyProfileId,
+        string? legacyJellyfinUserId,
+        CloudRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.ProfileId)
+            || !KaevoProfileJellyfinBindingStore.TryResolve(
+                bindingsJson,
+                legacyProfileId,
+                legacyJellyfinUserId,
+                request.ProfileId,
+                out var jellyfinUserId))
+        {
+            // Never fall back to the connector owner or match by display name.
+            throw new InvalidOperationException("profileJellyfinBindingMissing");
+        }
+
+        return jellyfinUserId;
     }
 
     private static CommandResult CompleteCommand(CloudRequest request, string operation, object result)
