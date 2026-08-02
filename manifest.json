@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.80.0",
+        "changelog": "Adds a guarded, revision-checked transfer for one explicitly selected existing Jellyfin user between verified household profiles.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.80/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "52163c869b61ddc4ff68948bb3caf3fd",
+        "timestamp": "2026-08-02T20:00:00Z"
+      },
+      {
         "version": "0.2.79.0",
         "changelog": "Adds signed, profile-bound member media capability enforcement for Household Username Auth V1 without an Owner fallback.",
         "targetAbi": "10.11.0.0",
