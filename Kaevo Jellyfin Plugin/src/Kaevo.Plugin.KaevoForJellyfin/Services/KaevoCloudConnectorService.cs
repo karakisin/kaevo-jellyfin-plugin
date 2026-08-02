@@ -1307,13 +1307,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return jellyfinUserId;
     }
 
-    private static CommandResult CompleteCommand(CloudRequest request, string operation, object result)
+    internal static CommandResult CompleteCommand(CloudRequest request, string operation, object result)
     {
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
             requestId = request.RequestId,
             state = "complete",
-            operation = "jellyfin.search",
+            operation,
             result
         }, JsonOptions), false);
     }
@@ -2746,7 +2746,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
     }
 
-    private sealed record CommandResult(int Status, JsonElement Payload, bool Truncated);
+    internal sealed record CommandResult(int Status, JsonElement Payload, bool Truncated);
     private sealed record ProviderReachability(bool Ok, bool Configured, string Version, string? Reason);
 
     [GeneratedRegex("^[0-9a-fA-F]{32}$", RegexOptions.CultureInvariant)]

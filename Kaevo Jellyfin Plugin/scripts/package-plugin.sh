@@ -34,7 +34,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Adds a guarded, revision-checked transfer for one explicitly selected existing Jellyfin user between verified household profiles.",
+  "changelog": "Fixes the remote command completion contract used to inspect and safely transfer one explicitly selected existing Jellyfin user between verified household profiles.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -42,7 +42,7 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.80.0"
+  "version": "0.2.81.0"
 }
 EOF
 
