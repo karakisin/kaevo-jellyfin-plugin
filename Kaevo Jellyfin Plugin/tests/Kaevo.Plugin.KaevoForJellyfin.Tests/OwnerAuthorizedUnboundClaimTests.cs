@@ -70,4 +70,57 @@ public sealed class OwnerAuthorizedUnboundClaimTests
         Assert.Equal(KaevoProfileJellyfinBindingUnboundClaimResult.OwnerAmbiguous,
             KaevoProfileJellyfinBindingStore.TryClaimUnboundUser(ambiguous, string.Empty, ambiguousRevision, Target, User, Operation, out _, out _));
     }
+
+    [Fact]
+    public void ExistingProfileTransferMovesOnlyTheInspectedOwnerWithRevisionCas()
+    {
+        var bindings = $"{{\"{Owner}\":\"{User}\",\"{Other}\":\"{OtherUser}\"}}";
+        _ = KaevoProfileJellyfinBindingStore.InspectUnboundClaim(
+            bindings, Target, User, out var source, out var revision);
+        Assert.Equal(Owner, source);
+
+        Assert.Equal(
+            KaevoProfileJellyfinBindingExistingTransferResult.Transferred,
+            KaevoProfileJellyfinBindingStore.TryTransferExistingUser(
+                bindings, revision, Owner, Target, User, out var transferred));
+        Assert.True(KaevoProfileJellyfinBindingStore.TryResolve(transferred, null, null, Target, out var targetUser));
+        Assert.Equal(User, targetUser);
+        Assert.False(KaevoProfileJellyfinBindingStore.TryResolve(transferred, null, null, Owner, out _));
+        Assert.True(KaevoProfileJellyfinBindingStore.TryResolve(transferred, null, null, Other, out var otherUser));
+        Assert.Equal(OtherUser, otherUser);
+
+        Assert.Equal(
+            KaevoProfileJellyfinBindingExistingTransferResult.AlreadyTransferred,
+            KaevoProfileJellyfinBindingStore.TryTransferExistingUser(
+                transferred, revision, Owner, Target, User, out var retried));
+        Assert.Equal(transferred, retried);
+    }
+
+    [Fact]
+    public void ExistingProfileTransferRefusesDriftAndNeverRewritesBindings()
+    {
+        var bindings = $"{{\"{Owner}\":\"{User}\",\"{Other}\":\"{OtherUser}\"}}";
+        _ = KaevoProfileJellyfinBindingStore.InspectUnboundClaim(
+            bindings, Target, User, out _, out var revision);
+        var drifted = $"{{\"{Owner}\":\"{User}\",\"{Other}\":\"{OtherUser}\",\"profile_new\":\"11111111111111111111111111111111\"}}";
+
+        Assert.Equal(
+            KaevoProfileJellyfinBindingExistingTransferResult.BindingRevisionMismatch,
+            KaevoProfileJellyfinBindingStore.TryTransferExistingUser(
+                drifted, revision, Owner, Target, User, out var revisionUnchanged));
+        Assert.Equal(drifted, revisionUnchanged);
+
+        Assert.Equal(
+            KaevoProfileJellyfinBindingExistingTransferResult.SourceChanged,
+            KaevoProfileJellyfinBindingStore.TryTransferExistingUser(
+                bindings, revision, Other, Target, User, out var sourceUnchanged));
+        Assert.Equal(bindings, sourceUnchanged);
+
+        var occupied = $"{{\"{Owner}\":\"{User}\",\"{Target}\":\"{OtherUser}\"}}";
+        Assert.Equal(
+            KaevoProfileJellyfinBindingExistingTransferResult.TargetAlreadyBound,
+            KaevoProfileJellyfinBindingStore.TryTransferExistingUser(
+                occupied, KaevoProfileJellyfinBindingStore.MemberBindingRevision("unused", User), Owner, Target, User, out var targetUnchanged));
+        Assert.Equal(occupied, targetUnchanged);
+    }
 }

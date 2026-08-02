@@ -59,6 +59,21 @@ internal enum KaevoProfileJellyfinBindingUnboundClaimResult
     TargetAlreadyBound
 }
 
+// An existing binding is materially different from an unbound claim.  Keeping
+// a separate result set makes it impossible for callers to accidentally treat
+// an active profile transfer as a recovery claim.
+internal enum KaevoProfileJellyfinBindingExistingTransferResult
+{
+    Transferred,
+    AlreadyTransferred,
+    InvalidRequest,
+    BindingStoreInvalid,
+    BindingRevisionMismatch,
+    SourceChanged,
+    SourceAmbiguous,
+    TargetAlreadyBound
+}
+
 internal static class KaevoProfileJellyfinBindingStore
 {
     private const int MaximumBindings = 256;
@@ -482,6 +497,83 @@ internal static class KaevoProfileJellyfinBindingStore
         bindings[targetProfileId!] = normalizedUserId;
         updatedBindingsJson = Serialize(bindings);
         return KaevoProfileJellyfinBindingReassignmentResult.Reassigned;
+    }
+
+    /// <summary>
+    /// Moves one already-bound immutable Jellyfin identity between two exact
+    /// Cloud profiles.  This is a CAS operation: the caller must present the
+    /// revision returned by a just-completed inspection, and the current owner
+    /// must still be the supplied source.  It never creates a second binding.
+    /// </summary>
+    internal static KaevoProfileJellyfinBindingExistingTransferResult TryTransferExistingUser(
+        PluginConfiguration configuration,
+        string? expectedBindingRevision,
+        string? sourceProfileId,
+        string? targetProfileId,
+        string? jellyfinUserId)
+    {
+        var result = TryTransferExistingUser(
+            configuration.ProfileJellyfinBindingsJson,
+            expectedBindingRevision,
+            sourceProfileId,
+            targetProfileId,
+            jellyfinUserId,
+            out var updatedBindingsJson);
+        if (result == KaevoProfileJellyfinBindingExistingTransferResult.Transferred)
+        {
+            configuration.ProfileJellyfinBindingsJson = updatedBindingsJson;
+        }
+        return result;
+    }
+
+    internal static KaevoProfileJellyfinBindingExistingTransferResult TryTransferExistingUser(
+        string? bindingsJson,
+        string? expectedBindingRevision,
+        string? sourceProfileId,
+        string? targetProfileId,
+        string? jellyfinUserId,
+        out string updatedBindingsJson)
+    {
+        updatedBindingsJson = bindingsJson ?? string.Empty;
+        if (!ValidProfileId(sourceProfileId)
+            || !ValidProfileId(targetProfileId)
+            || string.Equals(sourceProfileId, targetProfileId, StringComparison.Ordinal)
+            || !TryNormalizeJellyfinUserId(jellyfinUserId, out var normalizedUserId)
+            || string.IsNullOrWhiteSpace(expectedBindingRevision))
+        {
+            return KaevoProfileJellyfinBindingExistingTransferResult.InvalidRequest;
+        }
+        if (!TryReadOrEmpty(bindingsJson, out var bindings))
+        {
+            return KaevoProfileJellyfinBindingExistingTransferResult.BindingStoreInvalid;
+        }
+
+        var owners = bindings.Where(entry => string.Equals(entry.Value, normalizedUserId, StringComparison.Ordinal))
+            .Select(entry => entry.Key).Take(2).ToArray();
+        if (owners.Length > 1)
+        {
+            return KaevoProfileJellyfinBindingExistingTransferResult.SourceAmbiguous;
+        }
+        if (bindings.TryGetValue(targetProfileId!, out var targetUserId))
+        {
+            return string.Equals(targetUserId, normalizedUserId, StringComparison.Ordinal)
+                && owners.Length == 1 && string.Equals(owners[0], targetProfileId, StringComparison.Ordinal)
+                ? KaevoProfileJellyfinBindingExistingTransferResult.AlreadyTransferred
+                : KaevoProfileJellyfinBindingExistingTransferResult.TargetAlreadyBound;
+        }
+        if (owners.Length != 1 || !string.Equals(owners[0], sourceProfileId, StringComparison.Ordinal))
+        {
+            return KaevoProfileJellyfinBindingExistingTransferResult.SourceChanged;
+        }
+        if (!string.Equals(BindingRevision(bindingsJson), expectedBindingRevision, StringComparison.Ordinal))
+        {
+            return KaevoProfileJellyfinBindingExistingTransferResult.BindingRevisionMismatch;
+        }
+
+        bindings.Remove(sourceProfileId!);
+        bindings[targetProfileId!] = normalizedUserId;
+        updatedBindingsJson = Serialize(bindings);
+        return KaevoProfileJellyfinBindingExistingTransferResult.Transferred;
     }
 
     internal static bool TryUnbind(

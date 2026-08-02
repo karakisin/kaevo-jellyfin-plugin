@@ -16,7 +16,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.79";
+    private const string PluginVersion = "0.2.80";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -754,6 +754,52 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 KaevoProfileJellyfinBindingUnboundClaimResult.BindingCapacityReached =>
                     throw new InvalidOperationException("binding_capacity_reached"),
                 _ => throw new InvalidOperationException("profileJellyfinBindingClaimInvalid")
+            };
+        }
+
+        if (operation == "jellyfin.transfer_existing_profile_binding")
+        {
+            var jellyfinUserId = RequireString(parameters, "jellyfin_user_id", "profileJellyfinBindingUserInvalid");
+            var sourceProfileId = RequireString(parameters, "source_profile_id", "profileJellyfinBindingSourceInvalid");
+            var targetProfileId = RequireString(parameters, "target_profile_id", "profileJellyfinBindingTargetInvalid");
+            var expectedBindingRevision = RequireString(parameters, "expected_binding_revision", "profileJellyfinBindingRevisionInvalid");
+            if (!string.Equals(targetProfileId, request.ProfileId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("profileJellyfinBindingTargetMismatch");
+            }
+
+            KaevoProfileJellyfinBindingExistingTransferResult transfer;
+            lock (ProfileBindingSync)
+            {
+                transfer = KaevoProfileJellyfinBindingStore.TryTransferExistingUser(
+                    configuration,
+                    expectedBindingRevision,
+                    sourceProfileId,
+                    targetProfileId,
+                    jellyfinUserId);
+                if (transfer == KaevoProfileJellyfinBindingExistingTransferResult.Transferred)
+                {
+                    KaevoPlugin.Instance?.SaveConfiguration();
+                }
+            }
+
+            return transfer switch
+            {
+                KaevoProfileJellyfinBindingExistingTransferResult.Transferred => CompleteCommand(
+                    request, operation, new { provider = "jellyfin", state = "transferred", plugin_version = PluginVersion }),
+                KaevoProfileJellyfinBindingExistingTransferResult.AlreadyTransferred => CompleteCommand(
+                    request, operation, new { provider = "jellyfin", state = "already_transferred", plugin_version = PluginVersion }),
+                KaevoProfileJellyfinBindingExistingTransferResult.BindingRevisionMismatch =>
+                    throw new InvalidOperationException("profileJellyfinBindingRevisionChanged"),
+                KaevoProfileJellyfinBindingExistingTransferResult.SourceChanged =>
+                    throw new InvalidOperationException("profileJellyfinBindingOwnerChanged"),
+                KaevoProfileJellyfinBindingExistingTransferResult.SourceAmbiguous =>
+                    throw new InvalidOperationException("profileJellyfinBindingOwnerAmbiguous"),
+                KaevoProfileJellyfinBindingExistingTransferResult.TargetAlreadyBound =>
+                    throw new InvalidOperationException("profileJellyfinBindingTargetAlreadyBound"),
+                KaevoProfileJellyfinBindingExistingTransferResult.BindingStoreInvalid =>
+                    throw new InvalidOperationException("binding_store_invalid"),
+                _ => throw new InvalidOperationException("profileJellyfinBindingTransferInvalid")
             };
         }
 
