@@ -7,6 +7,13 @@ BUILD_DIR="${KAEVO_BUILD_DIR:-$PROJECT_ROOT/artifacts/build}"
 PACKAGE_ROOT="${KAEVO_PACKAGE_ROOT:-$PROJECT_ROOT/artifacts/package}"
 PLUGIN_DIR="$PACKAGE_ROOT/Kaevo"
 ZIP_PATH="$PACKAGE_ROOT/Kaevo.Plugin.KaevoForJellyfin.zip"
+PROJECT_FILE="$PROJECT_ROOT/src/Kaevo.Plugin.KaevoForJellyfin/Kaevo.Plugin.KaevoForJellyfin.csproj"
+PLUGIN_VERSION="$(awk -F '[<>]' '/<Version>/{print $3; exit}' "$PROJECT_FILE")"
+
+if [[ ! "$PLUGIN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Could not read a valid plugin version from $PROJECT_FILE." >&2
+    exit 1
+fi
 if [[ -n "${KAEVO_RELEASE_TIMESTAMP:-}" ]]; then
     TIMESTAMP="$KAEVO_RELEASE_TIMESTAMP"
 else
@@ -34,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Allows an Owner to repair one exact stale profile-to-Jellyfin link only after Kaevo Cloud verifies the previous same-household profile is inactive or deleted.",
+  "changelog": "Repairs a Kaevo household connector without replacing any profile's immutable Jellyfin user, adds local-only SABnzbd and qBittorrent health access, and explains safe reconnection after plugin removal.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -42,7 +49,7 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
   "owner": "Kaevo",
   "targetAbi": "10.11.0.0",
   "timestamp": "$TIMESTAMP",
-  "version": "0.2.77.0"
+  "version": "$PLUGIN_VERSION.0"
 }
 EOF
 
