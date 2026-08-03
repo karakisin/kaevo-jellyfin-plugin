@@ -60,6 +60,7 @@ class FakeTransactionClient:
 class FakeDynamo:
     def __init__(self):
         self.tables = {
+            "accounts": FakeTable("account_id"), "auth-identities": FakeTable("auth_identity_key"),
             "principals": FakeTable("principal_id"), "memberships": FakeTable("principal_id"),
             "households": FakeTable("household_id"), "profiles": FakeTable("profile_id"),
             "audit": FakeTable("event_id"),
@@ -74,6 +75,7 @@ class FakeDynamo:
 @pytest.fixture(autouse=True)
 def enrollment_environment(monkeypatch):
     for key, value in {
+        "ACCOUNTS_TABLE": "accounts", "AUTH_IDENTITIES_TABLE": "auth-identities",
         "PRINCIPALS_TABLE": "principals", "IDENTITY_MEMBERSHIPS_TABLE": "memberships",
         "IDENTITY_HOUSEHOLDS_TABLE": "households", "IDENTITY_PROFILES_TABLE": "profiles",
         "SECURITY_AUDIT_TABLE": "audit", "EXPECTED_COGNITO_ISSUER": "https://issuer.example/pool",
@@ -106,12 +108,19 @@ def test_owner_enrollment_generates_authority_server_side_and_is_idempotent():
     principal = dynamo.tables["principals"].items["user-1"]
     assert principal["account_id"].startswith("acct_") and principal["account_id"] != "attacker-account"
     assert principal["role"] == "owner" and principal["authz_version"] == 1
+    account = dynamo.tables["accounts"].items[principal["account_id"]]
+    assert account["entity_type"] == "Account" and account["status"] == "active"
+    auth_identity = next(iter(dynamo.tables["auth-identities"].items.values()))
+    assert auth_identity["account_id"] == principal["account_id"]
+    assert auth_identity["provider"] == "cognito"
     assert len(dynamo.tables["audit"].items) == 1
 
     second = enroll_owner(event(), dynamodb=dynamo, now=1_001)
     assert second["statusCode"] == 200
     assert json.loads(second["body"])["state"] == "already_enrolled"
     assert len(dynamo.tables["households"].items) == 1
+    assert len(dynamo.tables["accounts"].items) == 1
+    assert len(dynamo.tables["auth-identities"].items) == 1
 
 
 @pytest.mark.parametrize("client_id,token_use", [("main-client", "access"), ("enrollment-client", "id")])
@@ -185,8 +194,13 @@ def test_owner_enrollment_uses_one_resource_client_serialization_layer():
         enroll_owner(event(), dynamodb=dynamo, now=1_000)
 
     operations = captured["TransactItems"]
-    assert len(operations) == 5
-    principal = operations[0]["Put"]["Item"]
+    assert len(operations) == 7
+    account = operations[0]["Put"]["Item"]
+    auth_identity = operations[1]["Put"]["Item"]
+    principal = operations[2]["Put"]["Item"]
+    assert account["account_id"] == principal["account_id"]
+    assert auth_identity["account_id"] == principal["account_id"]
+    assert "provider_subject" not in auth_identity
     assert principal["principal_id"] == {"S": "user-1"}
     assert set(principal["account_id"]) == {"S"}
     assert set(principal["household_id"]) == {"S"}

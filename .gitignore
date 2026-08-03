@@ -6,3 +6,11 @@
 **/build/
 **/.venv/
 Kaevo Home Server/data/
+
+# Ephemeral validation and package output.
+Kaevo Cloud/.live-household-join-inspection/
+Kaevo Cloud/.pytest-tmp-regression/
+Kaevo Cloud/.verification/
+Kaevo Cloud/pytest-of-*/
+Kaevo Jellyfin Plugin/.docker-cache/
+Kaevo Jellyfin Plugin/artifacts/

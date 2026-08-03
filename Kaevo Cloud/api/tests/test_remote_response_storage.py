@@ -18,6 +18,19 @@ handler = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(handler)
 
 
+class RecordingS3:
+    def __init__(self):
+        self.objects = {}
+
+    def put_object(self, *, Bucket, Key, Body, **_):
+        self.objects[(Bucket, Key)] = Body
+
+    def get_object(self, *, Bucket, Key):
+        import io
+
+        return {"Body": io.BytesIO(self.objects[(Bucket, Key)])}
+
+
 def test_large_remote_response_round_trips_through_compressed_storage():
     payload = {
         "Items": [
@@ -45,3 +58,16 @@ def test_plain_remote_response_remains_compatible():
     payload = {"state": "ok", "Items": []}
     item = {"response_json": json.dumps(payload, separators=(",", ":"))}
     assert handler.decode_remote_response_payload(item, {}) == payload
+
+
+def test_remote_payload_read_uses_the_bound_response_bucket(monkeypatch):
+    storage = RecordingS3()
+    monkeypatch.setattr(handler, "REMOTE_PAYLOADS_BUCKET", "bound-test-bucket")
+    monkeypatch.setattr(handler, "s3_client", storage)
+    payload = {"state": "ok"}
+    import gzip
+
+    key = "remote-responses/profile-1/request-1.json.gz"
+    storage.put_object(Bucket="bound-test-bucket", Key=key, Body=gzip.compress(json.dumps(payload).encode("utf-8")))
+    assert handler.decode_remote_response_payload({"response_s3_key": key}, {}) == payload
+    assert set(storage.objects) == {("bound-test-bucket", key)}

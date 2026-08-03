@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "response": {
+    "state": [
+      "membership_created",
+      "already_completed",
+      "already_member",
+      "profile_created",
+      "profile_mapped",
+      "completed"
+    ],
+    "next": [
+      "profile_setup_required",
+      "installation_setup_required",
+      "completed"
+    ]
+  },
+  "onboarding_status": {
+    "state": [
+      "membership_created",
+      "completed",
+      "no_pending_onboarding",
+      "manual_review_required"
+    ],
+    "next": [
+      "profile_setup_required",
+      "installation_setup_required",
+      "completed"
+    ]
+  },
+  "notes": {
+    "state": "Server-authoritative membership result. Every listed state means membership is established.",
+    "next": "Server-authoritative client continuation after membership is established.",
+    "legacy_v2": "The legacy V2 household_joined response remains outside this V3 contract.",
+    "onboarding_status": "Status is resolved by the opaque handle or one direct authenticated subject-and-installation pending pointer; it never performs a broad lookup."
+  }
+}

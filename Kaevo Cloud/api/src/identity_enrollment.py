@@ -19,6 +19,7 @@ from botocore.exceptions import ClientError
 
 from identity_authority import AuthorityError, derive_authoritative_claims, validate_access_token_claims
 from security_audit import AuditReferenceError, prepare_audit_item
+from account_foundation import build_account_record, build_auth_identity_record
 
 
 LOGGER = logging.getLogger(__name__)
@@ -94,6 +95,14 @@ def enroll_owner(event: Mapping[str, Any], *, dynamodb: Any, now: int | None = N
     household_id = _identifier("hh")
     profile_id = _identifier("profile")
     created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(current))
+    account = build_account_record(account_id, now_iso=created_at, now_epoch=current)
+    auth_identity = build_auth_identity_record(
+        account_id=account_id,
+        provider="cognito",
+        provider_subject=subject,
+        now_iso=created_at,
+        now_epoch=current,
+    )
     principal = {
         "principal_id": subject,
         "account_id": account_id,
@@ -146,6 +155,8 @@ def enroll_owner(event: Mapping[str, Any], *, dynamodb: Any, now: int | None = N
     except AuditReferenceError as error:
         raise AuthorityError("audit_unavailable") from error
     entries = [
+        (_name("ACCOUNTS_TABLE"), "account_id", account),
+        (_name("AUTH_IDENTITIES_TABLE"), "auth_identity_key", auth_identity),
         (_name("PRINCIPALS_TABLE"), "principal_id", principal),
         (_name("IDENTITY_MEMBERSHIPS_TABLE"), "principal_id", membership),
         (_name("IDENTITY_HOUSEHOLDS_TABLE"), "household_id", household),

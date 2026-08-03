@@ -14,7 +14,7 @@ from typing import Any, Mapping
 
 
 IDENTITY_SCHEMA_VERSION = 1
-HUMAN_ROLES = frozenset({"owner", "adult", "child"})
+HUMAN_ROLES = frozenset({"owner", "adult", "teen", "child"})
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
@@ -116,11 +116,17 @@ def derive_authoritative_claims(
         "profile_id": profile_id,
         "role": role,
     }
+    # A household belongs to its owner's account.  A non-owner member has a
+    # separate account which is bound to that household through the principal,
+    # membership, and profile records above.  Requiring the household owner
+    # account to equal a member account rejects an otherwise complete member
+    # graph during Cognito token refresh.
+    household_keys = ("account_id", "household_id") if role == "owner" else ("household_id",)
     for record, keys in (
         (principal, ("principal_id", "account_id", "household_id", "role")),
         (membership, tuple(expected)),
         (profile, ("profile_id", "account_id", "household_id")),
-        (household, ("account_id", "household_id")),
+        (household, household_keys),
     ):
         for key in keys:
             if not _same(record.get(key), expected[key]):

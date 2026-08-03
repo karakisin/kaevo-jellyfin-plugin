@@ -77,6 +77,24 @@ def test_installation_registration_requires_recent_owner_authentication():
         authorize(identity(auth_time=1_000), principal(), "register_device", now=1_301)
 
 
+def test_active_adult_can_register_only_its_own_device_after_fresh_authentication():
+    authorize(
+        identity(Role.ADULT, auth_time=1_000),
+        principal(Role.ADULT),
+        "register_own_device",
+        now=1_299,
+    )
+    with pytest.raises(IdentityError, match="recent_auth_required"):
+        authorize(
+            identity(Role.ADULT, auth_time=1_000),
+            principal(Role.ADULT),
+            "register_own_device",
+            now=1_301,
+        )
+    with pytest.raises(IdentityError, match="capability_denied"):
+        authorize(identity(Role.ADULT), principal(Role.ADULT), "register_device", now=1_001)
+
+
 def test_role_version_change_immediately_invalidates_stale_claim():
     changed = {**principal(), "authz_version": 8}
     with pytest.raises(IdentityError, match="stale_authorization"):

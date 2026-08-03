@@ -58,6 +58,14 @@ class FakeRemoteRequests:
         self.items[Item["request_id"]] = dict(Item)
 
 
+class RecordingS3:
+    def __init__(self):
+        self.objects = {}
+
+    def put_object(self, *, Bucket, Key, Body, **_):
+        self.objects[(Bucket, Key)] = Body
+
+
 def event(body):
     return {"headers": {"authorization": "Bearer connector-token"}, "body": json.dumps(body)}
 
@@ -106,3 +114,24 @@ def test_completion_and_failure_replays_cannot_overwrite_terminal_state(monkeypa
     replayed_failure = handler.fail_remote_request(event({"connector_id": "connector-1", "message": "second"}), f"/v1/remote-requests/{fail_id}/fail")
     assert replayed_failure["statusCode"] == 409
     assert json.loads(table.items[fail_id]["error_json"])["message"] == "first"
+
+
+def test_large_completion_stores_only_under_the_bounded_remote_response_prefix(monkeypatch):
+    request_id = "stored-once"
+    table = FakeRemoteRequests([request_item(request_id, "in_progress")])
+    storage = RecordingS3()
+    monkeypatch.setattr(handler, "remote_requests_table", table)
+    monkeypatch.setattr(handler, "require_connector_auth", lambda _event, connector_id: connector_id == "connector-1")
+    monkeypatch.setattr(handler, "REMOTE_PAYLOADS_BUCKET", "bound-test-bucket")
+    monkeypatch.setattr(handler, "s3_client", storage)
+    monkeypatch.setattr(handler, "REMOTE_RESPONSE_COMPRESS_THRESHOLD_BYTES", 1)
+
+    completed = handler.complete_remote_request(
+        event({"connector_id": "connector-1", "response": {"large": "value"}}),
+        f"/v1/remote-requests/{request_id}/complete",
+    )
+
+    expected_key = f"remote-responses/profile-1/{request_id}.json.gz"
+    assert completed["statusCode"] == 200
+    assert set(storage.objects) == {("bound-test-bucket", expected_key)}
+    assert table.items[request_id]["response_s3_key"] == expected_key

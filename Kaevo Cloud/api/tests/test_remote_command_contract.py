@@ -204,6 +204,85 @@ def test_optimizer_plan_is_available_to_scoped_profile_sessions(monkeypatch):
     assert result["statusCode"] == 202
 
 
+def test_seerr_create_request_is_available_only_to_the_exact_scoped_profile_session(monkeypatch):
+    class RemoteRequests:
+        def __init__(self):
+            self.items = {}
+            self.put_count = 0
+
+        def get_item(self, *, Key):
+            item = self.items.get(Key["request_id"])
+            return {"Item": dict(item)} if item else {}
+
+        def put_item(self, *, Item):
+            self.put_count += 1
+            self.items[Item["request_id"]] = dict(Item)
+
+    remote_requests = RemoteRequests()
+    monkeypatch.setattr(handler, "remote_requests_table", remote_requests)
+    monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
+    monkeypatch.setattr(
+        handler,
+        "require_profile_auth",
+        lambda _event, profile_id: profile_id == "profile-1",
+    )
+    monkeypatch.setattr(
+        handler,
+        "latest_online_connector_for_profile",
+        lambda profile_id: (
+            {"connector_id": "connector-1"}
+            if profile_id == "profile-1"
+            else {"connector_id": "connector-2"}
+        ),
+    )
+
+    body = (
+        '{"profile_id":"profile-1","operation":"seerr.create_request",'
+        '"parameters":{"media_type":"tv","media_id":42,"seasons":[3,1,3],"is_4k":false},'
+        '"idempotency_key":"seerr-create-session-1"}'
+    )
+    created = handler.create_remote_command({
+        "headers": {"authorization": "Bearer scoped-session"},
+        "body": body,
+    })
+    duplicate = handler.create_remote_command({
+        "headers": {"authorization": "Bearer scoped-session"},
+        "body": body,
+    })
+
+    assert created["statusCode"] == 202
+    assert duplicate["statusCode"] == 200
+    assert remote_requests.put_count == 1
+
+    cross_profile = handler.create_remote_command({
+        "headers": {"authorization": "Bearer scoped-session"},
+        "body": (
+            '{"profile_id":"profile-2","operation":"seerr.create_request",'
+            '"parameters":{"media_type":"movie","media_id":43},'
+            '"idempotency_key":"seerr-create-session-2"}'
+        ),
+    })
+    assert cross_profile["statusCode"] == 401
+    assert remote_requests.put_count == 1
+
+
+def test_seerr_cancel_request_remains_denied_to_profile_sessions(monkeypatch):
+    monkeypatch.setattr(handler, "remote_requests_table", object())
+    monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
+    monkeypatch.setattr(handler, "require_profile_auth", lambda _event, _profile_id: True)
+
+    result = handler.create_remote_command({
+        "headers": {"authorization": "Bearer scoped-session"},
+        "body": (
+            '{"profile_id":"profile-1","operation":"seerr.cancel_request",'
+            '"parameters":{"request_id":42},'
+            '"idempotency_key":"seerr-cancel-session-1"}'
+        ),
+    })
+
+    assert result["statusCode"] == 401
+
+
 def test_arbitrary_commands_are_rejected():
     payload, error = command("jellyfin.delete_media", {"item_id": "a" * 32})
     assert payload is None

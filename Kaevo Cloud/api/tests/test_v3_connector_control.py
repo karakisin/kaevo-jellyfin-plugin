@@ -24,6 +24,7 @@ class FakeTable:
         self.key = key
         self.items = {}
         self.lock = threading.Lock()
+        self.update_calls = []
 
     def get_item(self, Key, **_):
         with self.lock:
@@ -45,30 +46,59 @@ class FakeTable:
 
     def update_item(self, Key, ConditionExpression, UpdateExpression, ExpressionAttributeValues, ReturnValues=None, **_):
         with self.lock:
+            self.update_calls.append({
+                "condition": ConditionExpression,
+                "expression": UpdateExpression,
+                "values": dict(ExpressionAttributeValues),
+            })
             key = Key[self.key]
             item = self.items.get(key)
             if not item:
                 raise conditional_failure()
             values = ExpressionAttributeValues
             if self.key == "connector_id":
-                if item.get("profile_id") not in {None, "", values[":profile"]}:
-                    raise conditional_failure()
-                for field, token in (
-                    ("protocol_version", ":protocol"), ("auth_state", ":auth"), ("state", ":active"),
-                    ("plugin_instance_id", ":plugin_instance"),
-                    ("plugin_public_key_fingerprint", ":fingerprint"),
-                    ("plugin_key_id", ":plugin_key_id"), ("server_id", ":server_id"),
-                ):
-                    if str(item.get(field) or "") != str(values[token]):
+                if ":revoked_state" in values:
+                    for field, token in (
+                        ("protocol_version", ":protocol"),
+                        ("auth_state", ":active_auth"),
+                        ("state", ":active_state"),
+                        ("plugin_instance_id", ":plugin_instance"),
+                        ("plugin_public_key_fingerprint", ":fingerprint"),
+                        ("plugin_key_id", ":plugin_key_id"),
+                    ):
+                        if str(item.get(field) or "") != str(values[token]):
+                            raise conditional_failure()
+                    if bool(item.get("revoked")):
                         raise conditional_failure()
-                item.update({
-                    "profile_id": item.get("profile_id") or values[":profile"],
-                    "connector_name": values[":connector_name"], "host_type": values[":host_type"],
-                    "app_version": values[":app_version"], "created_at": item.get("created_at") or values[":now"],
-                    "updated_at": values[":now"], "last_seen_at": values[":now"],
-                    "last_seen_epoch": values[":now_epoch"], "capabilities_json": values[":capabilities"],
-                    "provider_status_json": values[":provider_status"],
-                })
+                    item.update({
+                        "revoked": values[":true"],
+                        "auth_state": values[":revoked_auth"],
+                        "state": values[":revoked_state"],
+                        "updated_at": values[":now"],
+                        "revoked_at": values[":now"],
+                    })
+                    if " REMOVE " in UpdateExpression:
+                        for field in UpdateExpression.split(" REMOVE ", 1)[1].split(","):
+                            item.pop(field.strip(), None)
+                else:
+                    if item.get("profile_id") not in {None, "", values[":profile"]}:
+                        raise conditional_failure()
+                    for field, token in (
+                        ("protocol_version", ":protocol"), ("auth_state", ":auth"), ("state", ":active"),
+                        ("plugin_instance_id", ":plugin_instance"),
+                        ("plugin_public_key_fingerprint", ":fingerprint"),
+                        ("plugin_key_id", ":plugin_key_id"), ("server_id", ":server_id"),
+                    ):
+                        if str(item.get(field) or "") != str(values[token]):
+                            raise conditional_failure()
+                    item.update({
+                        "profile_id": item.get("profile_id") or values[":profile"],
+                        "connector_name": values[":connector_name"], "host_type": values[":host_type"],
+                        "app_version": values[":app_version"], "created_at": item.get("created_at") or values[":now"],
+                        "updated_at": values[":now"], "last_seen_at": values[":now"],
+                        "last_seen_epoch": values[":now_epoch"], "capabilities_json": values[":capabilities"],
+                        "provider_status_json": values[":provider_status"],
+                    })
             else:
                 expected = values.get(":pending") or values.get(":in_progress") or values.get(":completing")
                 if expected and item.get("status") != expected:
@@ -79,11 +109,20 @@ class FakeTable:
                     item.update({"status": "completing", "updated_at": values[":now"], "status_created_at": values[":sort"]})
                 elif ":completed" in values:
                     item.update({"status": "completed", "completed_at": values[":now"], "updated_at": values[":now"], "status_created_at": values[":sort"], "http_status": values[":http_status"], "truncated": values[":truncated"]})
-                    for field, token in (("response_json", ":response_json"), ("response_gzip_base64", ":response_gzip"), ("response_encoding", ":response_encoding")):
+                    for field, token in (
+                        ("response_json", ":response_json"),
+                        ("response_gzip_base64", ":response_gzip"),
+                        ("response_encoding", ":response_encoding"),
+                        ("response_s3_key", ":response_s3_key"),
+                        ("response_stored_bytes", ":response_stored_bytes"),
+                    ):
                         if token in values:
                             item[field] = values[token]
                 elif ":failed" in values:
                     item.update({"status": "failed", "failed_at": values[":now"], "updated_at": values[":now"], "status_created_at": values[":sort"], "error_json": values[":error"]})
+                if " REMOVE " in UpdateExpression:
+                    for field in UpdateExpression.split(" REMOVE ", 1)[1].split(","):
+                        item.pop(field.strip(), None)
             self.items[key] = item
             return {"Attributes": dict(item)} if ReturnValues else {}
 
@@ -178,6 +217,71 @@ def test_heartbeat_and_relay_ticket_use_key_bound_auth_and_replay_guard(tables):
     assert control.lambda_handler(request, None)["statusCode"] == 401
 
 
+def test_disconnect_revokes_exact_connector_and_is_idempotently_confirmable(tables):
+    connector = tables[0].items[CONNECTOR_ID]
+    connector.update({
+        "profile_id": PROFILE_ID,
+        "connector_name": "private-name",
+        "host_type": "private-host",
+        "app_version": "private-version",
+        "last_seen_at": "private-time",
+        "last_seen_epoch": control.epoch_now(),
+        "capabilities_json": "[\"private\"]",
+        "provider_status_json": "{\"private\":true}",
+        "jellyfin_user_id": "private-user",
+        "server_name": "private-server",
+    })
+    route = f"/v3/home-connectors/{CONNECTOR_ID}/disconnect"
+    first = control.lambda_handler(
+        signed(
+            route,
+            {"connector_id": CONNECTOR_ID},
+            "connectorcontrolnonce0123456796",
+        ),
+        None,
+    )
+
+    assert first["statusCode"] == 200
+    assert json.loads(first["body"]) == {
+        "state": "disconnected",
+        "idempotent": False,
+    }
+    retained = tables[0].items[CONNECTOR_ID]
+    assert retained["revoked"] is True
+    assert retained["auth_state"] == "v3_revoked"
+    assert retained["state"] == "revoked"
+    assert {
+        "profile_id", "account_binding", "family_binding", "connector_name",
+        "host_type", "app_version", "last_seen_at", "last_seen_epoch",
+        "capabilities_json", "provider_status_json", "jellyfin_user_id",
+        "server_name",
+    }.isdisjoint(retained)
+
+    second = control.lambda_handler(
+        signed(
+            route,
+            {"connector_id": CONNECTOR_ID},
+            "connectorcontrolnonce0123456797",
+        ),
+        None,
+    )
+    assert second["statusCode"] == 200
+    assert json.loads(second["body"]) == {
+        "state": "disconnected",
+        "idempotent": True,
+    }
+
+    register = control.lambda_handler(
+        signed(
+            "/v3/home-connectors/register",
+            body(),
+            "connectorcontrolnonce0123456798",
+        ),
+        None,
+    )
+    assert register["statusCode"] == 401
+
+
 def test_concurrent_claim_has_one_authoritative_winner_and_no_duplicate(tables):
     tables[0].items[CONNECTOR_ID]["profile_id"] = PROFILE_ID
     tables[3].items["remote-1"] = {
@@ -232,6 +336,10 @@ def test_completion_and_failure_transitions_are_consistent(tables):
             "request_id": request_id, "connector_id": CONNECTOR_ID, "profile_id": PROFILE_ID,
             "status": "in_progress", "request_json": "{}", "expires_at": control.epoch_now() + 60,
         }
+    tables[3].items["complete-1"].update({
+        "response_gzip_base64": "stale", "response_s3_key": "stale",
+        "response_encoding": "stale", "response_stored_bytes": 1,
+    })
     complete_route = "/v3/remote-requests/complete-1/complete"
     complete = control.lambda_handler(signed(complete_route, {"connector_id": CONNECTOR_ID, "response": {"ok": True}}, "connectorcontrolnonce0123456801"), None)
     fail_route = "/v3/remote-requests/fail-1/fail"
@@ -239,7 +347,42 @@ def test_completion_and_failure_transitions_are_consistent(tables):
     assert json.loads(complete["body"])["state"] == "completed"
     assert json.loads(failed["body"])["state"] == "failed"
     assert tables[3].items["complete-1"]["status"] == "completed"
+    assert tables[3].items["complete-1"]["response_json"] == '{"ok":true}'
+    assert not {"response_gzip_base64", "response_s3_key", "response_encoding", "response_stored_bytes"} & tables[3].items["complete-1"].keys()
     assert tables[3].items["fail-1"]["status"] == "failed"
+    completion_call = next(call for call in tables[3].update_calls if ":completed" in call["values"])
+    assert completion_call["condition"] == "#status = :in_progress"
+    assert ":completing" not in completion_call["values"]
+    set_paths = {
+        fragment.split("=", 1)[0].strip()
+        for fragment in completion_call["expression"].split(" REMOVE ", 1)[0].removeprefix("SET ").split(",")
+    }
+    remove_paths = {path.strip() for path in completion_call["expression"].split(" REMOVE ", 1)[1].split(",")}
+    assert {"response_json"} <= set_paths
+    assert {"response_gzip_base64", "response_s3_key", "response_encoding", "response_stored_bytes"} <= remove_paths
+    assert set_paths.isdisjoint(remove_paths)
+
+
+def test_oversized_completion_does_not_leave_the_request_completing(tables, monkeypatch):
+    tables[0].items[CONNECTOR_ID]["profile_id"] = PROFILE_ID
+    tables[3].items["oversized-1"] = {
+        "request_id": "oversized-1", "connector_id": CONNECTOR_ID, "profile_id": PROFILE_ID,
+        "status": "in_progress", "request_json": "{}", "expires_at": control.epoch_now() + 60,
+    }
+    monkeypatch.setattr(control, "REMOTE_RESPONSE_COMPRESS_THRESHOLD_BYTES", 1)
+    monkeypatch.setattr(control, "REMOTE_RESPONSE_MAX_STORED_BYTES", 1)
+    monkeypatch.setattr(control, "REMOTE_PAYLOADS_BUCKET", "")
+    monkeypatch.setattr(control, "s3_client", None)
+
+    route = "/v3/remote-requests/oversized-1/complete"
+    result = control.lambda_handler(
+        signed(route, {"connector_id": CONNECTOR_ID, "response": {"payload": "x" * 512}}, "connectorcontrolnonce0123456803"),
+        None,
+    )
+
+    assert result["statusCode"] == 413
+    assert json.loads(result["body"])["state"] == "response_too_large"
+    assert tables[3].items["oversized-1"]["status"] == "in_progress"
 
 
 def test_handler_has_no_owner_cognito_or_pairing_authorization_secret_surface():

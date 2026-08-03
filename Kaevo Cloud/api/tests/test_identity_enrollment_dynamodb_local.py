@@ -65,6 +65,8 @@ def event(subject="integration-owner", *, client_id="enrollment-client", token_u
 def local_tables(monkeypatch):
     suffix = uuid.uuid4().hex[:10]
     table_names = {
+        "ACCOUNTS_TABLE": (f"ksec011a-accounts-{suffix}", "account_id"),
+        "AUTH_IDENTITIES_TABLE": (f"ksec011a-auth-identities-{suffix}", "auth_identity_key"),
         "PRINCIPALS_TABLE": (f"ksec011a-principals-{suffix}", "principal_id"),
         "IDENTITY_MEMBERSHIPS_TABLE": (f"ksec011a-memberships-{suffix}", "principal_id"),
         "IDENTITY_HOUSEHOLDS_TABLE": (f"ksec011a-households-{suffix}", "household_id"),
@@ -103,11 +105,16 @@ def native_items(dynamo, table_names):
 def assert_complete_graph(items, subject):
     assert all(len(records) == 1 for records in items.values())
     principal = items["PRINCIPALS_TABLE"][0]
+    account = items["ACCOUNTS_TABLE"][0]
+    auth_identity = items["AUTH_IDENTITIES_TABLE"][0]
     membership = items["IDENTITY_MEMBERSHIPS_TABLE"][0]
     household = items["IDENTITY_HOUSEHOLDS_TABLE"][0]
     profile = items["IDENTITY_PROFILES_TABLE"][0]
     audit = items["SECURITY_AUDIT_TABLE"][0]
     assert principal["principal_id"] == membership["principal_id"] == subject
+    assert account["account_id"] == auth_identity["account_id"] == principal["account_id"]
+    assert auth_identity["provider"] == "cognito"
+    assert "provider_subject" not in auth_identity
     assert principal["account_id"] == membership["account_id"] == household["account_id"] == profile["account_id"]
     assert principal["household_id"] == membership["household_id"] == household["household_id"] == profile["household_id"]
     assert principal["profile_ids"] == [membership["profile_id"]]

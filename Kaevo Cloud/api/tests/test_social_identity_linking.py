@@ -141,10 +141,10 @@ def test_link_is_idempotent_and_conflict_fails_closed():
         )
 
 
-def external_event(email="owner@example.invalid", verified="true"):
+def external_event(email="owner@example.invalid", verified="true", provider="Google"):
     return {
         "triggerSource": "PreSignUp_ExternalProvider", "userPoolId": "pool-1",
-        "userName": "Google_provider-subject",
+        "userName": f"{provider}_provider-subject",
         "request": {"userAttributes": {"email": email, "email_verified": verified}},
         "response": {},
     }
@@ -162,10 +162,43 @@ def test_external_signup_collision_is_blocked_but_never_linked_by_email(monkeypa
     assert social_identity_guard.guard_external_provider_signup(external_event(), cognito=GuardCognito([]))["userName"].startswith("Google_")
 
 
-def test_external_signup_requires_verified_email(monkeypatch):
+def test_google_external_signup_accepts_a_trusted_provider_email_without_mapped_verified_flag(monkeypatch):
+    monkeypatch.setenv("EXPECTED_USER_POOL_ID", "pool-1")
+    event = external_event(verified="")
+    assert social_identity_guard.guard_external_provider_signup(
+        event, cognito=GuardCognito([])
+    )["userName"].startswith("Google_")
+
+
+def test_apple_external_signup_accepts_provider_authenticated_email_without_unmapped_verified_flag(monkeypatch):
+    monkeypatch.setenv("EXPECTED_USER_POOL_ID", "pool-1")
+    event = external_event(verified="", provider="SignInWithApple")
+    assert social_identity_guard.guard_external_provider_signup(
+        event, cognito=GuardCognito([])
+    )["userName"].startswith("SignInWithApple_")
+
+
+def test_apple_external_signup_still_requires_email_and_blocks_collisions(monkeypatch):
     monkeypatch.setenv("EXPECTED_USER_POOL_ID", "pool-1")
     with pytest.raises(ValueError, match="verified_email_required"):
-        social_identity_guard.guard_external_provider_signup(external_event(verified="false"), cognito=GuardCognito([]))
+        social_identity_guard.guard_external_provider_signup(
+            external_event(email="", verified="", provider="SignInWithApple"),
+            cognito=GuardCognito([]),
+        )
+    with pytest.raises(ValueError, match="existing_account_link_required"):
+        social_identity_guard.guard_external_provider_signup(
+            external_event(verified="", provider="SignInWithApple"),
+            cognito=GuardCognito([{"Username": "existing-owner"}]),
+        )
+
+
+def test_external_signup_rejects_unconfigured_provider_even_with_verified_email(monkeypatch):
+    monkeypatch.setenv("EXPECTED_USER_POOL_ID", "pool-1")
+    with pytest.raises(ValueError, match="unsupported_external_identity"):
+        social_identity_guard.guard_external_provider_signup(
+            external_event(provider="UntrustedProvider"),
+            cognito=GuardCognito([]),
+        )
 
 
 def test_external_signup_rejects_an_unexpected_user_pool(monkeypatch):

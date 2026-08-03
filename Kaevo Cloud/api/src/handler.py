@@ -13,7 +13,7 @@ import uuid
 from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
@@ -51,7 +51,41 @@ from connector_lifecycle import (
     opaque_intent,
     random_pairing_code,
 )
-from identity_authority import AuthorityError, validate_access_token_claims
+from identity_authority import AuthorityError, derive_authoritative_claims, validate_access_token_claims
+from account_foundation import (
+    ACCOUNT_SCHEMA_VERSION,
+    AccountFoundationError,
+    CanonicalRole,
+    HouseholdAccessRole,
+    assert_auth_identity_binding,
+    canonical_role,
+    capabilities_for,
+    household_access_role,
+    household_capabilities_for,
+    plan_existing_account_backfill,
+    public_auth_identity,
+    provider_subject_key,
+)
+from household_membership import (
+    account_household_guard_id,
+    household_membership_id,
+    household_owner_guard_id,
+    plan_household_membership_normalization,
+    public_membership_context,
+    resolve_household_membership,
+)
+from profile_binding import (
+    build_profile_binding,
+    build_profile_creation,
+    resolve_profile_access,
+    validate_profile,
+)
+from profile_mapping import (
+    build_confirmed_mapping,
+    local_profile_source_id,
+    public_mapping,
+    validate_confirmed_mapping,
+)
 from pairing_v3 import (
     AUTHORIZATION_AUDIENCE,
     PROTOCOL as PAIRING_V3_PROTOCOL,
@@ -66,6 +100,7 @@ from pairing_v3 import (
     plugin_fingerprint as pairing_v3_plugin_fingerprint,
     redemption_transcript as pairing_v3_redemption_transcript,
     sha256_b64url as pairing_v3_sha256_b64url,
+    sign_ed25519 as pairing_v3_sign_ed25519,
     sign_authorization as pairing_v3_sign_authorization,
     verify_authorization as pairing_v3_verify_authorization,
     verify_ed25519 as pairing_v3_verify_ed25519,
@@ -108,6 +143,15 @@ IDENTITY_MEMBERSHIPS_TABLE = os.environ.get("IDENTITY_MEMBERSHIPS_TABLE")
 IDENTITY_HOUSEHOLDS_TABLE = os.environ.get("IDENTITY_HOUSEHOLDS_TABLE")
 IDENTITY_PROFILES_TABLE = os.environ.get("IDENTITY_PROFILES_TABLE")
 HOUSEHOLD_INVITATIONS_TABLE = os.environ.get("HOUSEHOLD_INVITATIONS_TABLE")
+HOUSEHOLD_JOIN_TRANSACTIONS_TABLE = os.environ.get("HOUSEHOLD_JOIN_TRANSACTIONS_TABLE")
+ACCOUNTS_TABLE = os.environ.get("ACCOUNTS_TABLE")
+AUTH_IDENTITIES_TABLE = os.environ.get("AUTH_IDENTITIES_TABLE")
+HOUSEHOLD_MEMBERSHIPS_TABLE = os.environ.get("HOUSEHOLD_MEMBERSHIPS_TABLE")
+PROFILES_TABLE = os.environ.get("PROFILES_TABLE")
+PROFILE_BINDINGS_TABLE = os.environ.get("PROFILE_BINDINGS_TABLE")
+PROFILE_MAPPINGS_TABLE = os.environ.get("PROFILE_MAPPINGS_TABLE")
+BINDING_OPERATIONS_TABLE = os.environ.get("BINDING_OPERATIONS_TABLE")
+PROFILE_BINDING_TOMBSTONES_TABLE = os.environ.get("PROFILE_BINDING_TOMBSTONES_TABLE")
 DEV_API_KEY = os.environ.get("DEV_API_KEY")
 PUBLIC_API_BASE_URL = os.environ.get("PUBLIC_API_BASE_URL", "").strip()
 KAEVO_ENV = os.environ.get("KAEVO_ENV", "dev").strip().lower()
@@ -119,6 +163,8 @@ COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 GOOGLE_IDENTITY_PROVIDER_SECRET_ARN = os.environ.get("GOOGLE_IDENTITY_PROVIDER_SECRET_ARN", "")
 APPLE_IDENTITY_PROVIDER_SECRET_ARN = os.environ.get("APPLE_IDENTITY_PROVIDER_SECRET_ARN", "")
 SOCIAL_IDENTITY_LINK_CALLBACK_URL = os.environ.get("SOCIAL_IDENTITY_LINK_CALLBACK_URL", "")
+NATIVE_OIDC_AUTHORIZATION_ENDPOINT = os.environ.get("NATIVE_OIDC_AUTHORIZATION_ENDPOINT", "")
+EXPECTED_NATIVE_CALLBACK_URI = os.environ.get("EXPECTED_NATIVE_CALLBACK_URI", "")
 
 MAX_BATCH_EVENTS = 50
 CONNECTOR_ONLINE_WINDOW_SECONDS = 120
@@ -127,6 +173,8 @@ TRIAL_ACTIVATION_TTL_SECONDS = 10 * 60
 TRIAL_DURATION_SECONDS = 14 * 24 * 60 * 60
 APP_SESSION_DURATION_SECONDS = 30 * 24 * 60 * 60
 PLAYBACK_GRANT_TTL_SECONDS = 120
+PAIRING_V3_PLAYBACK_GRANT_AUDIENCE = "kaevo-home-connectors-playback-v3"
+PAIRING_V3_PLAYBACK_GRANT_TYPE = "kaevo-playback-grant+jwt"
 REMOTE_RESPONSE_COMPRESS_THRESHOLD_BYTES = 180_000
 REMOTE_RESPONSE_MAX_STORED_BYTES = 330_000
 SAFE_PLAYBACK_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -139,6 +187,30 @@ PAIRING_V3_AUDIT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 PAIRING_V3_PLUGIN_TIMESTAMP_SKEW_SECONDS = 60
 HOUSEHOLD_INVITATION_CODE_TTL_SECONDS = 15 * 60
 HOUSEHOLD_INVITATION_RETENTION_SECONDS = 30 * 24 * 60 * 60
+HOUSEHOLD_JOIN_TRANSACTION_TTL_SECONDS = 15 * 60
+HOUSEHOLD_JOIN_TRANSACTION_RETENTION_SECONDS = 24 * 60 * 60
+HOUSEHOLD_JOIN_MAX_ATTEMPTS = 8
+BINDING_OPERATION_RETENTION_SECONDS = 14 * 24 * 60 * 60
+BINDING_SOURCE_TOMBSTONE_RETENTION_SECONDS = 30 * 24 * 60 * 60
+BINDING_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{22,128}$")
+BINDING_OPERATION_PHASE_RANK = {
+    "created": 0,
+    "authorized": 1,
+    "dispatch_pending": 2,
+    "dispatched": 3,
+    "connector_claimed": 4,
+    "inspection_completed": 5,
+    "mutation_authorized": 6,
+    "plugin_cas_committed": 7,
+    "cloud_persisted": 8,
+    "snapshot_pending": 9,
+    "snapshot_published": 10,
+    "completed": 11,
+    "safely_refused": 12,
+    "reconciliation_required": 12,
+    "failed_retryable": 12,
+    "failed_terminal": 12,
+}
 
 dynamodb = boto3.resource("dynamodb")
 events_table = dynamodb.Table(EVENTS_TABLE) if EVENTS_TABLE else None
@@ -156,6 +228,15 @@ identity_memberships_table = dynamodb.Table(IDENTITY_MEMBERSHIPS_TABLE) if IDENT
 identity_households_table = dynamodb.Table(IDENTITY_HOUSEHOLDS_TABLE) if IDENTITY_HOUSEHOLDS_TABLE else None
 identity_profiles_table = dynamodb.Table(IDENTITY_PROFILES_TABLE) if IDENTITY_PROFILES_TABLE else None
 household_invitations_table = dynamodb.Table(HOUSEHOLD_INVITATIONS_TABLE) if HOUSEHOLD_INVITATIONS_TABLE else None
+household_join_transactions_table = dynamodb.Table(HOUSEHOLD_JOIN_TRANSACTIONS_TABLE) if HOUSEHOLD_JOIN_TRANSACTIONS_TABLE else None
+accounts_table = dynamodb.Table(ACCOUNTS_TABLE) if ACCOUNTS_TABLE else None
+auth_identities_table = dynamodb.Table(AUTH_IDENTITIES_TABLE) if AUTH_IDENTITIES_TABLE else None
+household_memberships_table = dynamodb.Table(HOUSEHOLD_MEMBERSHIPS_TABLE) if HOUSEHOLD_MEMBERSHIPS_TABLE else None
+profiles_table = dynamodb.Table(PROFILES_TABLE) if PROFILES_TABLE else None
+profile_bindings_table = dynamodb.Table(PROFILE_BINDINGS_TABLE) if PROFILE_BINDINGS_TABLE else None
+profile_mappings_table = dynamodb.Table(PROFILE_MAPPINGS_TABLE) if PROFILE_MAPPINGS_TABLE else None
+binding_operations_table = dynamodb.Table(BINDING_OPERATIONS_TABLE) if BINDING_OPERATIONS_TABLE else None
+profile_binding_tombstones_table = dynamodb.Table(PROFILE_BINDING_TOMBSTONES_TABLE) if PROFILE_BINDING_TOMBSTONES_TABLE else None
 cognito_client = boto3.client("cognito-idp")
 secrets_client = boto3.client("secretsmanager")
 _social_provider_secret_cache = {}
@@ -371,6 +452,77 @@ def secret_hash(value):
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
+PROTECTED_IDENTITY_DIAGNOSTIC_EVENT = "protected_identity_session_rejected"
+PROTECTED_IDENTITY_DIAGNOSTIC_ROUTES = frozenset({
+    "/v3/identity/me",
+    "/v3/identity/profile-mappings",
+    "/v3/identity/households/profiles",
+})
+PROTECTED_IDENTITY_REASON_FALLBACK = "PROTECTED_SESSION_REJECTED_UNCLASSIFIED"
+PROTECTED_IDENTITY_REASON_CATEGORIES = frozenset({
+    "AUTHORIZATION_HEADER_MISSING",
+    "AUTHORIZATION_SCHEME_INVALID",
+    "APP_SESSION_STORAGE_UNAVAILABLE",
+    "APP_SESSION_NOT_FOUND",
+    "APP_SESSION_RECORD_INVALID",
+    "APP_SESSION_INACTIVE",
+    "APP_SESSION_EXPIRED",
+    "INSTALLATION_BINDING_UNAVAILABLE",
+    "DPOP_PROOF_MALFORMED",
+    "DPOP_HTM_MISMATCH",
+    "DPOP_HTU_MISMATCH",
+    "DPOP_IAT_INVALID",
+    "DPOP_JTI_REPLAY",
+    "DPOP_KEY_BINDING_MISMATCH",
+    "DPOP_ACCESS_TOKEN_MISMATCH",
+    "LEGACY_SESSION_NOT_FOUND",
+    "LEGACY_SESSION_INACTIVE",
+    "LEGACY_SESSION_EXPIRED",
+    PROTECTED_IDENTITY_REASON_FALLBACK,
+})
+
+
+def _protected_identity_fingerprint(value):
+    """Return a short, domain-separated digest suitable for diagnostic correlation."""
+    return secret_hash(f"protected-identity-diagnostic-v1:{value}")[:24] if value else ""
+
+
+def _protected_identity_dpop_category(error):
+    return {
+        "invalid_dpop": "DPOP_PROOF_MALFORMED",
+        "installation_key_mismatch": "DPOP_KEY_BINDING_MISMATCH",
+        "dpop_method_mismatch": "DPOP_HTM_MISMATCH",
+        "dpop_url_mismatch": "DPOP_HTU_MISMATCH",
+        "stale_dpop": "DPOP_IAT_INVALID",
+        "dpop_replay": "DPOP_JTI_REPLAY",
+        "dpop_access_token_mismatch": "DPOP_ACCESS_TOKEN_MISMATCH",
+    }.get(str(getattr(error, "reason", "")), PROTECTED_IDENTITY_REASON_FALLBACK)
+
+
+def _protected_identity_session_rejected(event, reason, *, item=None, installation=None):
+    """Emit bounded, non-secret protected-session diagnosis without changing authorization."""
+    if normalized_path(event) not in PROTECTED_IDENTITY_DIAGNOSTIC_ROUTES:
+        return
+    try:
+        category = reason if reason in PROTECTED_IDENTITY_REASON_CATEGORIES else PROTECTED_IDENTITY_REASON_FALLBACK
+        item = item if isinstance(item, dict) else {}
+        installation = installation if isinstance(installation, dict) else {}
+        LOGGER.warning(json.dumps({
+            "event": PROTECTED_IDENTITY_DIAGNOSTIC_EVENT,
+            "reason_category": category,
+            "route": normalized_path(event),
+            "method": method_for(event),
+            "principal_fingerprint": _protected_identity_fingerprint(item.get("principal_id")),
+            "installation_fingerprint": _protected_identity_fingerprint(item.get("installation_id")),
+            "dpop_key_fingerprint": _protected_identity_fingerprint(item.get("key_thumbprint") or installation.get("key_thumbprint")),
+            "lambda_request_fingerprint": str((event or {}).get("_kaevo_lambda_request_fingerprint") or ""),
+            "timestamp": utc_now_iso(),
+        }, sort_keys=True, separators=(",", ":")))
+    except Exception:
+        # Diagnostic failure must never alter the existing fail-closed decision.
+        pass
+
+
 def app_bearer_token(event):
     authorization = str(header_value(event, "authorization") or "")
     if authorization.lower().startswith("bearer "):
@@ -379,17 +531,34 @@ def app_bearer_token(event):
 
 
 def authenticated_app_session(event):
+    authorization = str(header_value(event, "authorization") or "")
     token = app_bearer_token(event)
-    if not token or app_sessions_table is None:
+    if not authorization:
+        _protected_identity_session_rejected(event, "AUTHORIZATION_HEADER_MISSING")
+        return None
+    if not authorization.lower().startswith("bearer "):
+        _protected_identity_session_rejected(event, "AUTHORIZATION_SCHEME_INVALID")
+        return None
+    if not token:
+        _protected_identity_session_rejected(event, "AUTHORIZATION_HEADER_MISSING")
+        return None
+    if app_sessions_table is None:
+        _protected_identity_session_rejected(event, "APP_SESSION_STORAGE_UNAVAILABLE")
         return None
     item = app_sessions_table.get_item(Key={"token_hash": f"access#{production_token_hash(token)}"}).get("Item")
-    if item and item.get("record_type") == "access":
+    if item:
+        if item.get("record_type") != "access":
+            _protected_identity_session_rejected(event, "APP_SESSION_RECORD_INVALID", item=item)
+            return None
         if item.get("state") != "active" or bool_value(item.get("revoked"), False):
+            _protected_identity_session_rejected(event, "APP_SESSION_INACTIVE", item=item)
             return None
         if int(item.get("expires_at") or 0) < epoch_now():
+            _protected_identity_session_rejected(event, "APP_SESSION_EXPIRED", item=item)
             return None
         installation = installations_table.get_item(Key={"installation_id": str(item.get("installation_id") or "")}).get("Item") if installations_table else None
         if not installation or installation.get("state") != "active" or bool_value(installation.get("revoked"), False):
+            _protected_identity_session_rejected(event, "INSTALLATION_BINDING_UNAVAILABLE", item=item, installation=installation)
             return None
         try:
             verify_dpop(
@@ -400,19 +569,4036 @@ def authenticated_app_session(event):
                 access_token=token,
                 replay_guard=record_dpop_jti,
             )
-        except IdentityError:
+        except IdentityError as error:
+            _protected_identity_session_rejected(event, _protected_identity_dpop_category(error), item=item, installation=installation)
             return None
         return item
     if not legacy_app_sessions_allowed():
+        _protected_identity_session_rejected(event, "APP_SESSION_NOT_FOUND")
         return None
     item = app_sessions_table.get_item(Key={"token_hash": secret_hash(token)}).get("Item")
     if not item or item.get("record_type") != "app_session":
+        _protected_identity_session_rejected(event, "LEGACY_SESSION_NOT_FOUND")
         return None
     if item.get("state") != "active" or bool_value(item.get("revoked"), False):
+        _protected_identity_session_rejected(event, "LEGACY_SESSION_INACTIVE", item=item)
         return None
     if int(item.get("expires_at") or 0) < epoch_now():
+        _protected_identity_session_rejected(event, "LEGACY_SESSION_EXPIRED", item=item)
         return None
     return item
+
+
+def identity_me_v3(event, *, verified_session=None):
+    """Resolve the caller exclusively from a DPoP-bound protected session.
+
+    This endpoint deliberately accepts no account, household, role, or profile
+    request values.  The app-session record, installation binding, and current
+    DynamoDB identity graph are the only sources of authority.
+    """
+    if any(table is None for table in (
+        accounts_table,
+        auth_identities_table,
+        household_memberships_table,
+        profiles_table,
+        profile_bindings_table,
+        principals_table,
+        identity_memberships_table,
+        identity_households_table,
+        identity_profiles_table,
+    )):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+
+    session = verified_session if verified_session is not None else authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+
+    subject = str(session.get("principal_id") or "")
+    account_id = str(session.get("account_id") or "")
+    household_id = str(session.get("household_id") or "")
+    profile_id = str(session.get("profile_id") or "")
+    if not all((subject, account_id, household_id, profile_id)):
+        return response(401, {"state": "identity_context_invalid"})
+
+    try:
+        principal = principals_table.get_item(
+            Key={"principal_id": subject}, ConsistentRead=True,
+        ).get("Item")
+        membership = identity_memberships_table.get_item(
+            Key={"principal_id": subject}, ConsistentRead=True,
+        ).get("Item")
+        household = identity_households_table.get_item(
+            Key={"household_id": household_id}, ConsistentRead=True,
+        ).get("Item")
+        profile = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+        claims = derive_authoritative_claims(subject, principal, membership, household, profile)
+        if any(not hmac.compare_digest(str(session.get(key) or ""), expected) for key, expected in (
+            ("account_id", claims.account_id),
+            ("household_id", claims.household_id),
+            ("profile_id", claims.profile_id),
+            ("role", claims.role),
+            ("authz_version", str(claims.authz_version)),
+        )):
+            return response(401, {"state": "stale_authorization"})
+
+        account = accounts_table.get_item(Key={"account_id": claims.account_id}, ConsistentRead=True).get("Item")
+        if (
+            not isinstance(account, dict)
+            or account.get("entity_type") != "Account"
+            or account.get("status") != "active"
+            or int(account.get("schema_version") or 0) != ACCOUNT_SCHEMA_VERSION
+        ):
+            return response(409, {"state": "account_migration_required"})
+
+        cognito_key = provider_subject_key("cognito", subject)
+        cognito_identity = auth_identities_table.get_item(
+            Key={"auth_identity_key": cognito_key}, ConsistentRead=True,
+        ).get("Item")
+        assert_auth_identity_binding(
+            cognito_identity,
+            account_id=claims.account_id,
+            provider="cognito",
+            provider_subject=subject,
+        )
+        records = auth_identities_table.query(
+            IndexName="account_id-created_at_epoch-index",
+            KeyConditionExpression=Key("account_id").eq(claims.account_id),
+            ConsistentRead=False,
+        ).get("Items", [])
+        if not any(str(record.get("auth_identity_key") or "") == cognito_key for record in records):
+            # The account GSI is eventually consistent. The strongly-read
+            # Cognito binding above is sufficient for the caller's own
+            # identity while a just-created index entry propagates.
+            records.append(cognito_identity)
+        auth_identities = [
+            public_auth_identity(record)
+            for record in records
+            if isinstance(record, dict)
+            and record.get("entity_type") == "AuthIdentity"
+            and str(record.get("account_id") or "") == claims.account_id
+        ]
+        if not auth_identities:
+            raise AccountFoundationError("auth_identity_binding_required")
+
+        normalized_membership = household_memberships_table.get_item(Key={
+            "household_id": claims.household_id,
+            "membership_id": household_membership_id(claims.account_id, claims.household_id),
+        }, ConsistentRead=True).get("Item")
+        normalized_membership = _repair_legacy_active_membership_profile_pointer(
+            normalized_membership,
+            expected_profile_id=claims.profile_id,
+        )
+        claims, resolved_role, normalized_membership = resolve_household_membership(
+            subject=subject,
+            principal=principal,
+            legacy_membership=membership,
+            household=household,
+            profile=profile,
+            normalized_membership=normalized_membership,
+        )
+        bindings = profile_bindings_table.query(
+            KeyConditionExpression=Key("account_id").eq(claims.account_id),
+            ConsistentRead=True,
+        ).get("Items", [])
+        profiles_by_id = {}
+        for binding in bindings:
+            if not isinstance(binding, dict) or binding.get("status") != "active":
+                continue
+            binding_profile_id = str(binding.get("profile_id") or "")
+            if binding_profile_id:
+                item = profiles_table.get_item(Key={"profile_id": binding_profile_id}, ConsistentRead=True).get("Item")
+                if isinstance(item, dict):
+                    profiles_by_id[binding_profile_id] = item
+        profile_access = resolve_profile_access(
+            account_id=claims.account_id,
+            household_id=claims.household_id,
+            bindings=bindings,
+            profiles_by_id=profiles_by_id,
+        )
+        # A normalized household membership may carry the caller's exact
+        # server-owned profile pointer.  It is an authority record in its own
+        # right, not a legacy Profile/ProfileBinding projection.  Surface that
+        # one profile only after every edge agrees; this lets a replacement
+        # installation explicitly link to the retained profile without
+        # creating a duplicate Cloud profile.
+        canonical_profile_access = _normalized_self_profile_access(
+            claims=claims,
+            resolved_role=resolved_role,
+            normalized_membership=normalized_membership,
+            profile=profile,
+        )
+        profile_access_by_id = {
+            str(item.get("profile_id") or ""): item
+            for item in profile_access + canonical_profile_access
+            if str(item.get("profile_id") or "")
+        }
+        profile_access = sorted(profile_access_by_id.values(), key=lambda item: item["profile_id"])
+        if profile_access and security_audit_table is not None:
+            try:
+                commit_security_audit(_profile_binding_audit(
+                    event, session, "profile_access_resolved", "success",
+                    target_id=claims.account_id, target_type="account",
+                ))
+            except AuditReferenceError:
+                return audit_unavailable_response()
+
+        return response(200, {
+            "schema_version": 1,
+            # This is server-derived from the same claims that were compared
+            # against the protected session above.  Clients persist it with
+            # their local authority snapshot so a later authorization change
+            # invalidates that snapshot instead of silently retaining access.
+            "account": {
+                "account_id": claims.account_id,
+                "status": "active",
+                "authz_version": claims.authz_version,
+            },
+            "auth_identities": sorted(auth_identities, key=lambda item: item["provider"]),
+            "household": public_membership_context(
+                claims, resolved_role, normalized_membership, profile_access=profile_access,
+            ),
+            "profile_access": profile_access,
+            "device": {
+                "device_id": str(session.get("device_id") or ""),
+                "installation_id": str(session.get("installation_id") or ""),
+                "status": "active",
+            },
+            "migration_state": "already_normalized",
+        })
+    except AccountFoundationError as error:
+        if error.reason in {
+            "household_membership_migration_required",
+            "legacy_role_unresolved",
+            "household_authority_ambiguous",
+            "membership_migration_not_required",
+        }:
+            return response(409, {"state": error.reason})
+        return response(401, {"state": "identity_context_invalid"})
+    except (AuthorityError, TypeError, ValueError):
+        return response(401, {"state": "identity_context_invalid"})
+
+
+def _normalized_self_profile_access(*, claims, resolved_role, normalized_membership, profile):
+    """Return the caller's exact normalized profile, never a household-wide guess.
+
+    This bridge intentionally relies on GetItem-resolved records already used
+    by ``identity_me_v3``.  It does not enumerate profiles, inspect legacy
+    invitation data, or grant access to a different account's profile.
+    """
+    if not isinstance(normalized_membership, dict) or not isinstance(profile, dict):
+        return []
+    profile_id = str(normalized_membership.get("profile_id") or "")
+    if not profile_id or profile_id != str(claims.profile_id or ""):
+        return []
+    if any(str(normalized_membership.get(key) or "") != expected for key, expected in (
+        ("household_id", str(claims.household_id or "")),
+        ("account_id", str(claims.account_id or "")),
+    )):
+        return []
+    if any(str(profile.get(key) or "") != expected for key, expected in (
+        ("profile_id", profile_id),
+        ("household_id", str(claims.household_id or "")),
+        ("account_id", str(claims.account_id or "")),
+    )):
+        return []
+    display_name = str(profile.get("display_name") or "").strip()
+    profile_type = str(profile.get("profile_type") or "").strip().lower()
+    if profile.get("state") != "active" or not display_name or profile_type not in {"adult", "teen", "child", "kid"}:
+        return []
+    access_role = str(normalized_membership.get("household_access_role") or "").strip().lower()
+    access_level = "manage" if str(getattr(resolved_role, "value", resolved_role)) == "owner" or access_role == "admin" else "switch"
+    return [{
+        "profile_id": profile_id,
+        "profile_type": profile_type,
+        "display_name": display_name,
+        "access_level": access_level,
+        "status": "active",
+    }]
+
+
+def _identity_migration_audit(event, session, event_type, result, *, reason_code=""):
+    return prepare_security_audit(
+        event,
+        str(session.get("household_id") or ""),
+        event_type,
+        str(session.get("principal_id") or ""),
+        target_id=str(session.get("account_id") or ""),
+        target_type="account",
+        result=result,
+        reason_code=reason_code,
+    )
+
+
+def _migration_response_with_identity(event, state, verified_session):
+    resolved = identity_me_v3(event, verified_session=verified_session)
+    if resolved.get("statusCode") != 200:
+        # Account migration intentionally precedes membership migration. Its
+        # successful write is still reportable even though /me correctly asks
+        # for the next additive normalization step.
+        if resolved.get("statusCode") == 409:
+            body = json.loads(resolved["body"])
+            if body.get("state") == "household_membership_migration_required":
+                body["migration_state"] = state
+                return response(200, body)
+        return resolved
+    body = json.loads(resolved["body"])
+    body["migration_state"] = state
+    return response(200, body)
+
+
+HOME_CONNECTOR_BINDING_SCHEMA_VERSION = 1
+
+
+def _home_connector_binding_candidates(profile_id):
+    """Read connector provenance without accepting a client connector id.
+
+    The connector profile index is the sole lookup path.  A profile binding
+    must never enumerate unrelated household connectors merely to find an
+    eligible record.  The caller subsequently checks the protected Identity
+    context and V3 enrollment proof before a record is eligible.
+    """
+    if home_connectors_table is None:
+        return None
+    records = []
+    options = {
+        "IndexName": HOME_CONNECTORS_PROFILE_INDEX,
+        "KeyConditionExpression": Key("profile_id").eq(str(profile_id)),
+        "ProjectionExpression": (
+            "connector_id, profile_id, protocol_version, auth_state, #state, revoked, "
+            "account_binding, family_binding, plugin_instance_id, plugin_public_key_fingerprint, "
+            "plugin_key_id, binding_status, account_id, household_id, last_seen_at, last_seen_epoch"
+        ),
+        "ExpressionAttributeNames": {"#state": "state"},
+    }
+    while True:
+        page = home_connectors_table.query(**options)
+        records.extend(page.get("Items", []))
+        if not page.get("LastEvaluatedKey"):
+            break
+        options["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    return [item for item in records if str(item.get("profile_id") or "") == str(profile_id)]
+
+
+def _home_connector_binding_context(event):
+    """Derive the sole eligible connector from the protected authority graph."""
+    # Authenticate and consume the DPoP proof once, then reuse that verified
+    # session for the authority resolver. A second authentication attempt
+    # would correctly be rejected as a replay.
+    session = authenticated_app_session(event)
+    if not session:
+        return None, None, response(401, {"state": "protected_session_required"})
+    resolved = identity_me_v3(event, verified_session=session)
+    if resolved.get("statusCode") != 200:
+        return None, None, resolved
+    try:
+        identity = json.loads(str(resolved.get("body") or "{}"))
+    except json.JSONDecodeError:
+        return None, None, response(503, {"state": "manual_review_required"})
+    account_id = str((identity.get("account") or {}).get("account_id") or "")
+    household = identity.get("household") or {}
+    household_id = str(household.get("household_id") or "")
+    profile_id = str((session or {}).get("profile_id") or "")
+    if not session or not all((account_id, household_id, profile_id)):
+        return None, None, response(401, {"state": "protected_session_required"})
+    if str((identity.get("account") or {}).get("status") or "") != "active":
+        return None, None, response(409, {"state": "account_inactive"})
+    if str(household.get("status") or "") != "active":
+        return None, None, response(409, {"state": "household_membership_inactive"})
+    if not isinstance(identity.get("profile_access"), list) or not identity["profile_access"]:
+        return None, None, response(409, {"state": "manual_review_required"})
+    candidates = _home_connector_binding_candidates(profile_id)
+    if candidates is None:
+        return None, None, response(503, {"state": "connector_binding_unavailable"})
+    if not candidates:
+        return None, None, response(404, {"state": "connector_not_found"})
+    v3_candidates = [item for item in candidates if item.get("protocol_version") == PAIRING_V3_PROTOCOL]
+    if not v3_candidates:
+        return None, None, response(409, {"state": "connector_not_v3"})
+    active_candidates = [
+        item for item in v3_candidates
+        if item.get("auth_state") == "v3_active"
+        and item.get("state") == "active"
+        and not bool_value(item.get("revoked"), False)
+    ]
+    if not active_candidates:
+        state = "connector_revoked" if any(bool_value(item.get("revoked"), False) for item in v3_candidates) else "connector_inactive"
+        return None, None, response(409, {"state": state})
+    account_hash = pairing_v3_sha256_b64url(account_id.encode("utf-8"))
+    household_hash = pairing_v3_sha256_b64url(household_id.encode("utf-8"))
+    candidates = [
+        item for item in active_candidates
+        if hmac.compare_digest(str(item.get("account_binding") or ""), account_hash)
+        and hmac.compare_digest(str(item.get("family_binding") or ""), household_hash)
+    ]
+    if not candidates:
+        return None, None, response(409, {"state": "connector_enrollment_mismatch"})
+    if len(candidates) > 1:
+        return None, None, response(409, {"state": "authority_ambiguous"})
+    connector = candidates[0]
+    if not all(str(connector.get(key) or "") for key in (
+        "connector_id", "plugin_instance_id", "plugin_public_key_fingerprint", "plugin_key_id",
+    )):
+        return None, None, response(409, {"state": "connector_enrollment_unverified"})
+    return session, {
+        "account_id": account_id,
+        "household_id": household_id,
+        "profile_id": profile_id,
+        "membership_id": str(household.get("membership_id") or ""),
+    }, connector
+
+
+def _public_home_connector_binding(connector, context):
+    bound = (
+        connector.get("binding_status") == "bound"
+        and hmac.compare_digest(str(connector.get("account_id") or ""), context["account_id"])
+        and hmac.compare_digest(str(connector.get("household_id") or ""), context["household_id"])
+    )
+    return {
+        "schema_version": HOME_CONNECTOR_BINDING_SCHEMA_VERSION,
+        "state": "bound" if bound else "binding_required",
+        "binding_status": "bound" if bound else "missing",
+        "eligible": not bound,
+        "connector": {
+            "auth_state": "v3_active", "status": "active",
+            "plugin_key_id_present": bool(connector.get("plugin_key_id")),
+            "heartbeat_at": str(connector.get("last_seen_at") or ""),
+        },
+        "account": {"status": "active"},
+        "household": {"status": "active", "membership_id": context["membership_id"]},
+        "cloud_profile_available": True,
+    }
+
+
+def get_home_connector_binding_v3(event):
+    _session, context, connector_or_failure = _home_connector_binding_context(event)
+    if context is None:
+        return connector_or_failure
+    return response(200, _public_home_connector_binding(connector_or_failure, context))
+
+
+def bind_home_connector_v3(event):
+    """Explicit, idempotent account/household binding for one V3 connector."""
+    body = parse_json_body(event)
+    if body not in (None, {}):
+        return response(400, {"state": "client_authority_input_forbidden" if isinstance(body, dict) else "bad_request"})
+    session, context, connector_or_failure = _home_connector_binding_context(event)
+    if context is None:
+        return connector_or_failure
+    connector = connector_or_failure
+    is_bound = (
+        connector.get("binding_status") == "bound"
+        and hmac.compare_digest(str(connector.get("account_id") or ""), context["account_id"])
+        and hmac.compare_digest(str(connector.get("household_id") or ""), context["household_id"])
+    )
+    if is_bound:
+        try:
+            commit_security_audit(_profile_binding_audit(
+                event, session, "home_connector_binding_already_bound", "success",
+                target_id=str(connector.get("connector_id") or ""), target_type="home_connector",
+            ))
+        except AuditReferenceError:
+            return audit_unavailable_response()
+        return response(200, {**_public_home_connector_binding(connector, context), "state": "already_bound"})
+    if any(str(connector.get(key) or "") for key in ("binding_status", "account_id", "household_id")):
+        return response(409, {"state": "existing_binding_conflict"})
+    if security_audit_table is None or home_connectors_table is None:
+        return response(503, {"state": "manual_review_required"})
+    now = utc_now_iso()
+    try:
+        audit = _profile_binding_audit(
+            event, session, "home_connector_binding_completed", "success",
+            target_id=str(connector.get("connector_id") or ""), target_type="home_connector",
+        )
+        dynamodb.meta.client.transact_write_items(TransactItems=[
+            {"Update": {
+                "TableName": HOME_CONNECTORS_TABLE,
+                "Key": {"connector_id": str(connector.get("connector_id") or "")},
+                "ConditionExpression": (
+                    "attribute_exists(connector_id) AND protocol_version = :protocol AND auth_state = :auth "
+                    "AND #state = :active AND (attribute_not_exists(revoked) OR revoked = :false) "
+                    "AND profile_id = :profile AND account_binding = :account_hash "
+                    "AND family_binding = :household_hash AND plugin_instance_id = :plugin_instance "
+                    "AND plugin_public_key_fingerprint = :fingerprint AND plugin_key_id = :plugin_key "
+                    "AND attribute_not_exists(binding_status) AND attribute_not_exists(account_id) "
+                    "AND attribute_not_exists(household_id)"
+                ),
+                "UpdateExpression": (
+                    "SET account_id = :account, household_id = :household, binding_status = :bound, "
+                    "bound_at = :now, bound_by_account_id = :account, binding_method = :method, "
+                    "binding_schema_version = :schema, binding_installation_id = :installation, binding_updated_at = :now"
+                ),
+                "ExpressionAttributeNames": {"#state": "state"},
+                "ExpressionAttributeValues": {
+                    ":protocol": PAIRING_V3_PROTOCOL, ":auth": "v3_active", ":active": "active", ":false": False,
+                    ":profile": context["profile_id"],
+                    ":account_hash": pairing_v3_sha256_b64url(context["account_id"].encode("utf-8")),
+                    ":household_hash": pairing_v3_sha256_b64url(context["household_id"].encode("utf-8")),
+                    ":plugin_instance": str(connector.get("plugin_instance_id") or ""),
+                    ":fingerprint": str(connector.get("plugin_public_key_fingerprint") or ""),
+                    ":plugin_key": str(connector.get("plugin_key_id") or ""),
+                    ":account": context["account_id"], ":household": context["household_id"],
+                    ":bound": "bound", ":now": now,
+                    ":method": "protected_session_verified_v3_enrollment_v1",
+                    ":schema": HOME_CONNECTOR_BINDING_SCHEMA_VERSION,
+                    ":installation": str(session.get("installation_id") or ""),
+                },
+            }},
+            {"Put": {"TableName": SECURITY_AUDIT_TABLE, "Item": audit,
+                      "ConditionExpression": "attribute_not_exists(event_id)"}},
+        ])
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") == "TransactionCanceledException":
+            return response(409, {"state": "existing_binding_conflict"})
+        raise
+    updated = dict(connector)
+    updated.update({"account_id": context["account_id"], "household_id": context["household_id"], "binding_status": "bound"})
+    return response(200, {**_public_home_connector_binding(updated, context), "state": "binding_completed"})
+
+
+def migrate_existing_account_v3(event, *, verified_session=None, audit_attempt=True, retry_on_conflict=True):
+    """Atomically add normalized records for one legacy protected session."""
+    if any(table is None for table in (
+        accounts_table,
+        auth_identities_table,
+        principals_table,
+        identity_memberships_table,
+        identity_households_table,
+        identity_profiles_table,
+        security_audit_table,
+    )):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+
+    session = verified_session if verified_session is not None else authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    subject = str(session.get("principal_id") or "")
+    household_id = str(session.get("household_id") or "")
+    profile_id = str(session.get("profile_id") or "")
+    if not all((subject, household_id, profile_id)):
+        return response(401, {"state": "migration_ineligible"})
+
+    if audit_attempt:
+        try:
+            attempted = _identity_migration_audit(event, session, "identity_migration_attempted", "attempted")
+            commit_security_audit(attempted)
+        except AuditReferenceError:
+            return audit_unavailable_response()
+
+    principal = principals_table.get_item(Key={"principal_id": subject}, ConsistentRead=True).get("Item")
+    membership = identity_memberships_table.get_item(Key={"principal_id": subject}, ConsistentRead=True).get("Item")
+    household = identity_households_table.get_item(Key={"household_id": household_id}, ConsistentRead=True).get("Item")
+    profile = identity_profiles_table.get_item(Key={"profile_id": profile_id}, ConsistentRead=True).get("Item")
+    now = epoch_now()
+    now_iso = utc_now_iso()
+    try:
+        # Validate the graph before reading any normalized record by an
+        # account id.  The protected session is not allowed to nominate it.
+        preliminary = plan_existing_account_backfill(
+            subject=subject, principal=principal, membership=membership,
+            household=household, profile=profile,
+            existing_account=None, existing_auth_identity=None,
+            now_iso=now_iso, now_epoch=now,
+        )
+        claims = preliminary.claims
+        if any(not hmac.compare_digest(str(session.get(key) or ""), expected) for key, expected in (
+            ("account_id", claims.account_id),
+            ("household_id", claims.household_id),
+            ("profile_id", claims.profile_id),
+            ("role", claims.role),
+            ("authz_version", str(claims.authz_version)),
+        )):
+            outcome = _identity_migration_audit(event, session, "identity_migration_rejected", "denied", reason_code="stale_authorization")
+            commit_security_audit(outcome)
+            return response(401, {"state": "migration_ineligible"})
+
+        existing_account = accounts_table.get_item(
+            Key={"account_id": claims.account_id}, ConsistentRead=True,
+        ).get("Item")
+        auth_key = provider_subject_key("cognito", subject)
+        existing_identity = auth_identities_table.get_item(
+            Key={"auth_identity_key": auth_key}, ConsistentRead=True,
+        ).get("Item")
+        plan = plan_existing_account_backfill(
+            subject=subject, principal=principal, membership=membership,
+            household=household, profile=profile,
+            existing_account=existing_account, existing_auth_identity=existing_identity,
+            now_iso=now_iso, now_epoch=now,
+        )
+    except AccountFoundationError as error:
+        state = error.reason
+        event_type = "identity_migration_manual_review" if state == "manual_review_required" else "identity_migration_rejected"
+        if state == "provider_identity_conflict":
+            event_type = "identity_migration_conflict_detected"
+        try:
+            outcome = _identity_migration_audit(event, session, event_type, "denied", reason_code=state)
+            commit_security_audit(outcome)
+        except AuditReferenceError:
+            return audit_unavailable_response()
+        return response(409 if state in {"manual_review_required", "provider_identity_conflict"} else 401, {"state": state})
+
+    if plan.is_already_migrated:
+        try:
+            outcome = _identity_migration_audit(event, session, "identity_migration_already_migrated", "success")
+            commit_security_audit(outcome)
+        except AuditReferenceError:
+            return audit_unavailable_response()
+        return _migration_response_with_identity(event, "already_migrated", session)
+
+    try:
+        completed = _identity_migration_audit(event, session, "identity_migration_completed", "success")
+        writes = []
+        if plan.account_record is not None:
+            writes.append({"Put": {
+                "TableName": ACCOUNTS_TABLE,
+                "Item": plan.account_record,
+                "ConditionExpression": "attribute_not_exists(account_id)",
+            }})
+        if plan.auth_identity_record is not None:
+            writes.append({"Put": {
+                "TableName": AUTH_IDENTITIES_TABLE,
+                "Item": plan.auth_identity_record,
+                "ConditionExpression": "attribute_not_exists(auth_identity_key)",
+            }})
+        writes.append({"Put": {
+            "TableName": SECURITY_AUDIT_TABLE,
+            "Item": completed,
+            "ConditionExpression": "attribute_not_exists(event_id)",
+        }})
+        dynamodb.meta.client.transact_write_items(TransactItems=writes)
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") != "TransactionCanceledException":
+            raise
+        # A competing request may have created precisely the same additive
+        # records. Re-read through the same authority graph; never overwrite
+        # and never re-check an already-consumed DPoP proof.
+        if retry_on_conflict:
+            return migrate_existing_account_v3(
+                event,
+                verified_session=session,
+                audit_attempt=False,
+                retry_on_conflict=False,
+            )
+        outcome = _identity_migration_audit(event, session, "identity_migration_conflict_detected", "denied", reason_code="migration_conflict")
+        commit_security_audit(outcome)
+        return response(409, {"state": "migration_conflict"})
+    return _migration_response_with_identity(event, "migration_completed", session)
+
+
+def _membership_migration_audit(event, session, event_type, result, *, membership_id="", reason_code=""):
+    return prepare_security_audit(
+        event,
+        str(session.get("household_id") or ""),
+        event_type,
+        str(session.get("principal_id") or ""),
+        target_id=membership_id or str(session.get("account_id") or ""),
+        target_type="household_membership",
+        result=result,
+        reason_code=reason_code,
+    )
+
+
+def _membership_migration_failure(event, session, state):
+    event_type = {
+        "household_authority_ambiguous": "household_membership_migration_ambiguous_authority",
+        "legacy_role_unresolved": "household_membership_migration_legacy_role_unresolved",
+        "ownership_conflict": "household_membership_migration_ownership_conflict",
+        "membership_conflict": "household_membership_migration_conflict",
+    }.get(state, "household_membership_migration_manual_review")
+    try:
+        outcome = _membership_migration_audit(event, session, event_type, "denied", reason_code=state)
+        commit_security_audit(outcome)
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    return response(409, {"state": state})
+
+
+def migrate_household_membership_v3(event, *, verified_session=None, audit_attempt=True, retry_on_conflict=True):
+    """Atomically create one normalized membership from the legacy authority graph.
+
+    The request body is intentionally ignored.  Account, household, role,
+    capability, profile-access, and provider values are never client inputs to
+    this migration; the DPoP-bound app session and authority graph decide all
+    of them.
+    """
+    if any(table is None for table in (
+        accounts_table,
+        auth_identities_table,
+        household_memberships_table,
+        principals_table,
+        identity_memberships_table,
+        identity_households_table,
+        identity_profiles_table,
+        security_audit_table,
+    )):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+
+    session = verified_session if verified_session is not None else authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    subject = str(session.get("principal_id") or "")
+    if not all((subject, str(session.get("account_id") or ""), str(session.get("household_id") or ""), str(session.get("profile_id") or ""))):
+        return response(401, {"state": "migration_ineligible"})
+    if audit_attempt:
+        try:
+            commit_security_audit(_membership_migration_audit(
+                event, session, "household_membership_migration_attempted", "attempted",
+            ))
+        except AuditReferenceError:
+            return audit_unavailable_response()
+
+    principal = principals_table.get_item(Key={"principal_id": subject}, ConsistentRead=True).get("Item")
+    legacy_membership = identity_memberships_table.get_item(Key={"principal_id": subject}, ConsistentRead=True).get("Item")
+    household = identity_households_table.get_item(
+        Key={"household_id": str(session.get("household_id") or "")}, ConsistentRead=True,
+    ).get("Item")
+    profile = identity_profiles_table.get_item(
+        Key={"profile_id": str(session.get("profile_id") or "")}, ConsistentRead=True,
+    ).get("Item")
+    now = epoch_now()
+    now_iso = utc_now_iso()
+    try:
+        # First resolve only the graph. The session cannot nominate an account
+        # or membership key before server-side authority validation succeeds.
+        preliminary = plan_household_membership_normalization(
+            subject=subject, principal=principal, legacy_membership=legacy_membership,
+            household=household, profile=profile, existing_membership=None,
+            existing_account_guard=None, existing_owner_guard=None,
+            now_iso=now_iso, now_epoch=now,
+        )
+        claims = preliminary.claims
+        if any(not hmac.compare_digest(str(session.get(key) or ""), expected) for key, expected in (
+            ("account_id", claims.account_id),
+            ("household_id", claims.household_id),
+            ("profile_id", claims.profile_id),
+            ("role", claims.role),
+            ("authz_version", str(claims.authz_version)),
+        )):
+            return _membership_migration_failure(event, session, "manual_review_required")
+
+        account = accounts_table.get_item(Key={"account_id": claims.account_id}, ConsistentRead=True).get("Item")
+        if (
+            not isinstance(account, dict)
+            or account.get("entity_type") != "Account"
+            or account.get("status") != "active"
+            or int(account.get("schema_version") or 0) != ACCOUNT_SCHEMA_VERSION
+        ):
+            return _membership_migration_failure(event, session, "account_migration_required")
+        cognito_identity = auth_identities_table.get_item(
+            Key={"auth_identity_key": provider_subject_key("cognito", subject)}, ConsistentRead=True,
+        ).get("Item")
+        assert_auth_identity_binding(
+            cognito_identity, account_id=claims.account_id, provider="cognito", provider_subject=subject,
+        )
+
+        membership_id = household_membership_id(claims.account_id, claims.household_id)
+        existing_membership = household_memberships_table.get_item(Key={
+            "household_id": claims.household_id, "membership_id": membership_id,
+        }, ConsistentRead=True).get("Item")
+        existing_account_guard = household_memberships_table.get_item(Key={
+            "household_id": claims.household_id,
+            "membership_id": account_household_guard_id(claims.account_id, claims.household_id),
+        }, ConsistentRead=True).get("Item")
+        existing_owner_guard = household_memberships_table.get_item(Key={
+            "household_id": claims.household_id,
+            "membership_id": household_owner_guard_id(claims.household_id),
+        }, ConsistentRead=True).get("Item")
+        plan = plan_household_membership_normalization(
+            subject=subject, principal=principal, legacy_membership=legacy_membership,
+            household=household, profile=profile, existing_membership=existing_membership,
+            existing_account_guard=existing_account_guard, existing_owner_guard=existing_owner_guard,
+            now_iso=now_iso, now_epoch=now,
+        )
+    except AccountFoundationError as error:
+        return _membership_migration_failure(event, session, error.reason)
+
+    if plan.is_already_normalized:
+        try:
+            commit_security_audit(_membership_migration_audit(
+                event, session, "household_membership_migration_already_normalized", "success",
+                membership_id=plan.membership_id,
+            ))
+        except AuditReferenceError:
+            return audit_unavailable_response()
+        return _migration_response_with_identity(event, "already_normalized", session)
+
+    try:
+        completed = _membership_migration_audit(
+            event, session, "household_membership_migration_completed", "success",
+            membership_id=plan.membership_id,
+        )
+        writes = []
+        for item in (plan.membership_record, plan.uniqueness_guard_record, plan.owner_guard_record):
+            if item is not None:
+                writes.append({"Put": {
+                    "TableName": HOUSEHOLD_MEMBERSHIPS_TABLE,
+                    "Item": item,
+                    "ConditionExpression": "attribute_not_exists(household_id) AND attribute_not_exists(membership_id)",
+                }})
+        writes.append({"Put": {
+            "TableName": SECURITY_AUDIT_TABLE,
+            "Item": completed,
+            "ConditionExpression": "attribute_not_exists(event_id)",
+        }})
+        dynamodb.meta.client.transact_write_items(TransactItems=writes)
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") != "TransactionCanceledException":
+            raise
+        # A winner can only have written the same deterministic membership or
+        # an owner/uniqueness guard. Re-read without consuming DPoP again.
+        if retry_on_conflict:
+            return migrate_household_membership_v3(
+                event, verified_session=session, audit_attempt=False, retry_on_conflict=False,
+            )
+        return _membership_migration_failure(event, session, "membership_conflict")
+    return _migration_response_with_identity(event, "membership_migration_completed", session)
+
+
+def _profile_binding_audit(event, session, event_type, result, *, target_id="", target_type="profile", reason_code=""):
+    return prepare_security_audit(
+        event,
+        str(session.get("household_id") or ""),
+        event_type,
+        str(session.get("principal_id") or ""),
+        target_id=target_id or str(session.get("account_id") or ""),
+        target_type=target_type,
+        result=result,
+        reason_code=reason_code,
+    )
+
+
+def _normalized_profile_context(event, session):
+    """Use the existing centralized /me resolver without consuming DPoP twice."""
+    resolved = identity_me_v3(event, verified_session=session)
+    if resolved.get("statusCode") != 200:
+        return None, resolved
+    return json.loads(resolved["body"]), None
+
+
+def _ownership_transfer_failure(event, session, state, *, target_id=""):
+    try:
+        commit_security_audit(_profile_binding_audit(
+            event,
+            session,
+            "household_ownership_transfer_rejected",
+            "denied",
+            target_id=target_id or str(session.get("household_id") or ""),
+            target_type="household_membership",
+            reason_code=state,
+        ))
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    status_code = 403 if state == "ownership_transfer_not_authorized" else 409
+    return response(status_code, {"state": state})
+
+
+def _ownership_transfer_context(event):
+    required = (
+        household_memberships_table,
+        principals_table,
+        identity_memberships_table,
+        identity_households_table,
+        identity_profiles_table,
+        security_audit_table,
+    )
+    if any(table is None for table in required):
+        return None, None, response(503, {"state": "identity_context_storage_unavailable"})
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return None, None, response(401, {"state": "protected_session_required"})
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return None, None, failure
+    capabilities = set((context.get("household") or {}).get("capabilities") or [])
+    if "household.transfer_ownership" not in capabilities:
+        return None, None, _ownership_transfer_failure(
+            event, session, "ownership_transfer_not_authorized",
+        )
+    if (
+        str((context.get("household") or {}).get("canonical_role") or "") != CanonicalRole.OWNER.value
+        or str((context.get("household") or {}).get("household_access_role") or "")
+        != HouseholdAccessRole.OWNER.value
+    ):
+        return None, None, _ownership_transfer_failure(
+            event, session, "ownership_transfer_not_authorized",
+        )
+    return session, context, None
+
+
+def _household_membership_records(household_id):
+    records = []
+    query = {
+        "KeyConditionExpression": Key("household_id").eq(household_id),
+        "ConsistentRead": True,
+    }
+    while True:
+        page = household_memberships_table.query(**query)
+        records.extend(page.get("Items", []))
+        last_key = page.get("LastEvaluatedKey")
+        if not last_key:
+            return records
+        query["ExclusiveStartKey"] = last_key
+
+
+def _household_cloud_profile_records(household_id):
+    """Read only the canonical Cloud Profile household partition.
+
+    DynamoDB does not allow a strongly consistent GSI query.  Each index hit
+    is consequently re-read by its exact primary key before it is returned.
+    """
+    records = []
+    query = {
+        "IndexName": "household_id-created_at_epoch-index",
+        "KeyConditionExpression": Key("household_id").eq(household_id),
+        "ConsistentRead": False,
+    }
+    while True:
+        page = profiles_table.query(**query)
+        records.extend(page.get("Items", []))
+        last_key = page.get("LastEvaluatedKey")
+        if not last_key:
+            return records
+        query["ExclusiveStartKey"] = last_key
+
+
+def _repair_legacy_active_membership_profile_pointer(
+    normalized_membership, *, expected_profile_id=None,
+):
+    """Repair one legacy normalized membership from its exact identity graph.
+
+    Older normalized rows predate the canonical ``profile_id`` pointer.  A
+    missing pointer may be filled only when the account's strongly-read active
+    ProfileBinding resolves to exactly one active Cloud Profile and the
+    principal, legacy membership, household, and canonical IdentityProfile all
+    agree.  Ambiguity is never resolved by name, invitation history, or Scan.
+    """
+    required = (
+        household_memberships_table,
+        profile_bindings_table,
+        profiles_table,
+        principals_table,
+        identity_memberships_table,
+        identity_households_table,
+        identity_profiles_table,
+    )
+    if not all(required) or not isinstance(normalized_membership, dict):
+        return normalized_membership
+    if (
+        normalized_membership.get("entity_type") != "HouseholdMembership"
+        or normalized_membership.get("status") != "active"
+        or int(normalized_membership.get("schema_version") or 0) != 1
+    ):
+        return normalized_membership
+
+    existing_profile_id = str(normalized_membership.get("profile_id") or "").strip()
+    if existing_profile_id:
+        return normalized_membership
+
+    account_id = str(normalized_membership.get("account_id") or "").strip()
+    household_id = str(normalized_membership.get("household_id") or "").strip()
+    membership_id = str(normalized_membership.get("membership_id") or "").strip()
+    try:
+        expected_membership_id = household_membership_id(account_id, household_id)
+        expected_role = canonical_role(normalized_membership.get("canonical_role"))
+    except AccountFoundationError:
+        return normalized_membership
+    if not account_id or not household_id or membership_id != expected_membership_id:
+        return normalized_membership
+
+    requested_profile_id = str(expected_profile_id or "").strip()
+    candidates = []
+    bindings = profile_bindings_table.query(
+        KeyConditionExpression=Key("account_id").eq(account_id),
+        ConsistentRead=True,
+    ).get("Items", [])
+    for binding in bindings:
+        if (
+            not isinstance(binding, dict)
+            or binding.get("entity_type") != "ProfileBinding"
+            or binding.get("status") != "active"
+            or str(binding.get("account_id") or "") != account_id
+            or str(binding.get("household_id") or "") != household_id
+        ):
+            continue
+        profile_id = str(binding.get("profile_id") or "").strip()
+        if not profile_id or (requested_profile_id and profile_id != requested_profile_id):
+            continue
+        cloud_profile = profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+        identity_profile = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+        if (
+            not isinstance(cloud_profile, dict)
+            or cloud_profile.get("entity_type") != "Profile"
+            or cloud_profile.get("status") != "active"
+            or str(cloud_profile.get("profile_id") or "") != profile_id
+            or str(cloud_profile.get("household_id") or "") != household_id
+            or not isinstance(identity_profile, dict)
+            or identity_profile.get("state") != "active"
+            or bool_value(identity_profile.get("revoked"), False)
+            or str(identity_profile.get("profile_id") or "") != profile_id
+            or str(identity_profile.get("account_id") or "") != account_id
+            or str(identity_profile.get("household_id") or "") != household_id
+        ):
+            continue
+
+        owner_subject = str(identity_profile.get("owner_principal_id") or "").strip()
+        member_subject = str(identity_profile.get("member_principal_id") or "").strip()
+        subject = owner_subject if expected_role is CanonicalRole.OWNER else member_subject
+        if not subject:
+            continue
+        principal = principals_table.get_item(
+            Key={"principal_id": subject}, ConsistentRead=True,
+        ).get("Item")
+        legacy_membership = identity_memberships_table.get_item(
+            Key={"principal_id": subject}, ConsistentRead=True,
+        ).get("Item")
+        household = identity_households_table.get_item(
+            Key={"household_id": household_id}, ConsistentRead=True,
+        ).get("Item")
+        try:
+            claims = derive_authoritative_claims(
+                subject, principal, legacy_membership, household, identity_profile,
+            )
+            role = canonical_role(claims.role)
+        except (AccountFoundationError, AuthorityError):
+            continue
+        if (
+            claims.account_id != account_id
+            or claims.household_id != household_id
+            or claims.profile_id != profile_id
+            or role is not expected_role
+            or (role is CanonicalRole.OWNER and subject != owner_subject)
+            or (role is not CanonicalRole.OWNER and subject != member_subject)
+        ):
+            continue
+        candidates.append((profile_id, role))
+
+    unique_candidates = {profile_id: role for profile_id, role in candidates}
+    if len(unique_candidates) != 1:
+        return normalized_membership
+    profile_id, role = next(iter(unique_candidates.items()))
+    access_role = household_access_role(
+        normalized_membership.get("household_access_role"), canonical=role,
+    ).value
+    now_iso = utc_now_iso()
+    now_epoch = epoch_now()
+    try:
+        household_memberships_table.update_item(
+            Key={"household_id": household_id, "membership_id": membership_id},
+            UpdateExpression=(
+                "SET profile_id = :profile_id, "
+                "household_access_role = if_not_exists(household_access_role, :access_role), "
+                "updated_at = :updated_at, updated_at_epoch = :updated_at_epoch, "
+                "migration_provenance = :provenance"
+            ),
+            ConditionExpression=(
+                "entity_type = :entity_type AND #status = :active "
+                "AND account_id = :account_id AND household_id = :household_id "
+                "AND membership_id = :membership_id AND canonical_role = :canonical_role "
+                "AND schema_version = :schema_version AND attribute_not_exists(profile_id)"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":profile_id": profile_id,
+                ":access_role": access_role,
+                ":updated_at": now_iso,
+                ":updated_at_epoch": now_epoch,
+                ":provenance": "exact-legacy-profile-pointer-reconciliation-v1",
+                ":entity_type": "HouseholdMembership",
+                ":active": "active",
+                ":account_id": account_id,
+                ":household_id": household_id,
+                ":membership_id": membership_id,
+                ":canonical_role": role.value,
+                ":schema_version": 1,
+            },
+        )
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        current = household_memberships_table.get_item(
+            Key={"household_id": household_id, "membership_id": membership_id},
+            ConsistentRead=True,
+        ).get("Item")
+        if not isinstance(current, dict) or str(current.get("profile_id") or "") != profile_id:
+            return normalized_membership
+        return current
+
+    repaired = dict(normalized_membership)
+    repaired.update({
+        "profile_id": profile_id,
+        "household_access_role": access_role,
+        "updated_at": now_iso,
+        "updated_at_epoch": now_epoch,
+        "migration_provenance": "exact-legacy-profile-pointer-reconciliation-v1",
+    })
+    return repaired
+
+
+def _public_household_profile_roster_item(profile, *, canonical_role, household_access_role):
+    """Project only profile display and policy fields safe for a manager roster."""
+    profile_id = str(profile.get("profile_id") or "")
+    display_name = str(profile.get("display_name") or "").strip()
+    profile_type = str(profile.get("profile_type") or "").strip().lower()
+    if not profile_id or not display_name or profile_type not in {"adult", "teen", "child", "kid"}:
+        raise AccountFoundationError("household_profile_roster_record_invalid")
+    return {
+        "profile_id": profile_id,
+        "display_name": display_name,
+        "profile_type": profile_type,
+        "canonical_role": canonical_role,
+        "household_access_role": household_access_role,
+        "request_access_enabled": bool_value(profile.get("request_access_enabled"), False),
+        "cloud_access_enabled": bool_value(profile.get("cloud_access_enabled"), True),
+        "allowed_profile_switch_targets": list(profile.get("switch_profile_ids") or []),
+        "status": "active",
+    }
+
+
+def list_household_profiles_v3(event):
+    """Return the canonical active roster for a server-authorized manager.
+
+    Invitations are deliberately not consulted: accepted, expired, and
+    deleted invitations are workflow artifacts, never household profiles.
+    """
+    if any(table is None for table in (
+        household_memberships_table,
+        profile_bindings_table,
+        profiles_table,
+        principals_table,
+        identity_memberships_table,
+        identity_households_table,
+        identity_profiles_table,
+    )):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return failure
+    if "household.manage" not in set((context.get("household") or {}).get("capabilities") or []):
+        return response(403, {"state": "household_profile_roster_not_authorized"})
+
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    if not household_id:
+        return response(409, {"state": "household_profile_roster_unavailable"})
+
+    # A 30-day deletion is revoked immediately and finalized on the first
+    # authoritative Owner refresh at or after its execute time. Every cleanup
+    # path remains exact-key/household-query based; no DynamoDB Scan is used.
+    if (
+        str((context.get("household") or {}).get("canonical_role") or "")
+        == CanonicalRole.OWNER.value
+        and all((
+            principals_table,
+            identity_memberships_table,
+            profiles_table,
+            profile_bindings_table,
+            profile_mappings_table,
+            installations_table,
+            app_sessions_table,
+            household_invitations_table,
+            household_join_transactions_table,
+            events_table,
+            profile_settings_table,
+            entitlements_table,
+            devices_table,
+            security_audit_table,
+        ))
+    ):
+        for membership in _household_membership_records(household_id):
+            if (
+                not isinstance(membership, dict)
+                or membership.get("entity_type") != "HouseholdMembership"
+                or membership.get("status") != "deletion_pending"
+                or int(membership.get("deletion_execute_at_epoch") or 0) > epoch_now()
+            ):
+                continue
+            profile_id = str(membership.get("profile_id") or "")
+            if not profile_id:
+                continue
+            try:
+                graph = _canonical_profile_deletion_context(
+                    profile_id=profile_id,
+                    household_id=household_id,
+                    session=session,
+                )
+                if graph is not None:
+                    _execute_canonical_profile_deletion(
+                        event,
+                        session,
+                        context,
+                        graph,
+                        profile_id=profile_id,
+                        household_id=household_id,
+                        mode="immediate",
+                    )
+            except (AccountFoundationError, AuditReferenceError, ClientError):
+                # The profile remains access-revoked and hidden. A later Owner
+                # refresh retries the exact retained graph.
+                LOGGER.warning("profile_retention_finalization_deferred")
+
+    roster_by_profile_id = {}
+    for membership in _household_membership_records(household_id):
+        if (
+            not isinstance(membership, dict)
+            or membership.get("entity_type") != "HouseholdMembership"
+            or membership.get("status") != "active"
+            or str(membership.get("household_id") or "") != household_id
+        ):
+            continue
+        membership = _repair_legacy_active_membership_profile_pointer(membership)
+        profile_id = str(membership.get("profile_id") or "")
+        if not profile_id:
+            # A legacy normalized projection without an exact profile pointer
+            # is intentionally not guessed or recovered by Scan.
+            continue
+        profile = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+        if (
+            not isinstance(profile, dict)
+            or profile.get("state") != "active"
+            or str(profile.get("profile_id") or "") != profile_id
+            or str(profile.get("household_id") or "") != household_id
+            or str(profile.get("account_id") or "") != str(membership.get("account_id") or "")
+        ):
+            continue
+        try:
+            item = _public_household_profile_roster_item(
+                profile,
+                canonical_role=str(membership.get("canonical_role") or ""),
+                household_access_role=str(membership.get("household_access_role") or ""),
+            )
+        except AccountFoundationError:
+            continue
+        roster_by_profile_id[item["profile_id"]] = item
+
+    profiles = sorted(roster_by_profile_id.values(), key=lambda item: (
+        str(item["display_name"]).casefold(), item["profile_id"],
+    ))
+    return response(200, {
+        "schema_version": 1,
+        "state": "household_profiles_ready",
+        "profiles": profiles,
+    })
+
+
+def _resolve_ownership_candidate(household, normalized_membership):
+    if (
+        not isinstance(normalized_membership, dict)
+        or normalized_membership.get("entity_type") != "HouseholdMembership"
+        or normalized_membership.get("status") != "active"
+        or normalized_membership.get("canonical_role") != CanonicalRole.ADULT.value
+        or normalized_membership.get("household_access_role")
+        not in {HouseholdAccessRole.ADMIN.value, HouseholdAccessRole.MEMBER.value}
+    ):
+        raise AccountFoundationError("ownership_transfer_target_not_eligible")
+    household_id = str(household.get("household_id") or "")
+    account_id = str(normalized_membership.get("account_id") or "")
+    profile_id = str(normalized_membership.get("profile_id") or "")
+    if (
+        not account_id
+        or not profile_id
+        or str(normalized_membership.get("household_id") or "") != household_id
+        or str(normalized_membership.get("membership_id") or "")
+        != household_membership_id(account_id, household_id)
+    ):
+        raise AccountFoundationError("ownership_transfer_target_not_eligible")
+    profile = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    subject = str((profile or {}).get("member_principal_id") or "")
+    if not subject:
+        raise AccountFoundationError("ownership_transfer_target_not_eligible")
+    principal = principals_table.get_item(
+        Key={"principal_id": subject}, ConsistentRead=True,
+    ).get("Item")
+    legacy_membership = identity_memberships_table.get_item(
+        Key={"principal_id": subject}, ConsistentRead=True,
+    ).get("Item")
+    try:
+        claims, role, resolved_membership = resolve_household_membership(
+            subject=subject,
+            principal=principal,
+            legacy_membership=legacy_membership,
+            household=household,
+            profile=profile,
+            normalized_membership=normalized_membership,
+        )
+    except (AccountFoundationError, AuthorityError) as error:
+        raise AccountFoundationError("ownership_transfer_target_not_eligible") from error
+    if (
+        role is not CanonicalRole.ADULT
+        or claims.account_id != account_id
+        or claims.household_id != household_id
+        or claims.profile_id != profile_id
+    ):
+        raise AccountFoundationError("ownership_transfer_target_not_eligible")
+    return {
+        "account_id": account_id,
+        "profile_id": profile_id,
+        "subject": subject,
+        "display_name": str(profile.get("display_name") or "").strip() or "Household member",
+        "normalized_membership": resolved_membership,
+        "principal": principal,
+        "legacy_membership": legacy_membership,
+        "profile": profile,
+        "claims": claims,
+    }
+
+
+def list_ownership_transfer_candidates_v3(event):
+    session, context, failure = _ownership_transfer_context(event)
+    if failure:
+        return failure
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    caller_account_id = str((context.get("account") or {}).get("account_id") or "")
+    household = identity_households_table.get_item(
+        Key={"household_id": household_id}, ConsistentRead=True,
+    ).get("Item")
+    if (
+        not isinstance(household, dict)
+        or household.get("state") != "active"
+        or str(household.get("owner_principal_id") or "")
+        != str(session.get("principal_id") or "")
+    ):
+        return _ownership_transfer_failure(
+            event, session, "ownership_transfer_authority_changed",
+        )
+    candidates = []
+    for item in _household_membership_records(household_id):
+        if (
+            not isinstance(item, dict)
+            or item.get("entity_type") != "HouseholdMembership"
+            or str(item.get("account_id") or "") == caller_account_id
+        ):
+            continue
+        try:
+            candidate = _resolve_ownership_candidate(household, item)
+        except AccountFoundationError:
+            continue
+        candidates.append({
+            "account_id": candidate["account_id"],
+            "profile_id": candidate["profile_id"],
+            "display_name": candidate["display_name"],
+            "canonical_role": CanonicalRole.ADULT.value,
+            "household_access_role": str(item.get("household_access_role") or ""),
+        })
+    candidates.sort(key=lambda value: (
+        str(value.get("display_name") or "").casefold(),
+        str(value.get("profile_id") or ""),
+    ))
+    return response(200, {
+        "state": "ownership_transfer_candidates_ready",
+        "candidates": candidates,
+    })
+
+
+def transfer_household_ownership_v3(event):
+    session, context, failure = _ownership_transfer_context(event)
+    if failure:
+        return failure
+    body = parse_json_body(event)
+    if not isinstance(body, dict) or body.get("explicit_confirmation") is not True:
+        return _ownership_transfer_failure(
+            event, session, "ownership_transfer_confirmation_required",
+        )
+    target_account_id = str(body.get("target_account_id") or "").strip()
+    target_profile_id = str(body.get("target_profile_id") or "").strip()
+    current_account_id = str((context.get("account") or {}).get("account_id") or "")
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    current_subject = str(session.get("principal_id") or "")
+    current_profile_id = str(session.get("profile_id") or "")
+    if (
+        not target_account_id
+        or not target_profile_id
+        or target_account_id == current_account_id
+        or target_profile_id == current_profile_id
+    ):
+        return _ownership_transfer_failure(
+            event, session, "ownership_transfer_target_not_eligible",
+            target_id=target_profile_id,
+        )
+
+    household = identity_households_table.get_item(
+        Key={"household_id": household_id}, ConsistentRead=True,
+    ).get("Item")
+    current_principal = principals_table.get_item(
+        Key={"principal_id": current_subject}, ConsistentRead=True,
+    ).get("Item")
+    current_legacy_membership = identity_memberships_table.get_item(
+        Key={"principal_id": current_subject}, ConsistentRead=True,
+    ).get("Item")
+    current_profile = identity_profiles_table.get_item(
+        Key={"profile_id": current_profile_id}, ConsistentRead=True,
+    ).get("Item")
+    current_membership_id = household_membership_id(current_account_id, household_id)
+    current_normalized_membership = household_memberships_table.get_item(Key={
+        "household_id": household_id,
+        "membership_id": current_membership_id,
+    }, ConsistentRead=True).get("Item")
+    owner_guard_id = household_owner_guard_id(household_id)
+    owner_guard = household_memberships_table.get_item(Key={
+        "household_id": household_id,
+        "membership_id": owner_guard_id,
+    }, ConsistentRead=True).get("Item")
+    try:
+        current_claims, current_role, _ = resolve_household_membership(
+            subject=current_subject,
+            principal=current_principal,
+            legacy_membership=current_legacy_membership,
+            household=household,
+            profile=current_profile,
+            normalized_membership=current_normalized_membership,
+        )
+        if (
+            current_role is not CanonicalRole.OWNER
+            or current_claims.account_id != current_account_id
+            or current_claims.profile_id != current_profile_id
+            or not isinstance(owner_guard, dict)
+            or owner_guard.get("entity_type") != "HouseholdMembershipOwnerGuard"
+            or owner_guard.get("status") != "active"
+            or str(owner_guard.get("account_id") or "") != current_account_id
+            or str(owner_guard.get("normalized_membership_id") or "") != current_membership_id
+        ):
+            raise AccountFoundationError("ownership_transfer_authority_changed")
+        target_membership = household_memberships_table.get_item(Key={
+            "household_id": household_id,
+            "membership_id": household_membership_id(target_account_id, household_id),
+        }, ConsistentRead=True).get("Item")
+        candidate = _resolve_ownership_candidate(household, target_membership)
+        if (
+            candidate["account_id"] != target_account_id
+            or candidate["profile_id"] != target_profile_id
+        ):
+            raise AccountFoundationError("ownership_transfer_target_not_eligible")
+    except AccountFoundationError as error:
+        return _ownership_transfer_failure(
+            event, session, error.reason, target_id=target_profile_id,
+        )
+
+    now_iso = utc_now_iso()
+    now_epoch = epoch_now()
+    current_authz_version = int(current_claims.authz_version)
+    target_authz_version = int(candidate["claims"].authz_version)
+    target_subject = candidate["subject"]
+    target_membership_id = household_membership_id(target_account_id, household_id)
+    try:
+        audit = _profile_binding_audit(
+            event,
+            session,
+            "household_ownership_transferred",
+            "success",
+            target_id=target_profile_id,
+            target_type="household_membership",
+            reason_code="explicit_owner_transfer_v1",
+        )
+        dynamodb.meta.client.transact_write_items(TransactItems=[
+            {"Update": {
+                "TableName": PRINCIPALS_TABLE,
+                "Key": {"principal_id": current_subject},
+                "ConditionExpression": (
+                    "account_id = :account_id AND household_id = :household_id "
+                    "AND #role = :owner AND authz_version = :current_version "
+                    "AND #state = :active"
+                ),
+                "UpdateExpression": (
+                    "SET #role = :adult, canonical_role = :adult, "
+                    "household_access_role = :admin, authz_version = :next_version, "
+                    "updated_at = :updated_at"
+                ),
+                "ExpressionAttributeNames": {"#role": "role", "#state": "state"},
+                "ExpressionAttributeValues": {
+                    ":account_id": current_account_id,
+                    ":household_id": household_id,
+                    ":owner": CanonicalRole.OWNER.value,
+                    ":adult": CanonicalRole.ADULT.value,
+                    ":admin": HouseholdAccessRole.ADMIN.value,
+                    ":current_version": current_authz_version,
+                    ":next_version": current_authz_version + 1,
+                    ":active": "active",
+                    ":updated_at": now_iso,
+                },
+            }},
+            {"Update": {
+                "TableName": PRINCIPALS_TABLE,
+                "Key": {"principal_id": target_subject},
+                "ConditionExpression": (
+                    "account_id = :account_id AND household_id = :household_id "
+                    "AND #role = :adult AND authz_version = :current_version "
+                    "AND #state = :active"
+                ),
+                "UpdateExpression": (
+                    "SET #role = :owner, canonical_role = :owner, "
+                    "household_access_role = :owner_access, authz_version = :next_version, "
+                    "updated_at = :updated_at"
+                ),
+                "ExpressionAttributeNames": {"#role": "role", "#state": "state"},
+                "ExpressionAttributeValues": {
+                    ":account_id": target_account_id,
+                    ":household_id": household_id,
+                    ":adult": CanonicalRole.ADULT.value,
+                    ":owner": CanonicalRole.OWNER.value,
+                    ":owner_access": HouseholdAccessRole.OWNER.value,
+                    ":current_version": target_authz_version,
+                    ":next_version": target_authz_version + 1,
+                    ":active": "active",
+                    ":updated_at": now_iso,
+                },
+            }},
+            {"Update": {
+                "TableName": IDENTITY_MEMBERSHIPS_TABLE,
+                "Key": {"principal_id": current_subject},
+                "ConditionExpression": (
+                    "account_id = :account_id AND household_id = :household_id "
+                    "AND profile_id = :profile_id AND #role = :owner "
+                    "AND authz_version = :current_version AND #state = :active"
+                ),
+                "UpdateExpression": (
+                    "SET #role = :adult, canonical_role = :adult, "
+                    "household_access_role = :admin, authz_version = :next_version, "
+                    "updated_at = :updated_at"
+                ),
+                "ExpressionAttributeNames": {"#role": "role", "#state": "state"},
+                "ExpressionAttributeValues": {
+                    ":account_id": current_account_id,
+                    ":household_id": household_id,
+                    ":profile_id": current_profile_id,
+                    ":owner": CanonicalRole.OWNER.value,
+                    ":adult": CanonicalRole.ADULT.value,
+                    ":admin": HouseholdAccessRole.ADMIN.value,
+                    ":current_version": current_authz_version,
+                    ":next_version": current_authz_version + 1,
+                    ":active": "active",
+                    ":updated_at": now_iso,
+                },
+            }},
+            {"Update": {
+                "TableName": IDENTITY_MEMBERSHIPS_TABLE,
+                "Key": {"principal_id": target_subject},
+                "ConditionExpression": (
+                    "account_id = :account_id AND household_id = :household_id "
+                    "AND profile_id = :profile_id AND #role = :adult "
+                    "AND authz_version = :current_version AND #state = :active"
+                ),
+                "UpdateExpression": (
+                    "SET #role = :owner, canonical_role = :owner, "
+                    "household_access_role = :owner_access, authz_version = :next_version, "
+                    "updated_at = :updated_at"
+                ),
+                "ExpressionAttributeNames": {"#role": "role", "#state": "state"},
+                "ExpressionAttributeValues": {
+                    ":account_id": target_account_id,
+                    ":household_id": household_id,
+                    ":profile_id": target_profile_id,
+                    ":adult": CanonicalRole.ADULT.value,
+                    ":owner": CanonicalRole.OWNER.value,
+                    ":owner_access": HouseholdAccessRole.OWNER.value,
+                    ":current_version": target_authz_version,
+                    ":next_version": target_authz_version + 1,
+                    ":active": "active",
+                    ":updated_at": now_iso,
+                },
+            }},
+            {"Update": {
+                "TableName": HOUSEHOLD_MEMBERSHIPS_TABLE,
+                "Key": {"household_id": household_id, "membership_id": current_membership_id},
+                "ConditionExpression": (
+                    "entity_type = :entity AND account_id = :account_id "
+                    "AND canonical_role = :owner AND household_access_role = :owner_access "
+                    "AND #status = :active"
+                ),
+                "UpdateExpression": (
+                    "SET canonical_role = :adult, household_access_role = :admin, "
+                    "updated_at = :updated_at, updated_at_epoch = :updated_epoch"
+                ),
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": {
+                    ":entity": "HouseholdMembership",
+                    ":account_id": current_account_id,
+                    ":owner": CanonicalRole.OWNER.value,
+                    ":owner_access": HouseholdAccessRole.OWNER.value,
+                    ":adult": CanonicalRole.ADULT.value,
+                    ":admin": HouseholdAccessRole.ADMIN.value,
+                    ":active": "active",
+                    ":updated_at": now_iso,
+                    ":updated_epoch": now_epoch,
+                },
+            }},
+            {"Update": {
+                "TableName": HOUSEHOLD_MEMBERSHIPS_TABLE,
+                "Key": {"household_id": household_id, "membership_id": target_membership_id},
+                "ConditionExpression": (
+                    "entity_type = :entity AND account_id = :account_id "
+                    "AND canonical_role = :adult AND #status = :active"
+                ),
+                "UpdateExpression": (
+                    "SET canonical_role = :owner, household_access_role = :owner_access, "
+                    "updated_at = :updated_at, updated_at_epoch = :updated_epoch"
+                ),
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": {
+                    ":entity": "HouseholdMembership",
+                    ":account_id": target_account_id,
+                    ":adult": CanonicalRole.ADULT.value,
+                    ":owner": CanonicalRole.OWNER.value,
+                    ":owner_access": HouseholdAccessRole.OWNER.value,
+                    ":active": "active",
+                    ":updated_at": now_iso,
+                    ":updated_epoch": now_epoch,
+                },
+            }},
+            {"Update": {
+                "TableName": HOUSEHOLD_MEMBERSHIPS_TABLE,
+                "Key": {"household_id": household_id, "membership_id": owner_guard_id},
+                "ConditionExpression": (
+                    "entity_type = :entity AND account_id = :current_account_id "
+                    "AND normalized_membership_id = :current_membership_id "
+                    "AND #status = :active"
+                ),
+                "UpdateExpression": (
+                    "SET account_id = :target_account_id, "
+                    "normalized_membership_id = :target_membership_id, "
+                    "updated_at = :updated_at, updated_at_epoch = :updated_epoch"
+                ),
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": {
+                    ":entity": "HouseholdMembershipOwnerGuard",
+                    ":current_account_id": current_account_id,
+                    ":current_membership_id": current_membership_id,
+                    ":target_account_id": target_account_id,
+                    ":target_membership_id": target_membership_id,
+                    ":active": "active",
+                    ":updated_at": now_iso,
+                    ":updated_epoch": now_epoch,
+                },
+            }},
+            {"Update": {
+                "TableName": IDENTITY_HOUSEHOLDS_TABLE,
+                "Key": {"household_id": household_id},
+                "ConditionExpression": (
+                    "account_id = :current_account_id AND owner_principal_id = :current_subject "
+                    "AND #state = :active"
+                ),
+                "UpdateExpression": (
+                    "SET account_id = :target_account_id, owner_principal_id = :target_subject, "
+                    "updated_at = :updated_at"
+                ),
+                "ExpressionAttributeNames": {"#state": "state"},
+                "ExpressionAttributeValues": {
+                    ":current_account_id": current_account_id,
+                    ":current_subject": current_subject,
+                    ":target_account_id": target_account_id,
+                    ":target_subject": target_subject,
+                    ":active": "active",
+                    ":updated_at": now_iso,
+                },
+            }},
+            {"Update": {
+                "TableName": IDENTITY_PROFILES_TABLE,
+                "Key": {"profile_id": current_profile_id},
+                "ConditionExpression": (
+                    "account_id = :account_id AND household_id = :household_id "
+                    "AND owner_principal_id = :current_subject AND #role = :owner "
+                    "AND #state = :active"
+                ),
+                "UpdateExpression": (
+                    "SET owner_principal_id = :target_subject, #role = :adult, "
+                    "canonical_role = :adult, household_access_role = :admin, "
+                    "updated_at = :updated_at"
+                ),
+                "ExpressionAttributeNames": {"#role": "role", "#state": "state"},
+                "ExpressionAttributeValues": {
+                    ":account_id": current_account_id,
+                    ":household_id": household_id,
+                    ":current_subject": current_subject,
+                    ":target_subject": target_subject,
+                    ":owner": CanonicalRole.OWNER.value,
+                    ":adult": CanonicalRole.ADULT.value,
+                    ":admin": HouseholdAccessRole.ADMIN.value,
+                    ":active": "active",
+                    ":updated_at": now_iso,
+                },
+            }},
+            {"Update": {
+                "TableName": IDENTITY_PROFILES_TABLE,
+                "Key": {"profile_id": target_profile_id},
+                "ConditionExpression": (
+                    "account_id = :account_id AND household_id = :household_id "
+                    "AND member_principal_id = :target_subject AND #role = :adult "
+                    "AND #state = :active"
+                ),
+                "UpdateExpression": (
+                    "SET owner_principal_id = :target_subject, #role = :owner, "
+                    "canonical_role = :owner, household_access_role = :owner_access, "
+                    "updated_at = :updated_at"
+                ),
+                "ExpressionAttributeNames": {"#role": "role", "#state": "state"},
+                "ExpressionAttributeValues": {
+                    ":account_id": target_account_id,
+                    ":household_id": household_id,
+                    ":target_subject": target_subject,
+                    ":adult": CanonicalRole.ADULT.value,
+                    ":owner": CanonicalRole.OWNER.value,
+                    ":owner_access": HouseholdAccessRole.OWNER.value,
+                    ":active": "active",
+                    ":updated_at": now_iso,
+                },
+            }},
+            {"Put": {
+                "TableName": SECURITY_AUDIT_TABLE,
+                "Item": audit,
+                "ConditionExpression": "attribute_not_exists(event_id)",
+            }},
+        ])
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") == "TransactionCanceledException":
+            return _ownership_transfer_failure(
+                event, session, "ownership_transfer_conflict", target_id=target_profile_id,
+            )
+        raise
+    return response(200, {
+        "state": "household_ownership_transferred",
+        "requires_reauthentication": True,
+    })
+
+
+def _profile_binding_failure(event, session, state, *, target_id="", target_type="profile"):
+    event_type = {
+        "cross_household_binding_rejected": "profile_binding_cross_household_rejected",
+        "profile_binding_conflict": "profile_binding_conflict",
+        "profile_binding_not_reactivated": "profile_binding_rejected",
+        "profile_access_level_not_permitted": "profile_binding_unauthorized_access_level",
+    }.get(state, "profile_binding_rejected")
+    try:
+        commit_security_audit(_profile_binding_audit(
+            event, session, event_type, "denied", target_id=target_id,
+            target_type=target_type, reason_code=state,
+        ))
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    return response(409 if state not in {"profile_access_level_not_permitted"} else 403, {"state": state})
+
+
+def create_profile_v3(event):
+    """Create a Cloud profile and creator-only manage binding atomically."""
+    if any(table is None for table in (profiles_table, profile_bindings_table, security_audit_table)):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return failure
+    if "household.manage" not in set((context.get("household") or {}).get("capabilities") or []):
+        return _profile_binding_failure(event, session, "profile_creation_not_authorized", target_type="profile")
+    body = parse_json_body(event)
+    if not isinstance(body, dict):
+        return _profile_binding_failure(event, session, "invalid_profile_request", target_type="profile")
+    account_id = str((context.get("account") or {}).get("account_id") or "")
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    try:
+        plan = build_profile_creation(
+            household_id=household_id,
+            account_id=account_id,
+            display_name=body.get("display_name"),
+            profile_type=body.get("profile_type"),
+            age_classification=body.get("age_classification"),
+            now_iso=utc_now_iso(), now_epoch=epoch_now(),
+        )
+        audit = _profile_binding_audit(
+            event, session, "profile_created", "success", target_id=plan.profile["profile_id"],
+        )
+        dynamodb.meta.client.transact_write_items(TransactItems=[
+            {"Put": {
+                "TableName": PROFILES_TABLE, "Item": plan.profile,
+                "ConditionExpression": "attribute_not_exists(profile_id)",
+            }},
+            {"Put": {
+                "TableName": PROFILE_BINDINGS_TABLE, "Item": plan.binding,
+                "ConditionExpression": "attribute_not_exists(account_id) AND attribute_not_exists(profile_id)",
+            }},
+            {"Put": {
+                "TableName": SECURITY_AUDIT_TABLE, "Item": audit,
+                "ConditionExpression": "attribute_not_exists(event_id)",
+            }},
+        ])
+    except AccountFoundationError as error:
+        return _profile_binding_failure(event, session, error.reason, target_type="profile")
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") == "TransactionCanceledException":
+            return _profile_binding_failure(event, session, "profile_creation_conflict", target_type="profile")
+        raise
+    return _migration_response_with_identity(event, "profile_created", session)
+
+
+def profile_binding_path_id(path):
+    match = re.fullmatch(r"/v3/identity/profiles/([^/]+)/bindings", str(path or ""))
+    return match.group(1) if match else ""
+
+
+def profile_deletion_path_id(path):
+    match = re.fullmatch(r"/v3/identity/profiles/([^/]+)/deletion", str(path or ""))
+    return match.group(1) if match else ""
+
+
+def profile_jellyfin_binding_path_id(path):
+    match = re.fullmatch(
+        r"/v3/identity/profiles/([^/]+)/jellyfin-binding", str(path or ""),
+    )
+    return match.group(1) if match else ""
+
+
+def _normalized_jellyfin_user_id(value):
+    compact = str(value or "").strip().replace("-", "")
+    return compact.lower() if re.fullmatch(r"[0-9a-fA-F]{32}", compact) else ""
+
+
+def _profile_jellyfin_binding_for_connector(profile_id, connector_id):
+    """Resolve one exact active Cloud-profile provider edge for its connector."""
+    if identity_profiles_table is None or not profile_id or not connector_id:
+        return None
+    profile = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    user_id = _normalized_jellyfin_user_id((profile or {}).get("jellyfin_user_id"))
+    if (
+        not isinstance(profile, dict)
+        or profile.get("state") != "active"
+        or str(profile.get("profile_id") or "") != profile_id
+        or str(profile.get("jellyfin_binding_state") or "") != "active"
+        or not hmac.compare_digest(
+            str(profile.get("jellyfin_connector_id") or ""), connector_id,
+        )
+        or not user_id
+    ):
+        return None
+    return {
+        "provider": "jellyfin",
+        "connector_id": connector_id,
+        "provider_user_id": user_id,
+    }
+
+
+def _household_identity_profile_records(household_id):
+    """Enumerate canonical profiles by household membership Query + exact GetItem."""
+    if household_memberships_table is None or identity_profiles_table is None:
+        return []
+    records = {}
+    for membership in _household_membership_records(household_id):
+        if (
+            not isinstance(membership, dict)
+            or membership.get("entity_type") != "HouseholdMembership"
+            or str(membership.get("household_id") or "") != household_id
+        ):
+            continue
+        membership = _repair_legacy_active_membership_profile_pointer(membership)
+        profile_id = str(membership.get("profile_id") or "")
+        if not profile_id:
+            continue
+        profile = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+        if (
+            isinstance(profile, dict)
+            and str(profile.get("profile_id") or "") == profile_id
+            and hmac.compare_digest(
+                str(profile.get("household_id") or ""), household_id,
+            )
+        ):
+            records[profile_id] = profile
+    return list(records.values())
+
+
+def _delete_profile_binding_recovery_request(request_id, profile_id, connector_id):
+    """Remove the one-time provider identity response after exact validation."""
+    if remote_requests_table is None:
+        return
+    try:
+        remote_requests_table.delete_item(
+            Key={"request_id": request_id},
+            ConditionExpression="profile_id = :profile_id AND connector_id = :connector_id",
+            ExpressionAttributeValues={
+                ":profile_id": profile_id,
+                ":connector_id": connector_id,
+            },
+        )
+    except ClientError:
+        # The canonical profile update remains authoritative. A failed cleanup
+        # retains only the bounded TTL record; it never changes authorization.
+        LOGGER.warning("profile Jellyfin recovery response cleanup was deferred")
+
+
+def _recover_profile_jellyfin_binding_from_connector(
+    profile_id,
+    connectors,
+    *,
+    timeout_seconds=8.0,
+):
+    """Ask exactly one online household connector for one exact stored edge.
+
+    The command carries only the canonical Cloud profile identifier. The plugin
+    resolves its existing profile-to-Jellyfin registry, never an Owner fallback
+    or display-name match. The temporary response is deleted after validation.
+    """
+    if remote_requests_table is None:
+        return {"state": "profile_jellyfin_binding_recovery_unavailable"}
+    online = [
+        item for item in connectors
+        if isinstance(item, dict)
+        and str(item.get("connector_id") or "")
+        and connector_online_from_item(item)
+    ]
+    if len(online) != 1:
+        return {
+            "state": (
+                "profile_jellyfin_connector_missing"
+                if not online
+                else "profile_jellyfin_connector_ambiguous"
+            ),
+        }
+
+    connector_id = str(online[0].get("connector_id") or "")
+    request_id = str(uuid.uuid4())
+    now = utc_now_iso()
+    request_payload = {
+        "provider": "home_server",
+        "method": "COMMAND",
+        "path": "/commands/jellyfin.recover_profile_binding",
+        "query": {},
+        "body": {},
+    }
+    priority = remote_request_priority(request_payload)
+    item = {
+        "request_id": request_id,
+        "profile_id": profile_id,
+        "connector_id": connector_id,
+        "status": "pending",
+        "status_created_at": status_sort_key(
+            "pending", now, request_id, priority,
+        ),
+        "priority": priority,
+        "request_json": json.dumps(
+            request_payload, separators=(",", ":"), sort_keys=True,
+        ),
+        "created_at": now,
+        "updated_at": now,
+        # Recovery responses contain a provider identifier only briefly. They
+        # are deleted on success and expire quickly if the plugin is offline.
+        "expires_at": epoch_now() + 5 * 60,
+    }
+    remote_requests_table.put_item(
+        Item=item,
+        ConditionExpression="attribute_not_exists(request_id)",
+    )
+
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        current = remote_requests_table.get_item(
+            Key={"request_id": request_id}, ConsistentRead=True,
+        ).get("Item")
+        if not isinstance(current, dict):
+            return {"state": "profile_jellyfin_binding_recovery_missing"}
+        if not (
+            hmac.compare_digest(
+                str(current.get("profile_id") or ""), profile_id,
+            )
+            and hmac.compare_digest(
+                str(current.get("connector_id") or ""), connector_id,
+            )
+        ):
+            return {"state": "profile_jellyfin_binding_recovery_mismatch"}
+
+        status = str(current.get("status") or "")
+        if status == "completed":
+            payload = decode_remote_response_payload(current, None)
+            result = payload.get("result") if isinstance(payload, dict) else None
+            user_id = _normalized_jellyfin_user_id(
+                (result or {}).get("provider_user_id")
+                if isinstance(result, dict) else ""
+            )
+            valid = (
+                200 <= int(current.get("http_status") or 0) < 300
+                and isinstance(payload, dict)
+                and str(payload.get("requestId") or "") == request_id
+                and payload.get("state") == "complete"
+                and payload.get("operation") == "jellyfin.recover_profile_binding"
+                and isinstance(result, dict)
+                and result.get("provider") == "jellyfin"
+                and bool(user_id)
+            )
+            _delete_profile_binding_recovery_request(
+                request_id, profile_id, connector_id,
+            )
+            if not valid:
+                return {"state": "profile_jellyfin_binding_recovery_invalid"}
+            return {
+                "state": "recovered",
+                "connector_id": connector_id,
+                "jellyfin_user_id": user_id,
+            }
+        if status == "failed":
+            return {"state": "profile_jellyfin_binding_source_missing"}
+        if status not in {"pending", "in_progress", "completing"}:
+            return {"state": "profile_jellyfin_binding_recovery_invalid"}
+        time.sleep(0.25)
+
+    return {"state": "profile_jellyfin_binding_recovery_pending"}
+
+
+def _execute_profile_binding_connector_command(
+    profile_id,
+    connectors,
+    operation,
+    parameters,
+    *,
+    timeout_seconds=8.0,
+    binding_operation_id="",
+):
+    """Execute one exact, short-lived binding command on one online connector."""
+    allowed_operations = {
+        "jellyfin.inspect_profile_binding_owner",
+        "jellyfin.reassign_stale_profile_binding",
+    }
+    if remote_requests_table is None or operation not in allowed_operations:
+        return {"state": "profile_jellyfin_binding_command_unavailable"}
+    online = [
+        item for item in connectors
+        if isinstance(item, dict)
+        and str(item.get("connector_id") or "")
+        and connector_online_from_item(item)
+    ]
+    if len(online) != 1:
+        return {
+            "state": (
+                "profile_jellyfin_connector_missing"
+                if not online
+                else "profile_jellyfin_connector_ambiguous"
+            ),
+        }
+
+    connector_id = str(online[0].get("connector_id") or "")
+    request_id = str(uuid.uuid4())
+    now = utc_now_iso()
+    request_payload = {
+        "provider": "home_server",
+        "method": "COMMAND",
+        "path": f"/commands/{operation}",
+        "query": {},
+        "body": dict(parameters or {}),
+    }
+    if binding_operation_id:
+        request_payload["binding_operation_id"] = binding_operation_id
+    priority = remote_request_priority(request_payload)
+    remote_requests_table.put_item(
+        Item={
+            "request_id": request_id,
+            "profile_id": profile_id,
+            "connector_id": connector_id,
+            "status": "pending",
+            "status_created_at": status_sort_key(
+                "pending", now, request_id, priority,
+            ),
+            "priority": priority,
+            "request_json": json.dumps(
+                request_payload, separators=(",", ":"), sort_keys=True,
+            ),
+            "created_at": now,
+            "updated_at": now,
+            "expires_at": epoch_now() + 5 * 60,
+            **({"binding_operation_id": binding_operation_id} if binding_operation_id else {}),
+        },
+        ConditionExpression="attribute_not_exists(request_id)",
+    )
+    if binding_operation_id:
+        _binding_operation_transition(
+            binding_operation_id, "dispatched", connector_request_id=request_id,
+        )
+
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        current = remote_requests_table.get_item(
+            Key={"request_id": request_id}, ConsistentRead=True,
+        ).get("Item")
+        if not isinstance(current, dict):
+            return {"state": "profile_jellyfin_binding_command_missing"}
+        if not (
+            hmac.compare_digest(str(current.get("profile_id") or ""), profile_id)
+            and hmac.compare_digest(
+                str(current.get("connector_id") or ""), connector_id,
+            )
+        ):
+            return {"state": "profile_jellyfin_binding_command_mismatch"}
+
+        status = str(current.get("status") or "")
+        if status == "completed":
+            payload = decode_remote_response_payload(current, None)
+            result = payload.get("result") if isinstance(payload, dict) else None
+            valid = (
+                200 <= int(current.get("http_status") or 0) < 300
+                and isinstance(payload, dict)
+                and str(payload.get("requestId") or "") == request_id
+                and payload.get("state") == "complete"
+                and payload.get("operation") == operation
+                and isinstance(result, dict)
+                and result.get("provider") == "jellyfin"
+            )
+            _delete_profile_binding_recovery_request(
+                request_id, profile_id, connector_id,
+            )
+            if not valid:
+                return {"state": "profile_jellyfin_binding_command_invalid"}
+            return {
+                "state": "completed",
+                "connector_id": connector_id,
+                "result": result,
+            }
+        if status == "failed":
+            _delete_profile_binding_recovery_request(
+                request_id, profile_id, connector_id,
+            )
+            return {"state": "profile_jellyfin_binding_command_failed"}
+        if status not in {"pending", "in_progress", "completing"}:
+            return {"state": "profile_jellyfin_binding_command_invalid"}
+        time.sleep(0.25)
+
+    return {"state": "profile_jellyfin_binding_command_pending"}
+
+
+def _publish_profile_jellyfin_snapshot(profile_id, connectors, *, binding_operation_id, timeout_seconds=8.0):
+    """Read the member-scoped snapshot after canonical persistence.
+
+    The snapshot is computed by the connector with the target Cloud profile,
+    so it cannot borrow the initiating Owner's libraries. Its contents are
+    deliberately never retained in the operation ledger.
+    """
+    if remote_requests_table is None or not binding_operation_id:
+        return {"state": "snapshot_unavailable"}
+    online = [
+        item for item in connectors
+        if isinstance(item, dict)
+        and str(item.get("connector_id") or "")
+        and connector_online_from_item(item)
+    ]
+    if len(online) != 1:
+        return {"state": "snapshot_connector_missing" if not online else "snapshot_connector_ambiguous"}
+    connector_id = str(online[0].get("connector_id") or "")
+    request_id = str(uuid.uuid4())
+    now = utc_now_iso()
+    request_payload = {
+        "provider": "jellyfin",
+        "method": "GET",
+        "path": "/kaevo/internal/main-snapshot",
+        "query": {"moviesLimit": "1", "showsLimit": "1", "continueLimit": "1"},
+        "binding_operation_id": binding_operation_id,
+    }
+    remote_requests_table.put_item(
+        Item={
+            "request_id": request_id, "profile_id": profile_id,
+            "connector_id": connector_id, "status": "pending",
+            "status_created_at": status_sort_key("pending", now, request_id, remote_request_priority(request_payload)),
+            "priority": remote_request_priority(request_payload),
+            "request_json": json.dumps(request_payload, separators=(",", ":"), sort_keys=True),
+            "created_at": now, "updated_at": now,
+            "expires_at": epoch_now() + 5 * 60,
+            "binding_operation_id": binding_operation_id,
+        },
+        ConditionExpression="attribute_not_exists(request_id)",
+    )
+    _binding_operation_transition(binding_operation_id, "snapshot_pending", connector_request_id=request_id)
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        current = remote_requests_table.get_item(
+            Key={"request_id": request_id}, ConsistentRead=True,
+        ).get("Item")
+        if not isinstance(current, dict) or not (
+            hmac.compare_digest(str(current.get("profile_id") or ""), profile_id)
+            and hmac.compare_digest(str(current.get("connector_id") or ""), connector_id)
+        ):
+            return {"state": "snapshot_request_invalid"}
+        status = str(current.get("status") or "")
+        if status == "completed":
+            valid = 200 <= int(current.get("http_status") or 0) < 300
+            _delete_profile_binding_recovery_request(request_id, profile_id, connector_id)
+            return {"state": "snapshot_published" if valid else "snapshot_invalid"}
+        if status == "failed":
+            _delete_profile_binding_recovery_request(request_id, profile_id, connector_id)
+            return {"state": "snapshot_connector_failed"}
+        if status not in {"pending", "in_progress", "completing"}:
+            return {"state": "snapshot_request_invalid"}
+        time.sleep(0.25)
+    return {"state": "snapshot_pending"}
+
+
+def _binding_operation_id(value):
+    candidate = str(value or "").strip()
+    return candidate if BINDING_OPERATION_ID_RE.fullmatch(candidate) else ""
+
+
+def _binding_operation_fingerprint(value):
+    """One-way correlation only; never emit the opaque operation identifier."""
+    return "sha256:" + base64.urlsafe_b64encode(
+        hashlib.sha256(str(value or "").encode("utf-8")).digest()
+    ).decode("ascii").rstrip("=")
+
+
+def _binding_operation_public(item):
+    """Return the caller-safe, identifier-free operation projection."""
+    return {
+        "schema_version": int((item or {}).get("schema_version") or 1),
+        "operation_type": "profile_jellyfin_binding_v1",
+        "phase": str((item or {}).get("phase") or "created"),
+        "source_state": str((item or {}).get("source_state") or "unknown"),
+        "inspection_result": str((item or {}).get("inspection_result") or "unknown"),
+        "plugin_cas_result": str((item or {}).get("plugin_cas_result") or "not_started"),
+        "cloud_persistence_result": str((item or {}).get("cloud_persistence_result") or "not_started"),
+        "snapshot_result": str((item or {}).get("snapshot_result") or "not_started"),
+        "terminal_result": str((item or {}).get("terminal_result") or "processing"),
+        "reconciliation_required": bool((item or {}).get("reconciliation_required", False)),
+    }
+
+
+def _binding_operation_create_or_load(*, operation_id, session, profile_id, user_id):
+    """Create one durable exact-key journal before a connector command exists.
+
+    The record contains only one-way authority fingerprints. Exact source
+    reads stay in the request path and are never copied into this journal.
+    """
+    if binding_operations_table is None:
+        return None, "binding_operation_unavailable"
+    household_id = str(session.get("household_id") or "")
+    actor_profile_id = str(session.get("profile_id") or "")
+    if not operation_id or not household_id or not actor_profile_id:
+        return None, "binding_operation_invalid"
+    now = utc_now_iso()
+    item = {
+        "operation_id": operation_id,
+        "schema_version": 1,
+        "operation_type": "profile_jellyfin_binding_v1",
+        "phase": "created",
+        "revision": 0,
+        "created_at": now,
+        "updated_at": now,
+        "expires_at": epoch_now() + BINDING_OPERATION_RETENTION_SECONDS,
+        "actor_profile_fingerprint": _binding_operation_fingerprint(actor_profile_id),
+        "household_fingerprint": _binding_operation_fingerprint(household_id),
+        "operation_trace": _binding_operation_fingerprint(operation_id),
+        "target_fingerprint": _binding_operation_fingerprint(profile_id),
+        "provider_user_fingerprint": _binding_operation_fingerprint(user_id),
+        "source_state": "unknown",
+        "inspection_result": "not_started",
+        "plugin_cas_result": "not_started",
+        "cloud_persistence_result": "not_started",
+        "snapshot_result": "not_started",
+        "terminal_result": "processing",
+        "reconciliation_required": False,
+    }
+    try:
+        binding_operations_table.put_item(
+            Item=item,
+            ConditionExpression="attribute_not_exists(operation_id)",
+        )
+        return item, None
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") != "ConditionalCheckFailedException":
+            raise
+    existing = binding_operations_table.get_item(
+        Key={"operation_id": operation_id}, ConsistentRead=True,
+    ).get("Item")
+    if not isinstance(existing, dict) or not (
+        hmac.compare_digest(
+            str(existing.get("actor_profile_fingerprint") or ""),
+            _binding_operation_fingerprint(actor_profile_id),
+        )
+        and hmac.compare_digest(
+            str(existing.get("household_fingerprint") or ""),
+            _binding_operation_fingerprint(household_id),
+        )
+        and hmac.compare_digest(
+            str(existing.get("target_fingerprint") or ""),
+            _binding_operation_fingerprint(profile_id),
+        )
+        and hmac.compare_digest(
+            str(existing.get("provider_user_fingerprint") or ""),
+            _binding_operation_fingerprint(user_id),
+        )
+    ):
+        return None, "binding_operation_conflict"
+    return existing, None
+
+
+def _binding_operation_transition(operation_id, phase, **categories):
+    """Advance one exact journal monotonically; duplicate delivery is a read."""
+    if binding_operations_table is None:
+        return None
+    current = binding_operations_table.get_item(
+        Key={"operation_id": operation_id}, ConsistentRead=True,
+    ).get("Item")
+    if not isinstance(current, dict):
+        return None
+    current_phase = str(current.get("phase") or "created")
+    if BINDING_OPERATION_PHASE_RANK.get(phase, -1) < BINDING_OPERATION_PHASE_RANK.get(current_phase, -1):
+        return current
+    allowed = {
+        "source_state", "inspection_result", "plugin_cas_result",
+        "cloud_persistence_result", "snapshot_result", "terminal_result",
+        "reconciliation_required",
+    }
+    values = {":phase": phase, ":updated_at": utc_now_iso(), ":revision": int(current.get("revision") or 0), ":next_revision": int(current.get("revision") or 0) + 1}
+    set_parts = ["#phase = :phase", "updated_at = :updated_at", "revision = :next_revision"]
+    for key, value in categories.items():
+        if key not in allowed:
+            continue
+        placeholder = ":value_" + key
+        values[placeholder] = value
+        set_parts.append(f"{key} = {placeholder}")
+    try:
+        return binding_operations_table.update_item(
+            Key={"operation_id": operation_id},
+            ConditionExpression="revision = :revision",
+            UpdateExpression="SET " + ", ".join(set_parts),
+            ExpressionAttributeNames={"#phase": "phase"},
+            ExpressionAttributeValues=values,
+            ReturnValues="ALL_NEW",
+        ).get("Attributes")
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") != "ConditionalCheckFailedException":
+            raise
+        return binding_operations_table.get_item(
+            Key={"operation_id": operation_id}, ConsistentRead=True,
+        ).get("Item")
+
+
+def _binding_operation_source_state(*, inspected, canonical, household_id, manager_profile_id):
+    result = inspected.get("result") if isinstance(inspected, dict) else None
+    owner_state = str((result or {}).get("owner_state") or "") if isinstance(result, dict) else ""
+    source_profile_id = str((result or {}).get("source_profile_id") or "") if isinstance(result, dict) else ""
+    if owner_state == "missing":
+        return "absent_without_proof", "missing", ""
+    if owner_state != "found" or not re.fullmatch(r"profile_[A-Za-z0-9_-]{16,128}", source_profile_id):
+        return "ambiguous", "invalid", ""
+    target_profile_id = str((canonical or {}).get("profile_id") or "")
+    if hmac.compare_digest(source_profile_id, target_profile_id):
+        return "target_already_bound", "found", source_profile_id
+    source = identity_profiles_table.get_item(
+        Key={"profile_id": source_profile_id}, ConsistentRead=True,
+    ).get("Item") if identity_profiles_table is not None else None
+    if not isinstance(source, dict):
+        tombstone = profile_binding_tombstones_table.get_item(
+            Key={"profile_id": source_profile_id}, ConsistentRead=True,
+        ).get("Item") if profile_binding_tombstones_table is not None else None
+        if isinstance(tombstone, dict) and (
+            tombstone.get("state") == "deleted"
+            and hmac.compare_digest(str(tombstone.get("household_id") or ""), household_id)
+        ):
+            return "absent_with_valid_tombstone", "found", source_profile_id
+        return "absent_without_proof", "found", source_profile_id
+    if not hmac.compare_digest(str(source.get("household_id") or ""), household_id):
+        return "active_unrelated", "found", source_profile_id
+    if source.get("state") == "active":
+        return (
+            "active_owner" if hmac.compare_digest(source_profile_id, manager_profile_id)
+            else "active_same_household_non_target",
+            "found",
+            source_profile_id,
+        )
+    return "inactive_or_deleted_with_lineage", "found", source_profile_id
+
+
+def preflight_profile_jellyfin_binding_v3(event, path):
+    """Create a durable, read-only operation before any reassignment mutation."""
+    session, error_response = household_manager_bound_session(event)
+    if error_response:
+        return error_response
+    if any(table is None for table in (
+        binding_operations_table, identity_profiles_table, home_connectors_table,
+        remote_requests_table,
+    )):
+        return response(503, {"state": "binding_operation_unavailable"})
+    profile_id = profile_jellyfin_binding_preflight_path_id(path)
+    body = parse_json_body(event) or {}
+    operation_id = _binding_operation_id(body.get("operation_id"))
+    user_id = _normalized_jellyfin_user_id(body.get("jellyfin_user_id"))
+    if not profile_id or not operation_id or not user_id or body.get("explicit_confirmation") is not True:
+        return response(400, {"state": "binding_operation_invalid"})
+    household_id = str(session.get("household_id") or "")
+    manager_profile_id = str(session.get("profile_id") or "")
+    canonical = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if not (
+        isinstance(canonical, dict)
+        and canonical.get("state") == "active"
+        and hmac.compare_digest(str(canonical.get("household_id") or ""), household_id)
+    ):
+        return response(404, {"state": "profile_jellyfin_binding_target_missing"})
+    operation, error_state = _binding_operation_create_or_load(
+        operation_id=operation_id, session=session, profile_id=profile_id, user_id=user_id,
+    )
+    if error_state:
+        return response(409 if error_state == "binding_operation_conflict" else 503, {"state": error_state})
+    if (
+        str(operation.get("terminal_result") or "") != "processing"
+        or str(operation.get("phase") or "created") != "created"
+    ):
+        return response(200, {"state": "binding_operation_recorded", "operation": _binding_operation_public(operation)})
+    _binding_operation_transition(operation_id, "authorized")
+    connectors = _home_connectors_for_profile_access(manager_profile_id)
+    _binding_operation_transition(operation_id, "dispatch_pending")
+    inspected = _execute_profile_binding_connector_command(
+        profile_id, connectors, "jellyfin.inspect_profile_binding_owner",
+        {"jellyfin_user_id": user_id, "binding_operation_id": operation_id},
+        binding_operation_id=operation_id,
+    )
+    if inspected.get("state") != "completed":
+        updated = _binding_operation_transition(
+            operation_id, "failed_retryable",
+            inspection_result=str(inspected.get("state") or "command_failed"),
+            terminal_result="retryable_connector_failure",
+        )
+        return response(503, {"state": "binding_operation_recorded", "operation": _binding_operation_public(updated)})
+    source_state, inspection_result, _source_id = _binding_operation_source_state(
+        inspected=inspected, canonical=canonical, household_id=household_id,
+        manager_profile_id=manager_profile_id,
+    )
+    eligible = source_state in {
+        "inactive_or_deleted_with_lineage",
+        "absent_with_valid_tombstone",
+        "target_already_bound",
+    }
+    phase = "mutation_authorized" if eligible else "safely_refused"
+    terminal = "preflight_eligible" if eligible else "safely_refused"
+    updated = _binding_operation_transition(
+        operation_id, phase,
+        source_state=source_state,
+        inspection_result=inspection_result,
+        terminal_result=terminal,
+    )
+    LOGGER.warning(
+        "binding_operation_preflight trace=%s phase=%s source_state=%s",
+        _binding_operation_fingerprint(operation_id), phase, source_state,
+    )
+    return response(200, {"state": "binding_operation_recorded", "operation": _binding_operation_public(updated)})
+
+
+def profile_jellyfin_binding_preflight_path_id(path):
+    match = re.fullmatch(
+        r"/v3/identity/profiles/([^/]+)/jellyfin-binding-operations", str(path or ""),
+    )
+    return match.group(1) if match else ""
+
+
+def get_profile_jellyfin_binding_operation_v3(event, path):
+    session, error_response = household_manager_bound_session(event)
+    if error_response:
+        return error_response
+    match = re.fullmatch(r"/v3/identity/jellyfin-binding-operations/([^/]+)", str(path or ""))
+    operation_id = _binding_operation_id(match.group(1) if match else "")
+    if not operation_id or binding_operations_table is None:
+        return response(404, {"state": "binding_operation_missing"})
+    item = binding_operations_table.get_item(
+        Key={"operation_id": operation_id}, ConsistentRead=True,
+    ).get("Item")
+    if not isinstance(item, dict) or not (
+        hmac.compare_digest(
+            str(item.get("actor_profile_fingerprint") or ""),
+            _binding_operation_fingerprint(str(session.get("profile_id") or "")),
+        )
+        and hmac.compare_digest(
+            str(item.get("household_fingerprint") or ""),
+            _binding_operation_fingerprint(str(session.get("household_id") or "")),
+        )
+    ):
+        return response(404, {"state": "binding_operation_missing"})
+    return response(200, {"state": "binding_operation_recorded", "operation": _binding_operation_public(item)})
+
+
+def save_profile_jellyfin_binding_v3(event, path):
+    """Persist one exact household-scoped Cloud-profile/Jellyfin-user edge.
+
+    The caller explicitly selected the provider identity. The server chooses
+    the household connector, proves uniqueness with household Query + exact
+    reads, and never derives an identity from a name or Owner fallback.
+    """
+    session, error_response = household_manager_bound_session(event)
+    if error_response:
+        return error_response
+    if any(table is None for table in (
+        identity_profiles_table,
+        household_memberships_table,
+        household_invitations_table,
+        home_connectors_table,
+    )):
+        return response(503, {"state": "profile_jellyfin_binding_unavailable"})
+    profile_id = profile_jellyfin_binding_path_id(path)
+    body = parse_json_body(event) or {}
+    repair_from_consumed = body.get("repair_from_consumed_invitation") is True
+    allow_inactive_reassignment = body.get("allow_inactive_reassignment") is True
+    supplied_user_id = body.get("jellyfin_user_id")
+    user_id = _normalized_jellyfin_user_id(supplied_user_id)
+    supplied_operation_id = body.get("operation_id")
+    binding_operation_id = _binding_operation_id(supplied_operation_id)
+    if (
+        not re.fullmatch(r"profile_[A-Za-z0-9_-]{16,128}", profile_id)
+        or body.get("explicit_confirmation") is not True
+        or (repair_from_consumed and allow_inactive_reassignment)
+        or (repair_from_consumed and supplied_user_id is not None)
+        or (not repair_from_consumed and not user_id)
+        or (supplied_operation_id is not None and not binding_operation_id)
+    ):
+        return response(400, {"state": "profile_jellyfin_binding_invalid"})
+
+    household_id = str(session.get("household_id") or "")
+    manager_profile_id = str(session.get("profile_id") or "")
+    if binding_operation_id:
+        if binding_operations_table is None:
+            return response(503, {"state": "binding_operation_unavailable"})
+        binding_operation = binding_operations_table.get_item(
+            Key={"operation_id": binding_operation_id}, ConsistentRead=True,
+        ).get("Item")
+        if not isinstance(binding_operation, dict) or not (
+            hmac.compare_digest(
+                str(binding_operation.get("actor_profile_fingerprint") or ""),
+                _binding_operation_fingerprint(manager_profile_id),
+            )
+            and hmac.compare_digest(
+                str(binding_operation.get("household_fingerprint") or ""),
+                _binding_operation_fingerprint(household_id),
+            )
+            and hmac.compare_digest(
+                str(binding_operation.get("target_fingerprint") or ""),
+                _binding_operation_fingerprint(profile_id),
+            )
+            and hmac.compare_digest(
+                str(binding_operation.get("provider_user_fingerprint") or ""),
+                _binding_operation_fingerprint(user_id),
+            )
+        ):
+            return response(409, {"state": "binding_operation_conflict"})
+        if str(binding_operation.get("source_state") or "") not in {
+            "inactive_or_deleted_with_lineage",
+            "absent_with_valid_tombstone",
+            "target_already_bound",
+        }:
+            return response(409, {"state": "binding_operation_not_authorized"})
+    connectors = _home_connectors_for_profile_access(manager_profile_id)
+    canonical = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if not (
+        isinstance(canonical, dict)
+        and canonical.get("state") == "active"
+        and hmac.compare_digest(
+            str(canonical.get("household_id") or ""), household_id,
+        )
+    ):
+        canonical = None
+
+    if repair_from_consumed:
+        if canonical is None:
+            return response(404, {"state": "profile_jellyfin_binding_target_missing"})
+        member_principal_id = str(canonical.get("member_principal_id") or "")
+        candidates = []
+        for invitation in _household_invitation_records(household_id):
+            candidate_user_id = _normalized_jellyfin_user_id(
+                (invitation or {}).get("jellyfin_user_id")
+            )
+            candidate_connector_id = str(
+                (invitation or {}).get("jellyfin_connector_id") or ""
+            )
+            if (
+                isinstance(invitation, dict)
+                and invitation.get("state") == "consumed"
+                and str(invitation.get("profile_id") or "") == profile_id
+                and hmac.compare_digest(
+                    str(invitation.get("household_id") or ""), household_id,
+                )
+                and member_principal_id
+                and hmac.compare_digest(
+                    str(invitation.get("member_principal_id") or ""),
+                    member_principal_id,
+                )
+                and str(invitation.get("jellyfin_binding_state") or "") == "active"
+                and candidate_user_id
+                and candidate_connector_id
+            ):
+                candidates.append((invitation, candidate_connector_id, candidate_user_id))
+        if len(candidates) > 1:
+            return response(409, {
+                "state": "profile_jellyfin_binding_source_ambiguous",
+            })
+        if candidates:
+            _invitation, connector_id, user_id = candidates[0]
+        else:
+            recovered = _recover_profile_jellyfin_binding_from_connector(
+                profile_id, connectors,
+            )
+            if recovered.get("state") != "recovered":
+                failure_state = str(
+                    recovered.get("state")
+                    or "profile_jellyfin_binding_source_missing"
+                )
+                return response(
+                    503 if failure_state.endswith(("unavailable", "pending")) else 409,
+                    {"state": failure_state},
+                )
+            connector_id = str(recovered.get("connector_id") or "")
+            user_id = _normalized_jellyfin_user_id(
+                recovered.get("jellyfin_user_id")
+            )
+        if not any(
+            isinstance(item, dict)
+            and hmac.compare_digest(str(item.get("connector_id") or ""), connector_id)
+            for item in connectors
+        ):
+            return response(409, {"state": "profile_jellyfin_connector_missing"})
+    elif not allow_inactive_reassignment:
+        connector = next((item for item in connectors if isinstance(item, dict)), None)
+        connector_id = str((connector or {}).get("connector_id") or "")
+        if not connector_id:
+            return response(409, {"state": "profile_jellyfin_connector_missing"})
+    else:
+        connector_id = ""
+
+    matching_invitations = [
+        item for item in _household_invitation_records(household_id)
+        if isinstance(item, dict)
+        and item.get("state") == "pending"
+        and str(item.get("profile_id") or "") == profile_id
+    ]
+    if canonical is None and len(matching_invitations) != 1:
+        return response(404 if not matching_invitations else 409, {
+            "state": (
+                "profile_jellyfin_binding_target_missing"
+                if not matching_invitations
+                else "profile_jellyfin_binding_target_ambiguous"
+            ),
+        })
+    if canonical is not None and matching_invitations:
+        return response(409, {"state": "profile_jellyfin_binding_target_ambiguous"})
+    if allow_inactive_reassignment and canonical is None:
+        return response(404, {"state": "profile_jellyfin_binding_target_missing"})
+    if allow_inactive_reassignment and matching_invitations:
+        return response(409, {"state": "profile_jellyfin_binding_target_ambiguous"})
+
+    if canonical is not None and str(canonical.get("jellyfin_binding_state") or "") == "active":
+        existing_connector_id = str(canonical.get("jellyfin_connector_id") or "")
+        existing_user_id = _normalized_jellyfin_user_id(canonical.get("jellyfin_user_id"))
+        if allow_inactive_reassignment and not hmac.compare_digest(existing_user_id, user_id):
+            return response(409, {"state": "profile_jellyfin_binding_conflict"})
+        if allow_inactive_reassignment:
+            # The connector must still prove its exact current owner below.
+            connector_id = existing_connector_id
+        elif not (
+            hmac.compare_digest(existing_connector_id, connector_id)
+            and hmac.compare_digest(existing_user_id, user_id)
+        ):
+            return response(409, {"state": "profile_jellyfin_binding_conflict"})
+        else:
+            return response(200, {
+                "state": (
+                    "profile_jellyfin_binding_repaired"
+                    if repair_from_consumed
+                    else "profile_jellyfin_binding_saved"
+                ),
+            })
+
+    household_profiles = _household_identity_profile_records(household_id)
+    for other in household_profiles:
+        other_profile_id = str(other.get("profile_id") or "")
+        if other_profile_id == profile_id:
+            continue
+        if (
+            str(other.get("jellyfin_binding_state") or "") == "active"
+            and hmac.compare_digest(
+                str(other.get("jellyfin_connector_id") or ""), connector_id,
+            )
+            and hmac.compare_digest(
+                _normalized_jellyfin_user_id(other.get("jellyfin_user_id")), user_id,
+            )
+        ):
+            return response(409, {"state": "jellyfin_identity_already_bound"})
+    household_invitations = _household_invitation_records(household_id)
+    for invitation in household_invitations:
+        if (
+            str(invitation.get("profile_id") or "") != profile_id
+            and invitation.get("state") in (
+                {"pending"}
+                if allow_inactive_reassignment
+                else {"pending", "consumed"}
+            )
+            and str(invitation.get("jellyfin_binding_state") or "") == "active"
+            and hmac.compare_digest(
+                str(invitation.get("jellyfin_connector_id") or ""), connector_id,
+            )
+            and hmac.compare_digest(
+                _normalized_jellyfin_user_id(invitation.get("jellyfin_user_id")), user_id,
+            )
+        ):
+            return response(409, {"state": "jellyfin_identity_already_bound"})
+
+    if allow_inactive_reassignment:
+        inspection_kwargs = (
+            {"binding_operation_id": binding_operation_id}
+            if binding_operation_id else {}
+        )
+        inspected = _execute_profile_binding_connector_command(
+            profile_id,
+            connectors,
+            "jellyfin.inspect_profile_binding_owner",
+            {"jellyfin_user_id": user_id, **({"binding_operation_id": binding_operation_id} if binding_operation_id else {})},
+            **inspection_kwargs,
+        )
+        if inspected.get("state") != "completed":
+            failure_state = str(
+                inspected.get("state")
+                or "profile_jellyfin_binding_command_failed"
+            )
+            return response(
+                503 if failure_state.endswith(("unavailable", "pending", "missing")) else 409,
+                {"state": failure_state},
+            )
+        connector_id = str(inspected.get("connector_id") or "")
+        inspection_result = inspected.get("result")
+        owner_state = str(
+            (inspection_result or {}).get("owner_state")
+            if isinstance(inspection_result, dict) else ""
+        )
+        source_profile_id = str(
+            (inspection_result or {}).get("source_profile_id") or ""
+            if isinstance(inspection_result, dict) else ""
+        )
+        if owner_state not in {"found", "missing"}:
+            return response(409, {
+                "state": "profile_jellyfin_binding_owner_invalid",
+            })
+        if owner_state == "found" and not re.fullmatch(
+            r"profile_[A-Za-z0-9_-]{16,128}", source_profile_id,
+        ):
+            return response(409, {
+                "state": "profile_jellyfin_binding_owner_invalid",
+            })
+
+        if source_profile_id and source_profile_id != profile_id:
+            source_profile = identity_profiles_table.get_item(
+                Key={"profile_id": source_profile_id}, ConsistentRead=True,
+            ).get("Item")
+            if not isinstance(source_profile, dict):
+                if not (
+                    binding_operation_id
+                    and str(binding_operation.get("source_state") or "")
+                    == "absent_with_valid_tombstone"
+                ):
+                    return response(409, {
+                        "state": "profile_jellyfin_binding_owner_unverifiable",
+                    })
+            else:
+                if source_profile.get("state") == "active":
+                    return response(409, {
+                        "state": "jellyfin_identity_already_bound",
+                    })
+                if not hmac.compare_digest(
+                    str(source_profile.get("household_id") or ""),
+                    household_id,
+                ):
+                    return response(409, {
+                        "state": "profile_jellyfin_binding_owner_unrelated",
+                    })
+
+        reassignment_kwargs = (
+            {"binding_operation_id": binding_operation_id}
+            if binding_operation_id else {}
+        )
+        reassigned = _execute_profile_binding_connector_command(
+            profile_id,
+            connectors,
+            "jellyfin.reassign_stale_profile_binding",
+            {
+                "jellyfin_user_id": user_id,
+                "expected_source_profile_id": source_profile_id,
+                "target_profile_id": profile_id,
+                **({"binding_operation_id": binding_operation_id} if binding_operation_id else {}),
+            },
+            **reassignment_kwargs,
+        )
+        reassignment_result = reassigned.get("result")
+        if not (
+            reassigned.get("state") == "completed"
+            and hmac.compare_digest(
+                str(reassigned.get("connector_id") or ""), connector_id,
+            )
+            and isinstance(reassignment_result, dict)
+            and reassignment_result.get("state") in {"reassigned", "already_bound"}
+        ):
+            failure_state = str(
+                reassigned.get("state")
+                or "profile_jellyfin_binding_reassignment_failed"
+            )
+            return response(
+                503 if failure_state.endswith(("unavailable", "pending", "missing")) else 409,
+                {"state": failure_state},
+            )
+        if binding_operation_id:
+            _binding_operation_transition(
+                binding_operation_id, "plugin_cas_committed",
+                plugin_cas_result=str(reassignment_result.get("state") or "unknown"),
+            )
+
+    values = {
+        ":household_id": household_id,
+        ":connector_id": connector_id,
+        ":user_id": user_id,
+        ":binding_state": "active",
+        ":updated_at": utc_now_iso(),
+    }
+    update = (
+        "SET jellyfin_connector_id = :connector_id, "
+        "jellyfin_user_id = :user_id, "
+        "jellyfin_binding_state = :binding_state, "
+        "jellyfin_binding_updated_at = :updated_at"
+    )
+    try:
+        if canonical is not None:
+            condition = "household_id = :household_id AND #state = :active"
+            if repair_from_consumed:
+                condition += " AND member_principal_id = :member_principal_id"
+            identity_profiles_table.update_item(
+                Key={"profile_id": profile_id},
+                UpdateExpression=update,
+                ConditionExpression=condition,
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={
+                    **values,
+                    ":active": "active",
+                    **(
+                        {":member_principal_id": str(canonical.get("member_principal_id") or "")}
+                        if repair_from_consumed else {}
+                    ),
+                },
+            )
+        else:
+            invitation = matching_invitations[0]
+            household_invitations_table.update_item(
+                Key={"code_hash": str(invitation.get("code_hash") or "")},
+                UpdateExpression=update,
+                ConditionExpression=(
+                    "household_id = :household_id AND profile_id = :profile_id "
+                    "AND #state = :pending"
+                ),
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={
+                    **values, ":profile_id": profile_id, ":pending": "pending",
+                },
+            )
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") == "ConditionalCheckFailedException":
+            return response(409, {"state": "profile_jellyfin_binding_conflict"})
+        raise
+    if binding_operation_id:
+        _binding_operation_transition(
+            binding_operation_id, "cloud_persisted",
+            cloud_persistence_result="persisted",
+            snapshot_result="pending",
+            terminal_result="cloud_persisted",
+        )
+        snapshot = _publish_profile_jellyfin_snapshot(
+            profile_id, connectors, binding_operation_id=binding_operation_id,
+        )
+        if snapshot.get("state") == "snapshot_published":
+            _binding_operation_transition(
+                binding_operation_id, "completed",
+                snapshot_result="published", terminal_result="completed",
+            )
+        else:
+            _binding_operation_transition(
+                binding_operation_id, "reconciliation_required",
+                snapshot_result=str(snapshot.get("state") or "snapshot_failed"),
+                terminal_result="snapshot_reconciliation_required",
+                reconciliation_required=True,
+            )
+            return response(202, {
+                "state": "profile_jellyfin_binding_reconciliation_required",
+                "operation": _binding_operation_public(
+                    binding_operations_table.get_item(
+                        Key={"operation_id": binding_operation_id}, ConsistentRead=True,
+                    ).get("Item") or {}
+                ),
+            })
+    return response(200, {
+        "state": (
+            "profile_jellyfin_binding_reassigned"
+            if allow_inactive_reassignment
+            else (
+                "profile_jellyfin_binding_repaired"
+                if repair_from_consumed
+                else "profile_jellyfin_binding_saved"
+            )
+        ),
+    })
+
+
+def create_profile_binding_v3(event, path, *, verified_session=None, retry_on_conflict=True):
+    """Grant one explicit view/switch binding to an active household member."""
+    if any(table is None for table in (
+        profiles_table, profile_bindings_table, accounts_table, household_memberships_table, security_audit_table,
+    )):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session = verified_session if verified_session is not None else authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return failure
+    if "household.manage" not in set((context.get("household") or {}).get("capabilities") or []):
+        return _profile_binding_failure(event, session, "profile_binding_not_authorized")
+    profile_id = profile_binding_path_id(path)
+    body = parse_json_body(event)
+    if not profile_id or not isinstance(body, dict):
+        return _profile_binding_failure(event, session, "invalid_profile_binding_request")
+    caller_account_id = str((context.get("account") or {}).get("account_id") or "")
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    target_account_id = str(body.get("target_account_id") or "").strip()
+    requested_access = str(body.get("access_level") or "").strip().lower()
+    if not target_account_id or target_account_id == caller_account_id:
+        return _profile_binding_failure(event, session, "profile_binding_not_authorized", target_id=profile_id)
+    if requested_access not in {"view", "switch"}:
+        return _profile_binding_failure(event, session, "profile_access_level_not_permitted", target_id=profile_id)
+    try:
+        profile = profiles_table.get_item(Key={"profile_id": profile_id}, ConsistentRead=True).get("Item")
+        validate_profile(profile, household_id=household_id)
+        target_account = accounts_table.get_item(Key={"account_id": target_account_id}, ConsistentRead=True).get("Item")
+        target_membership = household_memberships_table.get_item(Key={
+            "household_id": household_id,
+            "membership_id": household_membership_id(target_account_id, household_id),
+        }, ConsistentRead=True).get("Item")
+        if (
+            not isinstance(target_account, dict)
+            or target_account.get("entity_type") != "Account"
+            or target_account.get("status") != "active"
+            or not isinstance(target_membership, dict)
+            or target_membership.get("entity_type") != "HouseholdMembership"
+            or target_membership.get("status") != "active"
+            or str(target_membership.get("account_id") or "") != target_account_id
+            or str(target_membership.get("household_id") or "") != household_id
+        ):
+            return _profile_binding_failure(event, session, "target_account_not_active_member", target_id=profile_id)
+        try:
+            canonical_role(target_membership.get("canonical_role"))
+        except AccountFoundationError:
+            return _profile_binding_failure(event, session, "manual_review_required", target_id=profile_id)
+        existing = profile_bindings_table.get_item(
+            Key={"account_id": target_account_id, "profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+        if isinstance(existing, dict):
+            if existing.get("status") == "active":
+                return response(200, {"state": "profile_binding_already_exists"})
+            return _profile_binding_failure(event, session, "profile_binding_not_reactivated", target_id=profile_id)
+        binding = build_profile_binding(
+            account_id=target_account_id, profile=profile, access_level=requested_access,
+            granted_by_account_id=caller_account_id, now_iso=utc_now_iso(), now_epoch=epoch_now(),
+            provenance="explicit-household-manager-grant-v1",
+        )
+        audit = _profile_binding_audit(
+            event, session, "profile_binding_created", "success", target_id=profile_id,
+        )
+        dynamodb.meta.client.transact_write_items(TransactItems=[
+            {"Put": {
+                "TableName": PROFILE_BINDINGS_TABLE, "Item": binding,
+                "ConditionExpression": "attribute_not_exists(account_id) AND attribute_not_exists(profile_id)",
+            }},
+            {"Put": {
+                "TableName": SECURITY_AUDIT_TABLE, "Item": audit,
+                "ConditionExpression": "attribute_not_exists(event_id)",
+            }},
+        ])
+    except AccountFoundationError as error:
+        return _profile_binding_failure(event, session, error.reason, target_id=profile_id)
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") != "TransactionCanceledException":
+            raise
+        if retry_on_conflict:
+            return create_profile_binding_v3(event, path, verified_session=session, retry_on_conflict=False)
+        return _profile_binding_failure(event, session, "profile_binding_conflict", target_id=profile_id)
+    return response(200, {"state": "profile_binding_created"})
+
+
+def _mapping_context(event, *, verified_session=None):
+    session = verified_session if verified_session is not None else authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return None, None, response(401, {"state": "protected_session_required"})
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return None, None, failure
+    installation_id = str(session.get("installation_id") or "")
+    if not installation_id:
+        return None, None, response(401, {"state": "installation_context_required"})
+    return session, context, None
+
+
+def _mapping_failure(event, session, state, *, source_id=""):
+    event_type = {
+        "mapping_conflict": "profile_mapping_conflict_detected",
+        "cross_household_mapping_rejected": "profile_mapping_cross_household_rejected",
+        "mapping_not_authorized": "profile_mapping_unauthorized_rejected",
+        "profile_deletion_not_authorized": "profile_deletion_unauthorized_rejected",
+    }.get(state, "profile_mapping_manual_review_required")
+    try:
+        commit_security_audit(_profile_binding_audit(
+            event, session, event_type, "denied", target_id=source_id,
+            target_type="local_profile_mapping", reason_code=state,
+        ))
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    unauthorized_states = {"mapping_not_authorized", "profile_deletion_not_authorized"}
+    return response(403 if state in unauthorized_states else 409, {"state": state})
+
+
+def _mapping_eligible_profiles(context):
+    # View-only bindings intentionally cannot activate a local profile mapping.
+    return [
+        item for item in (context.get("profile_access") or [])
+        if item.get("access_level") in {"switch", "manage"} and item.get("status") == "active"
+    ]
+
+
+def _canonical_profile_deletion_context(*, profile_id, household_id, session):
+    """Resolve one exact canonical profile graph without scanning DynamoDB."""
+    canonical_profile = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if not isinstance(canonical_profile, dict):
+        return None
+    if (
+        str(canonical_profile.get("profile_id") or "") != profile_id
+        or str(canonical_profile.get("household_id") or "") != household_id
+        or canonical_profile.get("state") not in {"active", "deletion_pending", "deleting"}
+    ):
+        raise AccountFoundationError("profile_deletion_not_authorized")
+    if hmac.compare_digest(profile_id, str(session.get("profile_id") or "")):
+        raise AccountFoundationError("owner_profile_deletion_forbidden")
+
+    member_subject = str(canonical_profile.get("member_principal_id") or "").strip()
+    if not member_subject and not bool_value(canonical_profile.get("managed_by_owner"), False):
+        # An unbound adult/owner identity cannot be inferred from its display
+        # fields. Fail closed rather than risk deleting the household Owner.
+        raise AccountFoundationError("profile_deletion_ownership_ambiguous")
+
+    memberships = _household_membership_records(household_id)
+    target_memberships = [
+        item for item in memberships
+        if isinstance(item, dict)
+        and item.get("entity_type") == "HouseholdMembership"
+        and str(item.get("profile_id") or "") == profile_id
+    ]
+    if len(target_memberships) > 1:
+        raise AccountFoundationError("profile_deletion_ownership_ambiguous")
+    target_membership = target_memberships[0] if target_memberships else None
+    if target_membership is not None:
+        if (
+            target_membership.get("canonical_role") == CanonicalRole.OWNER.value
+            or target_membership.get("household_access_role") == HouseholdAccessRole.OWNER.value
+            or str(target_membership.get("account_id") or "")
+            != str(canonical_profile.get("account_id") or "")
+        ):
+            raise AccountFoundationError("owner_profile_deletion_forbidden")
+
+    deletion_already_started = canonical_profile.get("state") in {
+        "deletion_pending", "deleting",
+    }
+    if member_subject:
+        principal = principals_table.get_item(
+            Key={"principal_id": member_subject}, ConsistentRead=True,
+        ).get("Item")
+        legacy_membership = identity_memberships_table.get_item(
+            Key={"principal_id": member_subject}, ConsistentRead=True,
+        ).get("Item")
+        if (
+            not isinstance(principal, dict)
+            or str(principal.get("household_id") or "") != household_id
+            or (
+                profile_id not in list(principal.get("profile_ids") or [])
+                and not deletion_already_started
+            )
+            or (
+                not isinstance(legacy_membership, dict)
+                and not deletion_already_started
+            )
+            or (
+                isinstance(legacy_membership, dict)
+                and (
+                    str(legacy_membership.get("household_id") or "") != household_id
+                    or str(legacy_membership.get("profile_id") or "") != profile_id
+                )
+            )
+        ):
+            raise AccountFoundationError("profile_deletion_ownership_ambiguous")
+    else:
+        principal = None
+        legacy_membership = None
+
+    owner_subject = str(session.get("principal_id") or "")
+    owner_principal = principals_table.get_item(
+        Key={"principal_id": owner_subject}, ConsistentRead=True,
+    ).get("Item")
+    if (
+        not isinstance(owner_principal, dict)
+        or str(owner_principal.get("household_id") or "") != household_id
+        or str(owner_principal.get("role") or "") != CanonicalRole.OWNER.value
+        or str(canonical_profile.get("owner_principal_id") or "") != owner_subject
+    ):
+        raise AccountFoundationError("profile_deletion_ownership_ambiguous")
+
+    return {
+        "profile": canonical_profile,
+        "membership": target_membership,
+        "member_principal": principal,
+        "legacy_membership": legacy_membership,
+        "owner_principal": owner_principal,
+        "household_memberships": memberships,
+        "member_subject": member_subject,
+    }
+
+
+def _household_installation_records(household_id):
+    records = []
+    query = {
+        "IndexName": "household_id-created_at_epoch-index",
+        "KeyConditionExpression": Key("household_id").eq(household_id),
+        "ConsistentRead": False,
+    }
+    while True:
+        page = installations_table.query(**query)
+        for candidate in page.get("Items", []):
+            installation_id = str(candidate.get("installation_id") or "")
+            if not installation_id:
+                continue
+            exact = installations_table.get_item(
+                Key={"installation_id": installation_id}, ConsistentRead=True,
+            ).get("Item")
+            if (
+                isinstance(exact, dict)
+                and str(exact.get("household_id") or "") == household_id
+            ):
+                records.append(exact)
+        last_key = page.get("LastEvaluatedKey")
+        if not last_key:
+            return records
+        query["ExclusiveStartKey"] = last_key
+
+
+def _profile_mapping_records_for_installations(installations, profile_id, household_id):
+    records = []
+    for installation in installations:
+        installation_id = str(installation.get("installation_id") or "")
+        query = {
+            "KeyConditionExpression": Key("installation_id").eq(installation_id),
+            "ConsistentRead": True,
+        }
+        while True:
+            page = profile_mappings_table.query(**query)
+            for item in page.get("Items", []):
+                if (
+                    str(item.get("installation_id") or "") == installation_id
+                    and str(item.get("household_id") or "") == household_id
+                    and str(item.get("cloud_profile_id") or "") == profile_id
+                ):
+                    records.append(item)
+            last_key = page.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            query["ExclusiveStartKey"] = last_key
+    return records
+
+
+def _profile_binding_records_for_household(memberships, profile_id, household_id):
+    records = []
+    account_ids = {
+        str(item.get("account_id") or "")
+        for item in memberships
+        if isinstance(item, dict)
+        and item.get("entity_type") == "HouseholdMembership"
+        and str(item.get("household_id") or "") == household_id
+        and str(item.get("account_id") or "")
+    }
+    for account_id in account_ids:
+        item = profile_bindings_table.get_item(
+            Key={"account_id": account_id, "profile_id": profile_id},
+            ConsistentRead=True,
+        ).get("Item")
+        if (
+            isinstance(item, dict)
+            and str(item.get("household_id") or "") == household_id
+        ):
+            records.append(item)
+    return records
+
+
+def _profile_invitation_records(profile_id, household_id):
+    return [
+        item for item in _household_invitation_records(household_id)
+        if str(item.get("profile_id") or "") == profile_id
+        and str(item.get("household_id") or "") == household_id
+    ]
+
+
+def _profile_join_transaction_records(invitations):
+    records = []
+    for invitation in invitations:
+        invitation_id = str(invitation.get("invitation_id") or "")
+        if not invitation_id:
+            continue
+        query = {
+            "IndexName": "invitation_id-created_at_epoch-index",
+            "KeyConditionExpression": Key("invitation_id").eq(invitation_id),
+            "ConsistentRead": False,
+        }
+        while True:
+            page = household_join_transactions_table.query(**query)
+            for candidate in page.get("Items", []):
+                resume_hash = str(candidate.get("join_resume_hash") or "")
+                if not resume_hash:
+                    continue
+                exact = household_join_transactions_table.get_item(
+                    Key={"join_resume_hash": resume_hash}, ConsistentRead=True,
+                ).get("Item")
+                if (
+                    isinstance(exact, dict)
+                    and str(exact.get("invitation_id") or "") == invitation_id
+                ):
+                    records.append(exact)
+            last_key = page.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            query["ExclusiveStartKey"] = last_key
+    return records
+
+
+def _remove_profile_from_principal(principal, profile_id, *, now_iso, now_epoch):
+    if not isinstance(principal, dict):
+        return
+    principal_id = str(principal.get("principal_id") or "")
+    if profile_id not in list(principal.get("profile_ids") or []):
+        return
+    retained = [
+        str(value) for value in list(principal.get("profile_ids") or [])
+        if str(value) and str(value) != profile_id
+    ]
+    next_state = str(principal.get("state") or "active") if retained else "revoked"
+    principals_table.update_item(
+        Key={"principal_id": principal_id},
+        ConditionExpression="contains(profile_ids, :profile_id)",
+        UpdateExpression=(
+            "SET profile_ids = :retained, #state = :next_state, revoked = :revoked, "
+            "updated_at = :updated_at, updated_at_epoch = :updated_epoch"
+        ),
+        ExpressionAttributeNames={"#state": "state"},
+        ExpressionAttributeValues={
+            ":profile_id": profile_id,
+            ":retained": retained,
+            ":next_state": next_state,
+            ":revoked": not bool(retained),
+            ":updated_at": now_iso,
+            ":updated_epoch": now_epoch,
+        },
+    )
+
+
+def _revoke_profile_installation(installation, *, now_iso):
+    installation_id = str(installation.get("installation_id") or "")
+    installations_table.update_item(
+        Key={"installation_id": installation_id},
+        ConditionExpression="household_id = :household_id AND principal_id = :principal_id",
+        UpdateExpression=(
+            "SET #state = :revoked_state, revoked = :revoked, revoked_at = :revoked_at, "
+            "revocation_reason = :reason"
+        ),
+        ExpressionAttributeNames={"#state": "state"},
+        ExpressionAttributeValues={
+            ":household_id": str(installation.get("household_id") or ""),
+            ":principal_id": str(installation.get("principal_id") or ""),
+            ":revoked_state": "revoked",
+            ":revoked": True,
+            ":revoked_at": now_iso,
+            ":reason": "profile_deleted",
+        },
+    )
+    sessions = app_sessions_table.query(
+        IndexName="installation_id-created_at_epoch-index",
+        KeyConditionExpression=Key("installation_id").eq(installation_id),
+    ).get("Items", [])
+    for family_id in {
+        str(item.get("family_id") or "") for item in sessions
+        if str(item.get("family_id") or "")
+    }:
+        revoke_session_family(family_id, "profile_deleted")
+
+
+def _retain_deleted_profile_binding_tombstone(profile, *, household_id, now_epoch, now_iso):
+    """Retain minimal, exact-key lineage before an immediate profile delete.
+
+    This is not a binding and cannot be used to discover identities. It exists
+    solely to let a future guarded reconciliation prove that a plugin-reported
+    source belonged to this household after the canonical profile is gone.
+    """
+    if str((profile or {}).get("jellyfin_binding_state") or "") != "active":
+        return
+    if profile_binding_tombstones_table is None:
+        raise AccountFoundationError("profile_binding_tombstone_unavailable")
+    profile_id = str((profile or {}).get("profile_id") or "")
+    user_id = _normalized_jellyfin_user_id((profile or {}).get("jellyfin_user_id"))
+    if not profile_id or not user_id:
+        raise AccountFoundationError("profile_binding_tombstone_invalid")
+    item = {
+        "profile_id": profile_id,
+        "household_id": household_id,
+        "state": "deleted",
+        "deleted_at": now_iso,
+        "expires_at": now_epoch + BINDING_SOURCE_TOMBSTONE_RETENTION_SECONDS,
+        "provider_user_fingerprint": _binding_operation_fingerprint(user_id),
+    }
+    try:
+        profile_binding_tombstones_table.put_item(
+            Item=item, ConditionExpression="attribute_not_exists(profile_id)",
+        )
+        return
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") != "ConditionalCheckFailedException":
+            raise
+    existing = profile_binding_tombstones_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if not isinstance(existing, dict) or not (
+        existing.get("state") == "deleted"
+        and hmac.compare_digest(str(existing.get("household_id") or ""), household_id)
+    ):
+        raise AccountFoundationError("profile_binding_tombstone_conflict")
+
+
+def _execute_canonical_profile_deletion(
+    event, session, context, graph, *, profile_id, household_id, mode,
+):
+    now_epoch = epoch_now()
+    now_iso = utc_now_iso()
+    execute_at = now_epoch if mode == "immediate" else now_epoch + (30 * 24 * 60 * 60)
+    next_state = "deleting" if mode == "immediate" else "deletion_pending"
+    member_subject = str(graph.get("member_subject") or "")
+
+    exact_profile = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if not isinstance(exact_profile, dict) or not hmac.compare_digest(
+        str(exact_profile.get("household_id") or ""), household_id,
+    ):
+        raise AccountFoundationError("profile_deletion_ownership_ambiguous")
+    if mode == "immediate":
+        _retain_deleted_profile_binding_tombstone(
+            exact_profile, household_id=household_id, now_epoch=now_epoch, now_iso=now_iso,
+        )
+
+    # The authority cutover happens first. From this point onward the profile
+    # cannot appear in the canonical roster or obtain a fresh protected
+    # session, even if a provider cleanup step needs to be retried.
+    identity_profiles_table.update_item(
+        Key={"profile_id": profile_id},
+        ConditionExpression=(
+            "household_id = :household_id AND "
+            "(#state = :active OR #state = :pending OR #state = :deleting)"
+        ),
+        UpdateExpression=(
+            "SET #state = :next_state, deletion_mode = :mode, "
+            "deletion_requested_at = :updated_at, deletion_execute_at_epoch = :execute_at, "
+            "updated_at = :updated_at, updated_at_epoch = :updated_epoch"
+        ),
+        ExpressionAttributeNames={"#state": "state"},
+        ExpressionAttributeValues={
+            ":household_id": household_id,
+            ":active": "active",
+            ":pending": "deletion_pending",
+            ":deleting": "deleting",
+            ":next_state": next_state,
+            ":mode": mode,
+            ":updated_at": now_iso,
+            ":updated_epoch": now_epoch,
+            ":execute_at": execute_at,
+        },
+    )
+    membership = graph.get("membership")
+    if isinstance(membership, dict):
+        household_memberships_table.update_item(
+            Key={
+                "household_id": household_id,
+                "membership_id": str(membership.get("membership_id") or ""),
+            },
+            ConditionExpression=(
+                "profile_id = :profile_id AND "
+                "(#status = :active OR #status = :pending OR #status = :deleting)"
+            ),
+            UpdateExpression=(
+                "SET #status = :next_status, updated_at = :updated_at, "
+                "updated_at_epoch = :updated_epoch, deletion_execute_at_epoch = :execute_at"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":profile_id": profile_id,
+                ":active": "active",
+                ":pending": "deletion_pending",
+                ":deleting": "deleting",
+                ":next_status": next_state,
+                ":updated_at": now_iso,
+                ":updated_epoch": now_epoch,
+                ":execute_at": execute_at,
+            },
+        )
+
+    installations = _household_installation_records(household_id)
+    profile_installations = [
+        item for item in installations
+        if member_subject
+        and str(item.get("principal_id") or "") == member_subject
+    ]
+    mappings = _profile_mapping_records_for_installations(
+        installations, profile_id, household_id,
+    )
+    bindings = _profile_binding_records_for_household(
+        graph["household_memberships"], profile_id, household_id,
+    )
+    invitations = _profile_invitation_records(profile_id, household_id)
+    join_transactions = _profile_join_transaction_records(invitations)
+
+    for mapping in mappings:
+        key = {
+            "installation_id": str(mapping.get("installation_id") or ""),
+            "local_profile_source_id": str(mapping.get("local_profile_source_id") or ""),
+        }
+        if mode == "immediate":
+            profile_mappings_table.delete_item(Key=key)
+        else:
+            profile_mappings_table.update_item(
+                Key=key,
+                ConditionExpression="cloud_profile_id = :profile_id AND household_id = :household_id",
+                UpdateExpression=(
+                    "SET mapping_state = :revoked, revoked_at = :updated_at, "
+                    "updated_at = :updated_at, updated_at_epoch = :updated_epoch, "
+                    "revocation_reason = :reason"
+                ),
+                ExpressionAttributeValues={
+                    ":profile_id": profile_id,
+                    ":household_id": household_id,
+                    ":revoked": "revoked",
+                    ":updated_at": now_iso,
+                    ":updated_epoch": now_epoch,
+                    ":reason": "owner_profile_deletion_v2",
+                },
+            )
+    for binding in bindings:
+        key = {
+            "account_id": str(binding.get("account_id") or ""),
+            "profile_id": profile_id,
+        }
+        if mode == "immediate":
+            profile_bindings_table.delete_item(Key=key)
+        else:
+            profile_bindings_table.update_item(
+                Key=key,
+                ConditionExpression="household_id = :household_id",
+                UpdateExpression=(
+                    "SET #status = :revoked, revoked_at = :updated_at, "
+                    "updated_at = :updated_at, updated_at_epoch = :updated_epoch"
+                ),
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":household_id": household_id,
+                    ":revoked": "revoked",
+                    ":updated_at": now_iso,
+                    ":updated_epoch": now_epoch,
+                },
+            )
+    for installation in profile_installations:
+        _revoke_profile_installation(installation, now_iso=now_iso)
+
+    _remove_profile_from_principal(
+        graph.get("owner_principal"), profile_id, now_iso=now_iso, now_epoch=now_epoch,
+    )
+    if graph.get("member_principal") is not graph.get("owner_principal"):
+        _remove_profile_from_principal(
+            graph.get("member_principal"), profile_id, now_iso=now_iso, now_epoch=now_epoch,
+        )
+
+    if isinstance(graph.get("legacy_membership"), dict):
+        if mode == "immediate":
+            identity_memberships_table.delete_item(Key={"principal_id": member_subject})
+        else:
+            identity_memberships_table.update_item(
+                Key={"principal_id": member_subject},
+                ConditionExpression="profile_id = :profile_id AND household_id = :household_id",
+                UpdateExpression=(
+                    "SET #state = :pending, revoked = :revoked, updated_at = :updated_at, "
+                    "updated_at_epoch = :updated_epoch, deletion_execute_at_epoch = :execute_at"
+                ),
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={
+                    ":profile_id": profile_id,
+                    ":household_id": household_id,
+                    ":pending": "deletion_pending",
+                    ":revoked": True,
+                    ":updated_at": now_iso,
+                    ":updated_epoch": now_epoch,
+                    ":execute_at": execute_at,
+                },
+            )
+
+    for invitation in invitations:
+        key = {"code_hash": str(invitation.get("code_hash") or "")}
+        if mode == "immediate":
+            household_invitations_table.delete_item(Key=key)
+        else:
+            household_invitations_table.update_item(
+                Key=key,
+                ConditionExpression="profile_id = :profile_id AND household_id = :household_id",
+                UpdateExpression=(
+                    "SET #state = :pending, deletion_execute_at_epoch = :execute_at, "
+                    "expires_at = :execute_at"
+                ),
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={
+                    ":profile_id": profile_id,
+                    ":household_id": household_id,
+                    ":pending": "deletion_pending",
+                    ":execute_at": execute_at,
+                },
+            )
+    for transaction in join_transactions:
+        key = {"join_resume_hash": str(transaction.get("join_resume_hash") or "")}
+        if mode == "immediate":
+            household_join_transactions_table.delete_item(Key=key)
+        else:
+            household_join_transactions_table.update_item(
+                Key=key,
+                UpdateExpression=(
+                    "SET #state = :pending, deletion_execute_at_epoch = :execute_at, "
+                    "cleanup_at = :execute_at"
+                ),
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={
+                    ":pending": "deletion_pending",
+                    ":execute_at": execute_at,
+                },
+            )
+
+    legacy_profile = profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if isinstance(legacy_profile, dict):
+        if str(legacy_profile.get("household_id") or "") != household_id:
+            raise AccountFoundationError("profile_deletion_ownership_ambiguous")
+        if mode == "immediate":
+            profiles_table.delete_item(Key={"profile_id": profile_id})
+        else:
+            profiles_table.update_item(
+                Key={"profile_id": profile_id},
+                ConditionExpression="household_id = :household_id",
+                UpdateExpression=(
+                    "SET #status = :pending, deletion_execute_at_epoch = :execute_at, "
+                    "updated_at = :updated_at, updated_at_epoch = :updated_epoch"
+                ),
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":household_id": household_id,
+                    ":pending": "deletion_pending",
+                    ":execute_at": execute_at,
+                    ":updated_at": now_iso,
+                    ":updated_epoch": now_epoch,
+                },
+            )
+
+    if mode == "immediate":
+        for item in events_table.query(
+            KeyConditionExpression=Key("profile_id").eq(profile_id),
+            ConsistentRead=True,
+        ).get("Items", []):
+            events_table.delete_item(Key={
+                "profile_id": profile_id,
+                "event_key": str(item.get("event_key") or ""),
+            })
+        for table in (profile_settings_table, entitlements_table):
+            table.delete_item(Key={"profile_id": profile_id})
+        for item in devices_table.query(
+            IndexName="profile_id-updated_at-index",
+            KeyConditionExpression=Key("profile_id").eq(profile_id),
+            ConsistentRead=False,
+        ).get("Items", []):
+            device_id = str(item.get("device_id") or "")
+            exact = devices_table.get_item(
+                Key={"device_id": device_id}, ConsistentRead=True,
+            ).get("Item")
+            if isinstance(exact, dict) and str(exact.get("profile_id") or "") == profile_id:
+                devices_table.delete_item(Key={"device_id": device_id})
+        if PROFILE_AVATARS_BUCKET and s3_client is not None:
+            avatar_key = profile_avatar_key(profile_id)
+            s3_client.delete_object(Bucket=PROFILE_AVATARS_BUCKET, Key=avatar_key)
+            try:
+                s3_client.head_object(Bucket=PROFILE_AVATARS_BUCKET, Key=avatar_key)
+            except ClientError as error:
+                if str((error.response or {}).get("Error", {}).get("Code") or "") not in {
+                    "404", "NoSuchKey", "NotFound",
+                }:
+                    raise
+            else:
+                raise AccountFoundationError("profile_deletion_absence_unconfirmed")
+
+        if isinstance(membership, dict):
+            household_memberships_table.delete_item(Key={
+                "household_id": household_id,
+                "membership_id": str(membership.get("membership_id") or ""),
+            })
+            account_id = str(membership.get("account_id") or "")
+            household_memberships_table.delete_item(Key={
+                "household_id": household_id,
+                "membership_id": account_household_guard_id(account_id, household_id),
+            })
+        identity_profiles_table.delete_item(Key={"profile_id": profile_id})
+
+    audit = _profile_binding_audit(
+        event, session, "profile_deletion_completed", "success",
+        target_id=profile_id, target_type="profile", reason_code=mode,
+    )
+    commit_security_audit(audit)
+
+    exact_profile = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if mode == "immediate":
+        if exact_profile is not None:
+            raise AccountFoundationError("profile_deletion_absence_unconfirmed")
+    elif (
+        not isinstance(exact_profile, dict)
+        or exact_profile.get("state") != "deletion_pending"
+        or int(exact_profile.get("deletion_execute_at_epoch") or 0) != execute_at
+    ):
+        raise AccountFoundationError("profile_deletion_retention_unconfirmed")
+    return response(200, {
+        "state": "profile_deleted" if mode == "immediate" else "profile_deletion_scheduled",
+        "mode": mode,
+        "profile_status": "deleted" if mode == "immediate" else "deletion_pending",
+        "deletion_execute_at_epoch": execute_at,
+        "mapping_state": "revoked",
+        "absence_verified": mode == "immediate",
+        "cognito_identity_deleted": False,
+    })
+
+
+def delete_profile_v3(event, path):
+    """Schedule or permanently delete one exact household profile graph.
+
+    Canonical household profiles are authorized from the server-owned
+    HouseholdMembership and IdentityProfile graph. Legacy mapping-only Cloud
+    profiles retain the installation-scoped receipt requirement. Neither path
+    searches by display name or deletes a Cognito identity.
+    """
+    if any(table is None for table in (
+        profiles_table,
+        profile_mappings_table,
+        security_audit_table,
+    )):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session, context, failure = _mapping_context(event)
+    if failure:
+        return failure
+    capabilities = set((context.get("household") or {}).get("capabilities") or [])
+    if "profile.delete_household" not in capabilities:
+        return _mapping_failure(event, session, "profile_deletion_not_authorized")
+    profile_id = profile_deletion_path_id(path)
+    body = parse_json_body(event)
+    if (
+        not profile_id
+        or not isinstance(body, dict)
+        or body.get("explicit_confirmation") is not True
+    ):
+        return _mapping_failure(event, session, "invalid_profile_deletion_request")
+    mode = str(body.get("mode") or "").strip().lower()
+    if mode not in {"immediate", "retained_30_days"}:
+        return _mapping_failure(event, session, "invalid_profile_deletion_mode")
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+
+    if any(table is None for table in (
+        profile_bindings_table,
+        household_memberships_table,
+        identity_profiles_table,
+        principals_table,
+        identity_memberships_table,
+    )):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    try:
+        canonical_graph = _canonical_profile_deletion_context(
+            profile_id=profile_id,
+            household_id=household_id,
+            session=session,
+        )
+    except AccountFoundationError as error:
+        status = 403 if error.reason in {
+            "owner_profile_deletion_forbidden",
+            "profile_deletion_not_authorized",
+        } else 409
+        return response(status, {"state": error.reason})
+    if canonical_graph is not None:
+        if any(table is None for table in (
+            installations_table,
+            app_sessions_table,
+            household_invitations_table,
+            household_join_transactions_table,
+            events_table,
+            profile_settings_table,
+            entitlements_table,
+            devices_table,
+        )):
+            return response(503, {"state": "identity_context_storage_unavailable"})
+        try:
+            return _execute_canonical_profile_deletion(
+                event,
+                session,
+                context,
+                canonical_graph,
+                profile_id=profile_id,
+                household_id=household_id,
+                mode=mode,
+            )
+        except AuditReferenceError:
+            return audit_unavailable_response()
+        except AccountFoundationError as error:
+            return response(409, {"state": error.reason})
+        except ClientError as error:
+            if str((error.response or {}).get("Error", {}).get("Code") or "") in {
+                "ConditionalCheckFailedException",
+                "TransactionCanceledException",
+            }:
+                return response(409, {"state": "profile_deletion_conflict"})
+            raise
+
+    # Mapping-only Cloud profiles predate the canonical household roster and
+    # remain deletable only with the exact installation receipt.
+    try:
+        source_id = local_profile_source_id(body.get("local_profile_source_id"))
+    except AccountFoundationError as error:
+        return _mapping_failure(event, session, error.reason)
+    mapping_id_value = str(body.get("mapping_id") or "").strip()
+    eligible = {str(item.get("profile_id") or "") for item in _mapping_eligible_profiles(context)}
+    if profile_id not in eligible:
+        return _mapping_failure(event, session, "profile_deletion_not_authorized", source_id=source_id)
+
+    installation_id = str(session.get("installation_id") or "")
+    account_id = str((context.get("account") or {}).get("account_id") or "")
+    mapping = profile_mappings_table.get_item(Key={
+        "installation_id": installation_id,
+        "local_profile_source_id": source_id,
+    }, ConsistentRead=True).get("Item")
+    profile = profiles_table.get_item(Key={"profile_id": profile_id}, ConsistentRead=True).get("Item")
+    try:
+        validate_confirmed_mapping(
+            mapping, installation_id=installation_id, source_id=source_id,
+            account_id=account_id, household_id=household_id,
+        )
+        validate_profile(profile, household_id=household_id)
+    except AccountFoundationError as error:
+        return _mapping_failure(event, session, error.reason, source_id=source_id)
+    if (
+        str(mapping.get("mapping_id") or "") != mapping_id_value
+        or str(mapping.get("cloud_profile_id") or "") != profile_id
+    ):
+        return _mapping_failure(event, session, "mapping_conflict", source_id=source_id)
+
+    now_epoch = epoch_now()
+    now_iso = utc_now_iso()
+    next_status = "deleted" if mode == "immediate" else "deletion_pending"
+    execute_at = now_epoch if mode == "immediate" else now_epoch + (30 * 24 * 60 * 60)
+    try:
+        audit = _profile_binding_audit(
+            event, session, "profile_deletion_requested", "success",
+            target_id=profile_id, target_type="profile", reason_code=mode,
+        )
+        dynamodb.meta.client.transact_write_items(TransactItems=[
+            {"Update": {
+                "TableName": PROFILES_TABLE,
+                "Key": {"profile_id": profile_id},
+                "ConditionExpression": (
+                    "entity_type = :profile_entity AND household_id = :household_id "
+                    "AND #status = :active_status"
+                ),
+                "UpdateExpression": (
+                    "SET #status = :next_status, updated_at = :updated_at, "
+                    "updated_at_epoch = :updated_epoch, deletion_mode = :mode, "
+                    "deletion_requested_by_account_id = :account_id, "
+                    "deletion_requested_at = :updated_at, "
+                    "deletion_execute_at_epoch = :execute_at"
+                ),
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": {
+                    ":profile_entity": "Profile",
+                    ":household_id": household_id,
+                    ":active_status": "active",
+                    ":next_status": next_status,
+                    ":updated_at": now_iso,
+                    ":updated_epoch": now_epoch,
+                    ":mode": mode,
+                    ":account_id": account_id,
+                    ":execute_at": execute_at,
+                },
+            }},
+            {"Update": {
+                "TableName": PROFILE_MAPPINGS_TABLE,
+                "Key": {
+                    "installation_id": installation_id,
+                    "local_profile_source_id": source_id,
+                },
+                "ConditionExpression": (
+                    "mapping_id = :mapping_id AND account_id = :account_id "
+                    "AND household_id = :household_id AND cloud_profile_id = :profile_id "
+                    "AND mapping_state = :confirmed"
+                ),
+                "UpdateExpression": (
+                    "SET mapping_state = :revoked, updated_at = :updated_at, "
+                    "updated_at_epoch = :updated_epoch, revoked_at = :updated_at, "
+                    "revocation_reason = :reason"
+                ),
+                "ExpressionAttributeValues": {
+                    ":mapping_id": mapping_id_value,
+                    ":account_id": account_id,
+                    ":household_id": household_id,
+                    ":profile_id": profile_id,
+                    ":confirmed": "confirmed",
+                    ":revoked": "revoked",
+                    ":updated_at": now_iso,
+                    ":updated_epoch": now_epoch,
+                    ":reason": "owner_profile_deletion_v1",
+                },
+            }},
+            {"Put": {
+                "TableName": SECURITY_AUDIT_TABLE, "Item": audit,
+                "ConditionExpression": "attribute_not_exists(event_id)",
+            }},
+        ])
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") == "TransactionCanceledException":
+            return _mapping_failure(event, session, "profile_deletion_conflict", source_id=source_id)
+        raise
+    if mode == "immediate":
+        mappings = [mapping]
+        if installations_table is not None:
+            mappings = _profile_mapping_records_for_installations(
+                _household_installation_records(household_id),
+                profile_id,
+                household_id,
+            ) or mappings
+        for record in mappings:
+            profile_mappings_table.delete_item(Key={
+                "installation_id": str(record.get("installation_id") or ""),
+                "local_profile_source_id": str(record.get("local_profile_source_id") or ""),
+            })
+        if profile_bindings_table is not None and household_memberships_table is not None:
+            for record in _profile_binding_records_for_household(
+                _household_membership_records(household_id),
+                profile_id,
+                household_id,
+            ):
+                profile_bindings_table.delete_item(Key={
+                    "account_id": str(record.get("account_id") or ""),
+                    "profile_id": profile_id,
+                })
+        profiles_table.delete_item(Key={"profile_id": profile_id})
+        if profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item") is not None:
+            return response(409, {"state": "profile_deletion_absence_unconfirmed"})
+    return response(200, {
+        "state": "profile_deleted" if mode == "immediate" else "profile_deletion_scheduled",
+        "mode": mode,
+        "profile_status": next_status,
+        "deletion_execute_at_epoch": execute_at,
+        "mapping_state": "revoked",
+        "absence_verified": mode == "immediate",
+        "cognito_identity_deleted": False,
+    })
+
+
+def preview_profile_mapping_v3(event):
+    if profile_mappings_table is None or security_audit_table is None:
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session, context, failure = _mapping_context(event)
+    if failure:
+        return failure
+    body = parse_json_body(event)
+    if not isinstance(body, dict):
+        return _mapping_failure(event, session, "invalid_mapping_preview")
+    try:
+        source_id = local_profile_source_id(body.get("local_profile_source_id"))
+        commit_security_audit(_profile_binding_audit(
+            event, session, "profile_mapping_previewed", "success", target_id=source_id,
+            target_type="local_profile_mapping",
+        ))
+    except AccountFoundationError as error:
+        return _mapping_failure(event, session, error.reason)
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    # Presentation metadata is deliberately not used to claim a match.
+    return response(200, {
+        "state": "candidate",
+        "local_profile_source_id": source_id,
+        "actions": ["link_existing_cloud_profile", "create_new_cloud_profile", "keep_local_only", "review_later"],
+        "cloud_profiles": _mapping_eligible_profiles(context),
+    })
+
+
+def list_profile_mappings_v3(event):
+    if profile_mappings_table is None:
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session, context, failure = _mapping_context(event)
+    if failure:
+        return failure
+    installation_id = str(session.get("installation_id") or "")
+    account_id = str((context.get("account") or {}).get("account_id") or "")
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    usable = {str(item.get("profile_id") or "") for item in _mapping_eligible_profiles(context)}
+    records = profile_mappings_table.query(
+        KeyConditionExpression=Key("installation_id").eq(installation_id), ConsistentRead=True,
+    ).get("Items", [])
+    mappings = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        try:
+            validate_confirmed_mapping(
+                record, installation_id=installation_id,
+                source_id=str(record.get("local_profile_source_id") or ""),
+                account_id=account_id, household_id=household_id,
+            )
+        except AccountFoundationError:
+            continue
+        mappings.append(public_mapping(record, usable_profile_ids=usable))
+    return response(200, {"schema_version": 1, "mappings": sorted(mappings, key=lambda item: item["local_profile_source_id"])})
+
+
+def confirm_profile_mapping_v3(event, *, verified_session=None, retry_on_conflict=True):
+    if any(table is None for table in (profile_mappings_table, security_audit_table)):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session, context, failure = _mapping_context(event, verified_session=verified_session)
+    if failure:
+        return failure
+    body = parse_json_body(event)
+    if not isinstance(body, dict) or body.get("explicit_confirmation") is not True:
+        return _mapping_failure(event, session, "explicit_confirmation_required")
+    try:
+        source_id = local_profile_source_id(body.get("local_profile_source_id"))
+    except AccountFoundationError as error:
+        return _mapping_failure(event, session, error.reason)
+    cloud_profile_id = str(body.get("cloud_profile_id") or "").strip()
+    eligible = {str(item.get("profile_id") or "") for item in _mapping_eligible_profiles(context)}
+    if cloud_profile_id not in eligible:
+        return _mapping_failure(event, session, "mapping_not_authorized", source_id=source_id)
+    installation_id = str(session.get("installation_id") or "")
+    account_id = str((context.get("account") or {}).get("account_id") or "")
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    existing = profile_mappings_table.get_item(Key={
+        "installation_id": installation_id, "local_profile_source_id": source_id,
+    }, ConsistentRead=True).get("Item")
+    if isinstance(existing, dict):
+        if existing.get("mapping_state") == "confirmed" and existing.get("cloud_profile_id") == cloud_profile_id:
+            return response(200, {"state": "mapping_already_confirmed", "mapping_id": existing.get("mapping_id"), "cloud_profile_id": cloud_profile_id})
+        return _mapping_failure(event, session, "mapping_conflict", source_id=source_id)
+    now = epoch_now()
+    try:
+        mapping = build_confirmed_mapping(
+            installation_id=installation_id, local_source_id=source_id, account_id=account_id,
+            household_id=household_id, cloud_profile_id=cloud_profile_id,
+            now_iso=utc_now_iso(), now_epoch=now,
+        )
+        audit = _profile_binding_audit(
+            event, session, "profile_mapping_confirmed", "success", target_id=mapping["mapping_id"],
+            target_type="local_profile_mapping",
+        )
+        dynamodb.meta.client.transact_write_items(TransactItems=[
+            {"Put": {"TableName": PROFILE_MAPPINGS_TABLE, "Item": mapping,
+                      "ConditionExpression": "attribute_not_exists(installation_id) AND attribute_not_exists(local_profile_source_id)"}},
+            {"Put": {"TableName": SECURITY_AUDIT_TABLE, "Item": audit,
+                      "ConditionExpression": "attribute_not_exists(event_id)"}},
+        ])
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") != "TransactionCanceledException":
+            raise
+        if retry_on_conflict:
+            return confirm_profile_mapping_v3(event, verified_session=session, retry_on_conflict=False)
+        return _mapping_failure(event, session, "mapping_conflict", source_id=source_id)
+    return response(200, {"state": "mapping_confirmed", "mapping_id": mapping["mapping_id"], "cloud_profile_id": cloud_profile_id})
+
+
+def create_and_confirm_profile_mapping_v3(event):
+    if any(table is None for table in (profiles_table, profile_bindings_table, profile_mappings_table, security_audit_table)):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session, context, failure = _mapping_context(event)
+    if failure:
+        return failure
+    if "household.manage" not in set((context.get("household") or {}).get("capabilities") or []):
+        return _mapping_failure(event, session, "mapping_not_authorized")
+    body = parse_json_body(event)
+    if not isinstance(body, dict) or body.get("explicit_confirmation") is not True:
+        return _mapping_failure(event, session, "explicit_confirmation_required")
+    try:
+        source_id = local_profile_source_id(body.get("local_profile_source_id"))
+    except AccountFoundationError as error:
+        return _mapping_failure(event, session, error.reason)
+    installation_id = str(session.get("installation_id") or "")
+    if profile_mappings_table.get_item(Key={"installation_id": installation_id, "local_profile_source_id": source_id}, ConsistentRead=True).get("Item"):
+        return _mapping_failure(event, session, "mapping_conflict", source_id=source_id)
+    account_id = str((context.get("account") or {}).get("account_id") or "")
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    now = epoch_now()
+    try:
+        creation = build_profile_creation(
+            household_id=household_id, account_id=account_id, display_name=body.get("display_name"),
+            profile_type=body.get("profile_type"), age_classification=body.get("age_classification"),
+            now_iso=utc_now_iso(), now_epoch=now,
+        )
+        mapping = build_confirmed_mapping(
+            installation_id=installation_id, local_source_id=source_id, account_id=account_id,
+            household_id=household_id, cloud_profile_id=creation.profile["profile_id"],
+            now_iso=utc_now_iso(), now_epoch=now,
+        )
+        audit = _profile_binding_audit(event, session, "cloud_profile_created_and_mapped", "success", target_id=mapping["mapping_id"], target_type="local_profile_mapping")
+        dynamodb.meta.client.transact_write_items(TransactItems=[
+            {"Put": {"TableName": PROFILES_TABLE, "Item": creation.profile, "ConditionExpression": "attribute_not_exists(profile_id)"}},
+            {"Put": {"TableName": PROFILE_BINDINGS_TABLE, "Item": creation.binding, "ConditionExpression": "attribute_not_exists(account_id) AND attribute_not_exists(profile_id)"}},
+            {"Put": {"TableName": PROFILE_MAPPINGS_TABLE, "Item": mapping, "ConditionExpression": "attribute_not_exists(installation_id) AND attribute_not_exists(local_profile_source_id)"}},
+            {"Put": {"TableName": SECURITY_AUDIT_TABLE, "Item": audit, "ConditionExpression": "attribute_not_exists(event_id)"}},
+        ])
+    except AccountFoundationError as error:
+        return _mapping_failure(event, session, error.reason, source_id=source_id)
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") == "TransactionCanceledException":
+            return _mapping_failure(event, session, "mapping_conflict", source_id=source_id)
+        raise
+    return response(200, {"state": "cloud_profile_created_and_mapped", "mapping_id": mapping["mapping_id"], "cloud_profile_id": creation.profile["profile_id"]})
 
 
 def request_absolute_url(event):
@@ -596,6 +4782,44 @@ def add_home_connector_signature(payload, connector_grant_key):
     canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     signature = hmac.new(connector_grant_key.encode("utf-8"), canonical, hashlib.sha256).digest()
     return {**payload, "home_sig": base64url_encode(signature)}
+
+
+def pairing_v3_playback_grant_payload(payload):
+    """Bind a V3 playback grant to the Cloud key that the plugin already trusts.
+
+    V3 intentionally does not provision the legacy symmetric connector grant
+    key.  Its relay payload is therefore signed with the existing Cloud
+    Ed25519 authorization key; the plugin verifies it with its configured
+    public key before forwarding anything to local Jellyfin.
+    """
+    claims = {
+        **payload,
+        "iss": f"kaevo-cloud-{KAEVO_ENV}",
+        "aud": PAIRING_V3_PLAYBACK_GRANT_AUDIENCE,
+        "protocol": PAIRING_V3_PROTOCOL,
+    }
+    header = {
+        "alg": "EdDSA",
+        "kid": PAIRING_V3_AUTHORIZATION_KEY_ID,
+        "typ": PAIRING_V3_PLAYBACK_GRANT_TYPE,
+    }
+    encoded_header = pairing_v3_b64url_encode(json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    encoded_claims = pairing_v3_b64url_encode(json.dumps(claims, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    signature = pairing_v3_sign_ed25519(
+        pairing_v3_authorization_private_key(),
+        f"{encoded_header}.{encoded_claims}".encode("ascii"),
+    )
+    return {**claims, "home_sig": f"{encoded_header}.{encoded_claims}.{signature}"}
+
+
+def pairing_v3_connector_can_issue_playback_grants(connector):
+    return bool(
+        connector
+        and connector.get("protocol_version") == PAIRING_V3_PROTOCOL
+        and connector.get("auth_state") == "v3_active"
+        and connector.get("state") == "active"
+        and not bool_value(connector.get("revoked"), False)
+    )
 
 
 def create_connector_relay_ticket(event, path, *, pairing_v3=False):
@@ -1488,7 +5712,11 @@ def connector_online_from_item(item):
     return (epoch_now() - last_seen_epoch) <= CONNECTOR_ONLINE_WINDOW_SECONDS
 
 
-def public_connector_item(item):
+HOME_CONNECTORS_PROFILE_INDEX = "profile_id-updated_at-index"
+HOME_CONNECTORS_HOUSEHOLD_INDEX = "household_id-updated_at-index"
+
+
+def public_connector_item(item, *, requesting_profile_id=""):
     provider_status = parse_json_field(item.get("provider_status_json"), {})
     capabilities = parse_json_field(item.get("capabilities_json"), [])
 
@@ -1496,7 +5724,11 @@ def public_connector_item(item):
 
     return {
         "connector_id": item.get("connector_id"),
-        "profile_id": item.get("profile_id"),
+        # A connector belongs to a household even though its enrollment record
+        # retains the Owner profile that paired it.  Service consumers receive
+        # their own authorized profile identity instead of another member's
+        # opaque profile identifier.
+        "profile_id": requesting_profile_id or item.get("profile_id"),
         "connector_name": item.get("connector_name"),
         "host_type": item.get("host_type"),
         "app_version": item.get("app_version"),
@@ -1510,6 +5742,150 @@ def public_connector_item(item):
         "capabilities": capabilities,
         "provider_status": provider_status
     }
+
+
+def _direct_home_connectors_for_profile(profile_id):
+    result = home_connectors_table.query(
+        IndexName=HOME_CONNECTORS_PROFILE_INDEX,
+        KeyConditionExpression=Key("profile_id").eq(profile_id),
+        ScanIndexForward=False,
+        Limit=10,
+    )
+    return [
+        item for item in result.get("Items", [])
+        if hmac.compare_digest(str(item.get("profile_id") or ""), profile_id)
+    ]
+
+
+def _authorized_household_connector_context(profile_id):
+    """Resolve one active profile to its exact server-owned household.
+
+    Missing legacy identity records deliberately return ``legacy`` so an
+    Owner's already-paired connector keeps working during migration.  Once a
+    profile has a principal binding, every incomplete or inconsistent graph is
+    invalid and cannot fall back to a client-selected connector.
+    """
+    authority_tables = (
+        principals_table,
+        identity_memberships_table,
+        identity_households_table,
+        identity_profiles_table,
+        household_memberships_table,
+    )
+    if not all(authority_tables):
+        return "legacy", None
+
+    profile = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if not isinstance(profile, dict):
+        return "legacy", None
+    if (
+        str(profile.get("profile_id") or "") != profile_id
+        or str(profile.get("state") or "") != "active"
+        or bool_value(profile.get("revoked"), False)
+    ):
+        return "invalid", None
+
+    member_subject = str(profile.get("member_principal_id") or "").strip()
+    owner_subject = str(profile.get("owner_principal_id") or "").strip()
+    subject = member_subject or owner_subject
+    if not subject:
+        return "legacy", None
+
+    account_id = str(profile.get("account_id") or "").strip()
+    household_id = str(profile.get("household_id") or "").strip()
+    if not account_id or not household_id:
+        return "invalid", None
+
+    principal = principals_table.get_item(
+        Key={"principal_id": subject}, ConsistentRead=True,
+    ).get("Item")
+    legacy_membership = identity_memberships_table.get_item(
+        Key={"principal_id": subject}, ConsistentRead=True,
+    ).get("Item")
+    household = identity_households_table.get_item(
+        Key={"household_id": household_id}, ConsistentRead=True,
+    ).get("Item")
+    normalized_membership = household_memberships_table.get_item(Key={
+        "household_id": household_id,
+        "membership_id": household_membership_id(account_id, household_id),
+    }, ConsistentRead=True).get("Item")
+    normalized_membership = _repair_legacy_active_membership_profile_pointer(
+        normalized_membership,
+        expected_profile_id=profile_id,
+    )
+    try:
+        claims, role, resolved_membership = resolve_household_membership(
+            subject=subject,
+            principal=principal,
+            legacy_membership=legacy_membership,
+            household=household,
+            profile=profile,
+            normalized_membership=normalized_membership,
+        )
+    except (AccountFoundationError, AuthorityError):
+        return "invalid", None
+
+    if (
+        claims.profile_id != profile_id
+        or claims.account_id != account_id
+        or claims.household_id != household_id
+        or (role is CanonicalRole.OWNER and subject != owner_subject)
+        or (role is not CanonicalRole.OWNER and subject != member_subject)
+    ):
+        return "invalid", None
+    return "authorized", {
+        "account_id": account_id,
+        "household_id": household_id,
+        "profile_id": profile_id,
+        "role": role.value,
+        "membership": resolved_membership,
+    }
+
+
+def _home_connectors_for_profile_access(profile_id):
+    """Return only connectors authorized by the profile's household graph."""
+    mode, context = _authorized_household_connector_context(profile_id)
+    if mode == "invalid":
+        return []
+    if mode == "legacy":
+        return _direct_home_connectors_for_profile(profile_id)
+
+    household_id = context["household_id"]
+    try:
+        result = home_connectors_table.query(
+            IndexName=HOME_CONNECTORS_HOUSEHOLD_INDEX,
+            KeyConditionExpression=Key("household_id").eq(household_id),
+            ScanIndexForward=False,
+            Limit=10,
+        )
+    except ClientError:
+        # During a one-time GSI rollout an Owner can keep using the exact
+        # connector they enrolled.  Members fail closed until the household
+        # index is available; they never inherit a connector by profile guess.
+        return (
+            _direct_home_connectors_for_profile(profile_id)
+            if context["role"] == CanonicalRole.OWNER.value
+            else []
+        )
+
+    connectors = [
+        item for item in result.get("Items", [])
+        if hmac.compare_digest(str(item.get("household_id") or ""), household_id)
+        and item.get("protocol_version") == PAIRING_V3_PROTOCOL
+        and item.get("auth_state") == "v3_active"
+        and item.get("state") == "active"
+        and item.get("binding_status") == "bound"
+        and not bool_value(item.get("revoked"), False)
+    ]
+    if connectors:
+        return connectors
+    return (
+        _direct_home_connectors_for_profile(profile_id)
+        if context["role"] == CanonicalRole.OWNER.value
+        else []
+    )
 
 
 def create_pairing_record(profile_id, connector_name, *, account_id="", household_id=""):
@@ -1716,8 +6092,17 @@ def register_installation_v2(event):
     if installations_table is None:
         return response(503, {"state": "installation_storage_unavailable"})
     try:
-        identity, _ = authoritative_identity(event, "register_device")
+        # This installation is bound to the caller's own active profile and
+        # DPoP key. Household members need this narrow, fresh-auth path after
+        # Profile Setup; owner-only device-management capabilities remain
+        # unchanged.
+        identity, _ = authoritative_identity(event, "register_own_device")
     except IdentityError as error:
+        LOGGER.info(
+            "installation_registration_denied stage=identity reason=%s status=%s",
+            error.reason,
+            error.status_code,
+        )
         return identity_error_response(error)
     body = parse_json_body(event)
     if body is None:
@@ -1743,6 +6128,11 @@ def register_installation_v2(event):
             replay_guard=record_dpop_jti,
         )
     except IdentityError as error:
+        LOGGER.info(
+            "installation_registration_denied stage=dpop reason=%s status=%s",
+            error.reason,
+            error.status_code,
+        )
         denial = prepare_security_audit(
             event, identity.household_id, "dpop_proof_denied", identity.subject,
             target_id=installation_id, target_type="installation",
@@ -1756,6 +6146,7 @@ def register_installation_v2(event):
             target_id=installation_id, target_type="installation",
         )
     except AuditReferenceError:
+        LOGGER.warning("installation_registration_denied stage=audit_reference")
         return audit_unavailable_response()
     now = epoch_now()
     item = {
@@ -1779,16 +6170,108 @@ def register_installation_v2(event):
         installations_table.put_item(Item=item, ConditionExpression="attribute_not_exists(installation_id)")
     except ClientError as error:
         if error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
-            raise
+            LOGGER.error(
+                "installation_registration_storage_failure code=%s",
+                str(error.response.get("Error", {}).get("Code") or "unknown")[:80],
+            )
+            return response(503, {"state": "installation_storage_unavailable"})
         existing = installations_table.get_item(Key={"installation_id": installation_id}, ConsistentRead=True).get("Item")
-        same_binding = bool(existing) and all(
-            hmac.compare_digest(str(existing.get(key) or ""), str(item.get(key) or ""))
-            for key in ("principal_id", "account_id", "household_id", "device_id", "key_thumbprint")
+        same_principal = bool(existing) and hmac.compare_digest(
+            str(existing.get("principal_id") or ""), str(item.get("principal_id") or "")
         )
-        if not same_binding or existing.get("state") != "active":
+        same_device = bool(existing) and hmac.compare_digest(
+            str(existing.get("device_id") or ""), str(item.get("device_id") or "")
+        )
+        if not same_principal or existing.get("state") != "active":
+            LOGGER.warning(
+                "installation_registration_conflict_scope principal_match=%s device_match=%s state_active=%s",
+                bool(existing) and hmac.compare_digest(
+                    str(existing.get("principal_id") or ""), str(item.get("principal_id") or "")
+                ),
+                bool(existing) and hmac.compare_digest(
+                    str(existing.get("device_id") or ""), str(item.get("device_id") or "")
+                ),
+                bool(existing) and existing.get("state") == "active",
+            )
             return response(409, {"state": "installation_binding_conflict"})
-        item = existing
+        same_key = hmac.compare_digest(
+            str(existing.get("key_thumbprint") or ""),
+            str(item.get("key_thumbprint") or ""),
+        )
+        same_authority = all(
+            hmac.compare_digest(str(existing.get(key) or ""), str(item.get(key) or ""))
+            for key in ("account_id", "household_id")
+        )
+        if same_key and same_device and same_authority:
+            item = existing
+        else:
+            # A Secure Enclave/Keychain replacement can leave the stable local
+            # installation identifier paired with a new signing key. Fresh
+            # authenticated DPoP already proved possession of that new key.
+            # Rotate only the exact active row owned by this same principal and
+            # physical device. Current server-owned account and household
+            # authority replace stale pre-migration values on that row; every
+            # cross-identity or cross-device collision remains a conflict.
+            replacement = dict(existing)
+            replacement["account_id"] = item["account_id"]
+            replacement["household_id"] = item["household_id"]
+            replacement["device_id"] = item["device_id"]
+            replacement["device_label"] = item["device_label"]
+            replacement["device_class"] = item["device_class"]
+            replacement["public_jwk_json"] = item["public_jwk_json"]
+            replacement["key_thumbprint"] = item["key_thumbprint"]
+            replacement["last_seen_at"] = item["last_seen_at"]
+            replacement["key_rotated_at"] = item["last_seen_at"]
+            try:
+                installations_table.update_item(
+                    Key={"installation_id": installation_id},
+                    UpdateExpression=(
+                        "SET #account = :account, #household = :household, #device = :device, "
+                        "#device_label = :device_label, #device_class = :device_class, "
+                        "#jwk = :jwk, #thumbprint = :thumbprint, "
+                        "#last_seen = :last_seen, #rotated = :rotated"
+                    ),
+                    ConditionExpression=(
+                        "#state = :active AND #principal = :principal"
+                    ),
+                    ExpressionAttributeNames={
+                        "#state": "state",
+                        "#principal": "principal_id",
+                        "#device": "device_id",
+                        "#device_label": "device_label",
+                        "#device_class": "device_class",
+                        "#account": "account_id",
+                        "#household": "household_id",
+                        "#jwk": "public_jwk_json",
+                        "#thumbprint": "key_thumbprint",
+                        "#last_seen": "last_seen_at",
+                        "#rotated": "key_rotated_at",
+                    },
+                    ExpressionAttributeValues={
+                        ":active": "active",
+                        ":principal": identity.subject,
+                        ":device": device_id,
+                        ":device_label": item["device_label"],
+                        ":device_class": item["device_class"],
+                        ":account": identity.account_id,
+                        ":household": identity.household_id,
+                        ":jwk": item["public_jwk_json"],
+                        ":thumbprint": item["key_thumbprint"],
+                        ":last_seen": item["last_seen_at"],
+                        ":rotated": item["last_seen_at"],
+                    },
+                )
+            except ClientError as error:
+                if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                    return response(409, {"state": "installation_binding_conflict"})
+                LOGGER.error(
+                    "installation_registration_storage_failure code=%s",
+                    str(error.response.get("Error", {}).get("Code") or "unknown")[:80],
+                )
+                return response(503, {"state": "installation_storage_unavailable"})
+            item = replacement
     commit_security_audit(audit)
+    LOGGER.info("installation_registration_succeeded")
     return response(201, {
         "state": "installation_registered",
         "installation_id": installation_id,
@@ -1958,6 +6441,55 @@ def owner_bound_session(event):
     if session.get("role") != "owner":
         return None, response(403, {"state": "owner_required"})
     return session, None
+
+
+def household_manager_bound_session(event):
+    """Authorize Owner/Admin operations from live server-owned authority.
+
+    The access token proves the principal and device binding. Household
+    authority is read consistently from the active principal record so a
+    stale or modified client cannot promote itself by changing local state.
+    """
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return None, response(401, {"state": "household_manager_session_required"})
+    if principals_table is None:
+        return None, response(503, {"state": "identity_storage_unavailable"})
+    principal_id = str(session.get("principal_id") or "")
+    principal = principals_table.get_item(
+        Key={"principal_id": principal_id},
+        ConsistentRead=True,
+    ).get("Item")
+    if (
+        not isinstance(principal, dict)
+        or principal.get("state") != "active"
+        or bool_value(principal.get("revoked"), False)
+        or not hmac.compare_digest(
+            str(principal.get("account_id") or ""),
+            str(session.get("account_id") or ""),
+        )
+        or not hmac.compare_digest(
+            str(principal.get("household_id") or ""),
+            str(session.get("household_id") or ""),
+        )
+    ):
+        return None, response(403, {"state": "household_manager_authority_missing"})
+    canonical_name = str(principal.get("role") or "").strip().lower()
+    access_name = str(
+        principal.get("household_access_role") or (
+            "owner" if canonical_name == "owner" else "member"
+        )
+    ).strip().lower()
+    if (
+        (canonical_name == "owner" and access_name != "owner")
+        or (canonical_name != "owner" and access_name == "owner")
+    ):
+        return None, response(409, {"state": "household_authority_manual_review_required"})
+    if access_name not in {"owner", "admin"}:
+        return None, response(403, {"state": "household_manager_required"})
+    authorized = dict(session)
+    authorized["household_access_role"] = access_name
+    return authorized, None
 
 
 def social_provider_credentials(provider):
@@ -2641,6 +7173,212 @@ def _join_code_hash(code):
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest() if normalized else ""
 
 
+def _opaque_join_resume_hash(handle):
+    value = str(handle or "")
+    if not re.fullmatch(r"jr_[A-Za-z0-9_-]{32,128}", value):
+        return ""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _join_binding_hash(value):
+    text = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{8,256}", text):
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _join_correlation_hash(value):
+    text = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", text):
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _join_email_hash(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _normalized_join_email(value):
+    email = str(value or "").strip().casefold()
+    if not re.fullmatch(r"[^\s@]{1,64}@[^\s@]{1,255}", email):
+        return ""
+    return email
+
+
+def _invitation_code_from_join_payload(body):
+    value = str(body.get("invitation") or body.get("join_code") or "").strip()
+    if value.lower().startswith("kaevo://"):
+        parts = urlsplit(value)
+        if parts.scheme != "kaevo" or parts.netloc != "join":
+            return ""
+        value = parse_qs(parts.query, keep_blank_values=True).get("code", [""])[0]
+    return value
+
+
+def _household_join_transaction(item):
+    return {
+        "join_resume_hash": str(item.get("join_resume_hash") or ""),
+        "entity_type": "HouseholdJoinResume",
+        "invitation_code_hash": str(item.get("invitation_code_hash") or ""),
+        "invitation_id": str(item.get("invitation_id") or ""),
+        "device_binding_hash": str(item.get("device_binding_hash") or ""),
+        "correlation_hash": str(item.get("correlation_hash") or ""),
+        "state": str(item.get("state") or "initiated"),
+        "created_at": str(item.get("created_at") or ""),
+        "expires_at": int(item.get("expires_at") or 0),
+        "schema_version": 1,
+    }
+
+
+def _join_route_error(state, status=400, retryable=False):
+    return response(status, {"state": state, "retryable": retryable})
+
+
+def _consume_household_join_rate_limit(device_binding_hash, correlation_hash, now):
+    """Rate-limit join routing without retaining an IP address or raw device ID."""
+    if household_join_transactions_table is None:
+        return False
+    # A ten-minute, hashed device+correlation bucket permits the normal
+    # invitation -> routing sequence while limiting automated enumeration.
+    bucket = now // (10 * 60)
+    rate_key = hashlib.sha256(
+        f"household-join-rate:{device_binding_hash}:{correlation_hash}:{bucket}".encode("utf-8")
+    ).hexdigest()
+    try:
+        household_join_transactions_table.update_item(
+            Key={"join_resume_hash": f"rate_{rate_key}"},
+            UpdateExpression=(
+                "SET attempts = if_not_exists(attempts, :zero) + :one, "
+                "expires_at = :expires_at, cleanup_at = :cleanup_at, entity_type = :entity_type"
+            ),
+            ConditionExpression="attribute_not_exists(attempts) OR attempts < :maximum",
+            ExpressionAttributeValues={
+                ":zero": 0,
+                ":one": 1,
+                ":maximum": HOUSEHOLD_JOIN_MAX_ATTEMPTS,
+                ":expires_at": (bucket + 1) * (10 * 60),
+                ":cleanup_at": now + HOUSEHOLD_JOIN_TRANSACTION_RETENTION_SECONDS,
+                ":entity_type": "HouseholdJoinRateLimit",
+            },
+        )
+        return True
+    except ClientError:
+        return False
+
+
+def begin_household_join(event):
+    """Validate a family invitation without accepting membership or reading email."""
+    if household_invitations_table is None or household_join_transactions_table is None:
+        return _join_route_error("household_join_unavailable", 503, True)
+    body = parse_json_body(event) or {}
+    code_hash = _join_code_hash(_invitation_code_from_join_payload(body))
+    device_binding_hash = _join_binding_hash(body.get("installation_id"))
+    correlation_hash = _join_correlation_hash(body.get("correlation_nonce"))
+    if not code_hash or not device_binding_hash or not correlation_hash:
+        return _join_route_error("household_join_invalid_request")
+    now = epoch_now()
+    if not _consume_household_join_rate_limit(device_binding_hash, correlation_hash, now):
+        return _join_route_error("household_join_retry_later", 429, True)
+    invitation = household_invitations_table.get_item(Key={"code_hash": code_hash}, ConsistentRead=True).get("Item")
+    if not invitation or str(invitation.get("state") or "") != "pending":
+        return _join_route_error("invitation_invalid_or_expired", 410)
+    if household_invitation_code_expiration(invitation) <= now:
+        return _join_route_error("invitation_invalid_or_expired", 410)
+    # The invitation schema is server-created. A connector QR has no pending
+    # invitation record and therefore never reaches this transaction path.
+    handle = f"jr_{secrets.token_urlsafe(32)}"
+    record = _household_join_transaction({
+        "join_resume_hash": _opaque_join_resume_hash(handle),
+        "invitation_code_hash": code_hash,
+        "invitation_id": str(invitation.get("invitation_id") or ""),
+        "device_binding_hash": device_binding_hash,
+        "correlation_hash": correlation_hash,
+        "state": "initiated",
+        "created_at": utc_now_iso(),
+        "expires_at": now + HOUSEHOLD_JOIN_TRANSACTION_TTL_SECONDS,
+    })
+    record["cleanup_at"] = now + HOUSEHOLD_JOIN_TRANSACTION_RETENTION_SECONDS
+    try:
+        household_join_transactions_table.put_item(
+            Item=record, ConditionExpression="attribute_not_exists(join_resume_hash)"
+        )
+    except ClientError:
+        return _join_route_error("household_join_unavailable", 503, True)
+    return response(201, {
+        "state": "household_join_ready",
+        "join_resume_handle": handle,
+        "expires_at": record["expires_at"],
+        "next": "collect_email",
+    })
+
+
+def _cognito_user_exists(email):
+    if not COGNITO_USER_POOL_ID:
+        raise RuntimeError("Cognito user pool unavailable")
+    escaped = email.replace("\\", "\\\\").replace('"', '\\"')
+    result = cognito_client.list_users(
+        UserPoolId=COGNITO_USER_POOL_ID, Filter=f'email = "{escaped}"', Limit=2,
+    )
+    return bool(result.get("Users") or [])
+
+
+def route_household_join_auth(event):
+    """Privately choose Cognito sign-in or signup for one bound invitation."""
+    if household_join_transactions_table is None or not NATIVE_OIDC_AUTHORIZATION_ENDPOINT or not EXPECTED_NATIVE_CALLBACK_URI:
+        return _join_route_error("household_join_unavailable", 503, True)
+    body = parse_json_body(event) or {}
+    handle_hash = _opaque_join_resume_hash(body.get("join_resume_handle"))
+    device_binding_hash = _join_binding_hash(body.get("installation_id"))
+    email = _normalized_join_email(body.get("email"))
+    oauth_state = str(body.get("oauth_state") or "")
+    code_challenge = str(body.get("code_challenge") or "")
+    if not handle_hash or not device_binding_hash or not email or not re.fullmatch(r"[A-Za-z0-9_-]{16,256}", oauth_state) or not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", code_challenge):
+        return _join_route_error("household_join_invalid_request")
+    item = household_join_transactions_table.get_item(Key={"join_resume_hash": handle_hash}, ConsistentRead=True).get("Item")
+    now = epoch_now()
+    if not item or int(item.get("expires_at") or 0) <= now:
+        return _join_route_error("household_join_expired", 410)
+    if not hmac.compare_digest(str(item.get("device_binding_hash") or ""), device_binding_hash):
+        return _join_route_error("household_join_invalid_request", 403)
+    if not _consume_household_join_rate_limit(device_binding_hash, str(item.get("correlation_hash") or ""), now):
+        return _join_route_error("household_join_retry_later", 429, True)
+    if str(item.get("state") or "") not in {"initiated", "auth_routing"}:
+        return _join_route_error("household_join_not_resumable", 409)
+    try:
+        existing = _cognito_user_exists(email)
+    except Exception:
+        return _join_route_error("household_join_unavailable", 503, True)
+    endpoint = NATIVE_OIDC_AUTHORIZATION_ENDPOINT.rstrip("/")
+    if not existing:
+        endpoint = endpoint.rsplit("/oauth2/authorize", 1)[0] + "/signup"
+    query = urlencode({
+        "client_id": os.environ.get("EXPECTED_NATIVE_CLIENT_ID", ""),
+        "response_type": "code",
+        "scope": "openid",
+        "redirect_uri": EXPECTED_NATIVE_CALLBACK_URI,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "state": oauth_state,
+        "login_hint": email,
+    })
+    if not os.environ.get("EXPECTED_NATIVE_CLIENT_ID", ""):
+        return _join_route_error("household_join_unavailable", 503, True)
+    try:
+        household_join_transactions_table.update_item(
+            Key={"join_resume_hash": handle_hash},
+            UpdateExpression="SET #state = :state, auth_state_hash = :state_hash, email_hash = :email_hash, updated_at = :updated_at",
+            ConditionExpression="#state IN (:initiated, :routing) AND expires_at > :now",
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":state": "awaiting_callback", ":state_hash": hashlib.sha256(oauth_state.encode("utf-8")).hexdigest(),
+                ":email_hash": _join_email_hash(email), ":updated_at": utc_now_iso(), ":initiated": "initiated", ":routing": "auth_routing", ":now": now,
+            },
+        )
+    except ClientError:
+        return _join_route_error("household_join_not_resumable", 409)
+    return response(200, {"state": "household_join_auth_ready", "redirect_url": f"{endpoint}?{query}", "oauth_state": oauth_state, "expires_at": int(item["expires_at"])})
+
+
 def ensure_nonproduction_family_entitlement(profile_id):
     """Grant the documented internal tester plan only outside production."""
     if KAEVO_ENV not in {"dev", "security-stage"} or entitlements_table is None or not profile_id:
@@ -2684,13 +7422,43 @@ def household_invitation_response(invitation, join_code, *, state):
         "profile_id": str(invitation.get("profile_id") or ""),
         "display_name": str(invitation.get("display_name") or "Household member"),
         "profile_type": str(invitation.get("profile_type") or "adult"),
+        "age_classification": str(invitation.get("role") or "adult"),
+        "household_access_role": str(
+            invitation.get("household_access_role") or "member"
+        ),
+        "cloud_access_enabled": bool_value(
+            invitation.get("cloud_access_enabled"), True
+        ),
+        "request_access_enabled": bool_value(
+            invitation.get("request_access_enabled"), False
+        ),
+        "switch_profile_ids": list(invitation.get("switch_profile_ids") or []),
         "join_code": join_code,
         "join_url": f"kaevo://join?code={join_code}",
         "expires_at": household_invitation_code_expiration(invitation),
     })
 
 
-def create_parent_managed_kid_profile(session, display_name, owner_entitlement):
+def _invitation_switch_profile_ids(value):
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 64:
+        raise ValueError("invalid_switch_profile_grants")
+    resolved = []
+    for candidate in value:
+        profile_id = str(candidate or "").strip()
+        if (
+            not re.fullmatch(r"profile_[A-Za-z0-9_-]{16,128}", profile_id)
+            or profile_id in resolved
+        ):
+            raise ValueError("invalid_switch_profile_grants")
+        resolved.append(profile_id)
+    return resolved
+
+
+def create_parent_managed_kid_profile(
+    session, display_name, owner_entitlement, *, request_access_enabled=False,
+):
     """Create a household kid profile without creating a child identity.
 
     The owner can use this profile on an already-authorized device. A child
@@ -2708,7 +7476,12 @@ def create_parent_managed_kid_profile(session, display_name, owner_entitlement):
         "owner_principal_id": str(session.get("principal_id") or ""),
         "display_name": display_name,
         "profile_type": "kid",
-        "role": "kid",
+        "role": "child",
+        "canonical_role": "child",
+        "household_access_role": HouseholdAccessRole.MEMBER.value,
+        "cloud_access_enabled": False,
+        "request_access_enabled": bool(request_access_enabled),
+        "switch_profile_ids": [],
         "state": "active",
         "managed_by_owner": True,
         "created_at": created_at,
@@ -2754,11 +7527,16 @@ def create_parent_managed_kid_profile(session, display_name, owner_entitlement):
         "profile_id": profile_id,
         "display_name": display_name,
         "profile_type": "kid",
+        "age_classification": "child",
+        "household_access_role": HouseholdAccessRole.MEMBER.value,
+        "cloud_access_enabled": False,
+        "request_access_enabled": bool(request_access_enabled),
+        "switch_profile_ids": [],
     })
 
 
 def create_household_invitation(event):
-    session, error_response = owner_bound_session(event)
+    session, error_response = household_manager_bound_session(event)
     if error_response:
         return error_response
     if household_invitations_table is None:
@@ -2772,13 +7550,65 @@ def create_household_invitation(event):
     body = parse_json_body(event) or {}
     display_name = str(body.get("display_name") or "").strip()[:80]
     profile_type = str(body.get("profile_type") or "adult").strip().lower()
+    age_classification = str(
+        body.get("age_classification")
+        or ("child" if profile_type == "kid" else "adult")
+    ).strip().lower()
     access_mode = str(body.get("access_mode") or "device_invitation").strip().lower()
-    if not display_name or profile_type not in {"adult", "kid"}:
+    requested_access_role = str(
+        body.get("household_access_role") or HouseholdAccessRole.MEMBER.value
+    ).strip().lower()
+    request_access_enabled = bool_value(
+        body.get("request_access_enabled"), False
+    )
+    cloud_access_enabled = bool_value(
+        body.get("cloud_access_enabled"), access_mode == "device_invitation"
+    )
+    try:
+        access_role = household_access_role(
+            requested_access_role,
+            canonical=canonical_role(age_classification),
+        )
+        switch_profile_ids = _invitation_switch_profile_ids(
+            body.get("switch_profile_ids")
+        )
+    except (AccountFoundationError, ValueError):
+        return response(400, {"state": "invalid_invitation_authority"})
+    if (
+        not display_name
+        or profile_type not in {"adult", "kid"}
+        or age_classification not in {"adult", "teen", "child"}
+        or (profile_type == "kid") != (age_classification in {"teen", "child"})
+        or access_role is HouseholdAccessRole.OWNER
+    ):
         return response(400, {"state": "invalid_invitation"})
+    issuer_access_role = str(
+        session.get("household_access_role") or HouseholdAccessRole.MEMBER.value
+    )
+    if (
+        issuer_access_role == HouseholdAccessRole.ADMIN.value
+        and (
+            access_role is not HouseholdAccessRole.MEMBER
+            or switch_profile_ids
+        )
+    ):
+        return response(403, {"state": "owner_required_for_authority_grant"})
+    if access_role is HouseholdAccessRole.ADMIN and age_classification != "adult":
+        return response(400, {"state": "admin_requires_adult_profile"})
     if access_mode == "parent_managed":
-        if profile_type != "kid":
+        if (
+            profile_type != "kid"
+            or access_role is not HouseholdAccessRole.MEMBER
+            or cloud_access_enabled
+            or switch_profile_ids
+        ):
             return response(400, {"state": "invalid_parent_managed_profile"})
-        return create_parent_managed_kid_profile(session, display_name, entitlement)
+        return create_parent_managed_kid_profile(
+            session,
+            display_name,
+            entitlement,
+            request_access_enabled=request_access_enabled,
+        )
     if access_mode != "device_invitation":
         return response(400, {"state": "invalid_invitation_access_mode"})
 
@@ -2803,6 +7633,27 @@ def create_household_invitation(event):
         )
         if not expected:
             return response(403, {"state": "managed_profile_mismatch"})
+    if switch_profile_ids:
+        if identity_profiles_table is None:
+            return response(503, {"state": "identity_storage_unavailable"})
+        for granted_profile_id in switch_profile_ids:
+            granted_profile = identity_profiles_table.get_item(
+                Key={"profile_id": granted_profile_id},
+                ConsistentRead=True,
+            ).get("Item")
+            if (
+                not isinstance(granted_profile, dict)
+                or granted_profile.get("state") != "active"
+                or not hmac.compare_digest(
+                    str(granted_profile.get("account_id") or ""),
+                    str(session.get("account_id") or ""),
+                )
+                or not hmac.compare_digest(
+                    str(granted_profile.get("household_id") or ""),
+                    str(session.get("household_id") or ""),
+                )
+            ):
+                return response(400, {"state": "invalid_switch_profile_grants"})
     now = epoch_now()
     code_expires_at = now + HOUSEHOLD_INVITATION_CODE_TTL_SECONDS
     raw_code = secrets.token_hex(5).upper()
@@ -2819,7 +7670,12 @@ def create_household_invitation(event):
         "profile_id": profile_id,
         "display_name": display_name,
         "profile_type": profile_type,
-        "role": "kid" if profile_type == "kid" else "adult",
+        "role": age_classification,
+        "canonical_role": age_classification,
+        "household_access_role": access_role.value,
+        "cloud_access_enabled": cloud_access_enabled,
+        "request_access_enabled": request_access_enabled,
+        "switch_profile_ids": switch_profile_ids,
         "state": "pending",
         "managed_profile": bool(managed_profile),
         "created_at": utc_now_iso(),
@@ -2856,8 +7712,58 @@ def create_household_invitation(event):
     return household_invitation_response(item, join_code, state="invitation_created")
 
 
+def _household_invitation_records(household_id):
+    """Read only one household invitation partition; never Scan.
+
+    GSI results are re-read by their exact primary key before use because a
+    DynamoDB secondary-index query cannot be strongly consistent.
+    """
+    if household_invitations_table is None or not household_id:
+        return []
+    records = []
+    query = {
+        "IndexName": "household_id-index",
+        "KeyConditionExpression": Key("household_id").eq(household_id),
+        "ConsistentRead": False,
+    }
+    while True:
+        page = household_invitations_table.query(**query)
+        for candidate in page.get("Items", []):
+            code_hash = str(candidate.get("code_hash") or "")
+            if not code_hash:
+                continue
+            exact = household_invitations_table.get_item(
+                Key={"code_hash": code_hash}, ConsistentRead=True,
+            ).get("Item")
+            if (
+                isinstance(exact, dict)
+                and hmac.compare_digest(
+                    str(exact.get("household_id") or ""), household_id,
+                )
+            ):
+                records.append(exact)
+        last_key = page.get("LastEvaluatedKey")
+        if not last_key:
+            return records
+        query["ExclusiveStartKey"] = last_key
+
+
+def _household_invitation_by_id(household_id, invitation_id):
+    if (
+        not household_id
+        or not re.fullmatch(r"invite_[A-Za-z0-9_-]{8,128}", str(invitation_id or ""))
+    ):
+        return None
+    for item in _household_invitation_records(household_id):
+        if hmac.compare_digest(
+            str(item.get("invitation_id") or ""), str(invitation_id),
+        ):
+            return item
+    return None
+
+
 def refresh_household_invitation(event):
-    session, error_response = owner_bound_session(event)
+    session, error_response = household_manager_bound_session(event)
     if error_response:
         return error_response
     if household_invitations_table is None:
@@ -2867,10 +7773,7 @@ def refresh_household_invitation(event):
     if not re.fullmatch(r"invite_[A-Za-z0-9_-]{8,128}", invitation_id):
         return response(400, {"state": "invalid_invitation"})
     household_id = str(session.get("household_id") or "")
-    records = household_invitations_table.scan(
-        FilterExpression=Attr("household_id").eq(household_id),
-    ).get("Items", [])
-    invitation = next((item for item in records if hmac.compare_digest(str(item.get("invitation_id") or ""), invitation_id)), None)
+    invitation = _household_invitation_by_id(household_id, invitation_id)
     if not invitation:
         return response(404, {"state": "invitation_not_found"})
     current_state = str(invitation.get("state") or "pending")
@@ -2918,26 +7821,43 @@ def refresh_household_invitation(event):
 
 
 def list_household_invitations(event):
-    session, error_response = owner_bound_session(event)
+    session, error_response = household_manager_bound_session(event)
     if error_response:
         return error_response
     if household_invitations_table is None:
         return response(503, {"state": "invitation_storage_unavailable"})
-    records = household_invitations_table.scan(
-        FilterExpression=Attr("household_id").eq(str(session.get("household_id") or "")),
-    ).get("Items", [])
+    records = _household_invitation_records(
+        str(session.get("household_id") or "")
+    )
     now = epoch_now()
     public = []
     for item in records:
         state = str(item.get("state") or "pending")
+        if state in {"revoked", "deleted", "deletion_pending"}:
+            # Terminal/deleting workflow records are retained for recovery and
+            # audit only. They are never household profile presentation data.
+            continue
         code_expires_at = household_invitation_code_expiration(item)
         if state == "pending" and code_expires_at < now:
             state = "expired"
+        try:
+            age_classification = canonical_role(
+                item.get("canonical_role")
+                or item.get("role")
+                or item.get("profile_type")
+            ).value
+        except AccountFoundationError:
+            age_classification = ""
         public.append({
             "invitation_id": str(item.get("invitation_id") or ""),
             "profile_id": str(item.get("profile_id") or ""),
             "display_name": str(item.get("display_name") or "Household member"),
             "profile_type": str(item.get("profile_type") or "adult"),
+            "canonical_role": age_classification,
+            "household_access_role": str(item.get("household_access_role") or "member"),
+            "cloud_access_enabled": bool_value(item.get("cloud_access_enabled"), True),
+            "request_access_enabled": bool_value(item.get("request_access_enabled"), False),
+            "switch_profile_ids": list(item.get("switch_profile_ids") or []),
             "state": state,
             "expires_at": code_expires_at,
         })
@@ -2945,18 +7865,17 @@ def list_household_invitations(event):
 
 
 def revoke_household_invitation(event, path):
-    session, error_response = owner_bound_session(event)
+    session, error_response = household_manager_bound_session(event)
     if error_response:
         return error_response
     invitation_id = path.removeprefix("/v2/household/invitations/").removesuffix("/revoke").strip("/")
-    records = household_invitations_table.scan(
-        FilterExpression=Attr("household_id").eq(str(session.get("household_id") or "")),
-    ).get("Items", []) if household_invitations_table else []
-    invitation = next((item for item in records if hmac.compare_digest(str(item.get("invitation_id") or ""), invitation_id)), None)
+    household_id = str(session.get("household_id") or "")
+    invitation = _household_invitation_by_id(household_id, invitation_id)
     if not invitation:
         return response(404, {"state": "invitation_not_found"})
     invitation["state"] = "revoked"
     invitation["revoked_at"] = utc_now_iso()
+    invitation["expires_at"] = epoch_now() + HOUSEHOLD_INVITATION_RETENTION_SECONDS
     if bool(invitation.get("managed_profile")) and identity_profiles_table is not None:
         try:
             dynamodb.meta.client.transact_write_items(TransactItems=[
@@ -2982,6 +7901,56 @@ def revoke_household_invitation(event, path):
     return response(200, {"state": "invitation_revoked"})
 
 
+def delete_household_invitation(event, path):
+    """Permanently delete one exact, unconsumed household invitation.
+
+    The household-scoped index is used only to resolve the exact primary key.
+    The conditional delete then proves household, invitation, profile, and
+    terminal eligibility together. Consumed invitations are never deleted by
+    this workflow because they belong to an accepted identity graph.
+    """
+    session, error_response = household_manager_bound_session(event)
+    if error_response:
+        return error_response
+    if household_invitations_table is None:
+        return response(503, {"state": "invitation_storage_unavailable"})
+    invitation_id = path.removeprefix("/v2/household/invitations/").strip("/")
+    household_id = str(session.get("household_id") or "")
+    invitation = _household_invitation_by_id(household_id, invitation_id)
+    if not invitation:
+        return response(200, {"state": "invitation_already_absent"})
+    if str(invitation.get("state") or "") not in {"pending", "revoked", "deletion_pending"}:
+        return response(409, {"state": "invitation_not_deletable"})
+    code_hash = str(invitation.get("code_hash") or "")
+    profile_id = str(invitation.get("profile_id") or "")
+    if not code_hash or not profile_id:
+        return response(409, {"state": "invitation_delete_manual_review"})
+    try:
+        household_invitations_table.delete_item(
+            Key={"code_hash": code_hash},
+            ConditionExpression=(
+                "household_id = :household_id AND invitation_id = :invitation_id "
+                "AND profile_id = :profile_id AND #state IN (:pending, :revoked, :deletion_pending)"
+            ),
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":household_id": household_id,
+                ":invitation_id": invitation_id,
+                ":profile_id": profile_id,
+                ":pending": "pending",
+                ":revoked": "revoked",
+                ":deletion_pending": "deletion_pending",
+            },
+        )
+    except ClientError as error:
+        if str((error.response or {}).get("Error", {}).get("Code") or "") == "ConditionalCheckFailedException":
+            return response(409, {"state": "invitation_delete_conflict"})
+        raise
+    if _household_invitation_by_id(household_id, invitation_id):
+        return response(409, {"state": "invitation_delete_not_confirmed"})
+    return response(200, {"state": "invitation_deleted"})
+
+
 def join_household(event):
     if not all((household_invitations_table, principals_table, identity_memberships_table, identity_profiles_table)):
         return response(503, {"state": "identity_storage_unavailable"})
@@ -2995,27 +7964,88 @@ def join_household(event):
     except AuthorityError:
         return response(401, {"state": "not_authorized"})
     subject = standard["sub"]
-    if principals_table.get_item(Key={"principal_id": subject}, ConsistentRead=True).get("Item"):
-        return response(409, {"state": "identity_already_enrolled"})
     body = parse_json_body(event) or {}
-    code_hash = _join_code_hash(body.get("join_code"))
+    resume_hash = _opaque_join_resume_hash(body.get("join_resume_handle"))
+    resume = None
+    if resume_hash:
+        if household_join_transactions_table is None:
+            return response(503, {"state": "household_join_unavailable"})
+        resume = household_join_transactions_table.get_item(
+            Key={"join_resume_hash": resume_hash}, ConsistentRead=True,
+        ).get("Item")
+        state = str(body.get("oauth_state") or "")
+        if (
+            not resume
+            or str(resume.get("state") or "") != "awaiting_callback"
+            or int(resume.get("expires_at") or 0) <= epoch_now()
+            or not hmac.compare_digest(str(resume.get("device_binding_hash") or ""), _join_binding_hash(body.get("installation_id")))
+            or not state
+            or not hmac.compare_digest(str(resume.get("auth_state_hash") or ""), hashlib.sha256(state.encode("utf-8")).hexdigest())
+        ):
+            return response(409, {"state": "household_join_callback_mismatch"})
+        code_hash = str(resume.get("invitation_code_hash") or "")
+    else:
+        # Compatibility path for already-issued clients. Intent-first clients
+        # always complete using a callback-bound opaque transaction.
+        code_hash = _join_code_hash(body.get("join_code"))
     invitation = household_invitations_table.get_item(Key={"code_hash": code_hash}, ConsistentRead=True).get("Item") if code_hash else None
     now = epoch_now()
     if not invitation or invitation.get("state") != "pending" or household_invitation_code_expiration(invitation) < now:
         return response(410, {"state": "invitation_invalid_or_expired"})
+    existing_principal = principals_table.get_item(
+        Key={"principal_id": subject}, ConsistentRead=True,
+    ).get("Item")
+    if existing_principal:
+        # A resume can safely continue only for the household that issued the
+        # invitation; silently crossing households would reuse authority.
+        if resume and hmac.compare_digest(
+            str(existing_principal.get("household_id") or ""),
+            str(invitation.get("household_id") or ""),
+        ):
+            return response(200, {"state": "already_member", "next": "refresh_identity"})
+        return response(409, {"state": "identity_already_enrolled"})
     created_at = utc_now_iso()
     profile_id = str(invitation["profile_id"])
     account_id = str(invitation["account_id"])
     household_id = str(invitation["household_id"])
-    role = str(invitation["role"])
+    try:
+        age_role = canonical_role(
+            invitation.get("canonical_role") or invitation.get("role")
+        )
+        access_role = household_access_role(
+            invitation.get("household_access_role"), canonical=age_role
+        )
+        switch_profile_ids = _invitation_switch_profile_ids(
+            invitation.get("switch_profile_ids")
+        )
+    except (AccountFoundationError, ValueError):
+        return response(409, {"state": "invitation_authority_invalid"})
+    role = age_role.value
+    household_access = access_role.value
+    cloud_access_enabled = bool_value(
+        invitation.get("cloud_access_enabled"), True
+    )
+    request_access_enabled = bool_value(
+        invitation.get("request_access_enabled"), False
+    )
     principal = {
         "principal_id": subject, "account_id": account_id, "household_id": household_id,
-        "role": role, "authz_version": 1, "profile_ids": [profile_id],
+        "role": role, "canonical_role": role,
+        "household_access_role": household_access,
+        "cloud_access_enabled": cloud_access_enabled,
+        "request_access_enabled": request_access_enabled,
+        "switch_profile_ids": switch_profile_ids,
+        "authz_version": 1, "profile_ids": [profile_id],
         "state": "active", "revoked": False, "created_at": created_at,
     }
     membership = {
         "principal_id": subject, "account_id": account_id, "household_id": household_id,
-        "profile_id": profile_id, "role": role, "authz_version": 1,
+        "profile_id": profile_id, "role": role, "canonical_role": role,
+        "household_access_role": household_access,
+        "cloud_access_enabled": cloud_access_enabled,
+        "request_access_enabled": request_access_enabled,
+        "switch_profile_ids": switch_profile_ids,
+        "authz_version": 1,
         "state": "active", "created_at": created_at,
     }
     is_managed_profile = bool(invitation.get("managed_profile"))
@@ -3034,10 +8064,35 @@ def join_household(event):
         "profile_id": profile_id, "account_id": account_id, "household_id": household_id,
         "owner_principal_id": str(invitation["owner_principal_id"]),
         "member_principal_id": subject, "display_name": str(invitation["display_name"]),
-        "profile_type": str(invitation["profile_type"]), "state": "active",
+        "profile_type": str(invitation["profile_type"]),
+        "role": role, "canonical_role": role,
+        "household_access_role": household_access,
+        "cloud_access_enabled": cloud_access_enabled,
+        "request_access_enabled": request_access_enabled,
+        "switch_profile_ids": switch_profile_ids,
+        "state": "active",
         "created_at": str((existing_managed_profile or {}).get("created_at") or created_at),
         "device_access_enabled": True,
     })
+    invitation_jellyfin_user_id = _normalized_jellyfin_user_id(
+        invitation.get("jellyfin_user_id"),
+    )
+    invitation_jellyfin_connector_id = str(
+        invitation.get("jellyfin_connector_id") or "",
+    )
+    if (
+        str(invitation.get("jellyfin_binding_state") or "") == "active"
+        and invitation_jellyfin_user_id
+        and invitation_jellyfin_connector_id
+    ):
+        profile.update({
+            "jellyfin_connector_id": invitation_jellyfin_connector_id,
+            "jellyfin_user_id": invitation_jellyfin_user_id,
+            "jellyfin_binding_state": "active",
+            "jellyfin_binding_updated_at": str(
+                invitation.get("jellyfin_binding_updated_at") or created_at,
+            ),
+        })
     profile.pop("pending_invitation_id", None)
     consumed = dict(invitation)
     consumed.update({"state": "consumed", "consumed_at": created_at, "member_principal_id": subject})
@@ -3053,6 +8108,15 @@ def join_household(event):
         {"Put": {"TableName": IDENTITY_MEMBERSHIPS_TABLE, "Item": membership, "ConditionExpression": "attribute_not_exists(principal_id)"}},
         {"Put": {"TableName": HOUSEHOLD_INVITATIONS_TABLE, "Item": consumed, "ConditionExpression": "#state = :pending", "ExpressionAttributeNames": {"#state": "state"}, "ExpressionAttributeValues": {":pending": "pending"}}},
     ]
+    if resume_hash:
+        transaction.append({"Update": {
+            "TableName": HOUSEHOLD_JOIN_TRANSACTIONS_TABLE,
+            "Key": {"join_resume_hash": resume_hash},
+            "UpdateExpression": "SET #state = :accepted, authenticated_subject = :subject, completed_at = :completed_at",
+            "ConditionExpression": "#state = :awaiting AND expires_at > :now",
+            "ExpressionAttributeNames": {"#state": "state"},
+            "ExpressionAttributeValues": {":accepted": "membership_accepted", ":awaiting": "awaiting_callback", ":subject": subject, ":completed_at": created_at, ":now": epoch_now()},
+        }})
     if is_managed_profile:
         transaction.append({"Put": {
             "TableName": IDENTITY_PROFILES_TABLE,
@@ -3853,14 +8917,10 @@ def get_home_connector_status(event):
     if not require_profile_auth(event, profile_id):
         return response(401, {"state": "unauthorized"})
 
-    result = home_connectors_table.query(
-        IndexName="profile_id-updated_at-index",
-        KeyConditionExpression=Key("profile_id").eq(profile_id),
-        ScanIndexForward=False,
-        Limit=10
-    )
-
-    connectors = [public_connector_item(item) for item in result.get("Items", [])]
+    connectors = [
+        public_connector_item(item, requesting_profile_id=profile_id)
+        for item in _home_connectors_for_profile_access(profile_id)
+    ]
     online_connectors = [item for item in connectors if item.get("online")]
 
     return response(200, {
@@ -3884,14 +8944,10 @@ def get_remote_routes(event):
     if not require_profile_auth(event, profile_id):
         return response(401, {"state": "unauthorized"})
 
-    result = home_connectors_table.query(
-        IndexName="profile_id-updated_at-index",
-        KeyConditionExpression=Key("profile_id").eq(profile_id),
-        ScanIndexForward=False,
-        Limit=10
-    )
-
-    connectors = [public_connector_item(item) for item in result.get("Items", [])]
+    connectors = [
+        public_connector_item(item, requesting_profile_id=profile_id)
+        for item in _home_connectors_for_profile_access(profile_id)
+    ]
     online_connectors = [item for item in connectors if item.get("online")]
     active_connector = online_connectors[0] if online_connectors else None
 
@@ -4497,6 +9553,17 @@ def public_remote_request_item(item, include_payload=True):
     return result
 
 
+def connector_remote_request_item(item):
+    """Project one claimed request plus its connector-confined provider edge."""
+    result = public_remote_request_item(item, include_payload=False)
+    profile_id = str(item.get("profile_id") or "")
+    connector_id = str(item.get("connector_id") or "")
+    binding = _profile_jellyfin_binding_for_connector(profile_id, connector_id)
+    if binding is not None:
+        result["profile_provider_binding"] = binding
+    return result
+
+
 def decode_remote_response_payload(item, default=None):
     if item.get("response_json") is not None:
         return parse_json_field(item.get("response_json"), default)
@@ -4522,14 +9589,7 @@ def latest_online_connector_for_profile(profile_id):
     if home_connectors_table is None:
         return None
 
-    result = home_connectors_table.query(
-        IndexName="profile_id-updated_at-index",
-        KeyConditionExpression=Key("profile_id").eq(profile_id),
-        ScanIndexForward=False,
-        Limit=10
-    )
-
-    for item in result.get("Items", []):
+    for item in _home_connectors_for_profile_access(profile_id):
         if connector_online_from_item(item):
             return item
 
@@ -4629,6 +9689,7 @@ def create_remote_command(event):
         "optimizer.plan_remux",
         "optimizer.job_status",
         "optimizer.jobs",
+        "seerr.create_request",
         "sonarr.episode_inventory",
     }
     if not require_dev_key(event):
@@ -4732,7 +9793,12 @@ def create_playback_grant(event):
     ):
         return response(403, {"state": "playback_not_entitled"})
     connector = latest_online_connector_for_profile(profile_id)
-    if not connector or connector.get("auth_state") != "active" or not connector.get("playback_grant_key"):
+    if not connector:
+        return response(409, {"state": "connector_unavailable"})
+    pairing_v3_connector = pairing_v3_connector_can_issue_playback_grants(connector)
+    if not pairing_v3_connector and (
+        connector.get("auth_state") != "active" or not connector.get("playback_grant_key")
+    ):
         return response(409, {"state": "connector_unavailable"})
     max_bitrate = positive_int(body.get("max_bitrate") or 40_000_000, maximum=100_000_000)
     if max_bitrate is None:
@@ -4755,7 +9821,14 @@ def create_playback_grant(event):
         "nbf": now - 5,
         "exp": now + PLAYBACK_GRANT_TTL_SECONDS
     }
-    payload = add_home_connector_signature(payload, connector["playback_grant_key"])
+    try:
+        payload = (
+            pairing_v3_playback_grant_payload(payload)
+            if pairing_v3_connector
+            else add_home_connector_signature(payload, connector["playback_grant_key"])
+        )
+    except PairingV3CryptoError:
+        return response(503, {"state": "playback_grants_not_configured"})
     token = sign_playback_grant(payload)
     return response(201, {
         "state": "issued",
@@ -4849,7 +9922,7 @@ def claim_remote_request(event, *, pairing_v3=False):
         if claimed:
             return response(200, {
                 "state": "claimed",
-                "request": public_remote_request_item(claimed, include_payload=False)
+                "request": connector_remote_request_item(claimed)
             })
 
     return response(200, {"state": "empty"})
@@ -5168,6 +10241,13 @@ def get_remote_image(event, path):
     return response(504, {"state": "timed_out", "message": "Remote image request timed out.", "request_id": item["request_id"]})
 
 def lambda_handler(event, context):
+    if isinstance(event, dict):
+        # Retain only a one-way request correlation marker for bounded server
+        # diagnostics. It is deliberately never an AWS request ID in logs.
+        event = dict(event)
+        event["_kaevo_lambda_request_fingerprint"] = _protected_identity_fingerprint(
+            getattr(context, "aws_request_id", "")
+        )
     path = normalized_path(event)
     method = method_for(event)
 
@@ -5201,8 +10281,25 @@ def lambda_handler(event, context):
                 "/v2/household/invitations",
                 "/v2/household/invitations/{invitationId}/revoke",
                 "/v2/identity/join-household",
+                "/v3/identity/household-joins/begin",
+                "/v3/identity/household-joins/route-auth",
                 "/v2/identity/social-links",
                 "/v2/identity/social-links/callback",
+                "/v3/identity/me",
+                "/v3/identity/migrate-existing-account",
+                "/v3/identity/migrate-household-membership",
+                "/v3/identity/households/ownership-transfer/candidates",
+                "/v3/identity/households/ownership-transfer",
+                "/v3/identity/profiles",
+                "/v3/identity/profiles/{profileId}/bindings",
+                "/v3/identity/profiles/{profileId}/jellyfin-binding",
+                "/v3/identity/profiles/{profileId}/jellyfin-binding-operations",
+                "/v3/identity/jellyfin-binding-operations/{operationId}",
+                "/v3/identity/profiles/{profileId}/deletion",
+                "/v3/identity/profile-mappings",
+                "/v3/identity/profile-mappings/preview",
+                "/v3/identity/profile-mappings/confirm",
+                "/v3/identity/profile-mappings/create-and-confirm",
                 "/v3/home-connectors/pairing/authorizations",
                 "/v3/home-connectors/pairing/redemptions",
                 "/v3/home-connectors/pairing/attempts/{pairingAttemptId}",
@@ -5256,7 +10353,21 @@ def lambda_handler(event, context):
         return revoke_app_session(event)
 
     if method == "POST" and path == "/v2/installations":
-        return register_installation_v2(event)
+        registration = register_installation_v2(event)
+        # Keep physical-device recovery evidence non-identifying: the route
+        # result is sufficient to distinguish policy, DPoP, and storage
+        # failures without logging request bodies or authority identifiers.
+        try:
+            registration_body = json.loads(str(registration.get("body") or "{}"))
+            registration_state = str(registration_body.get("state") or "unknown")[:80]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            registration_state = "unparseable"
+        LOGGER.warning(
+            "installation_registration_result status=%s state=%s",
+            registration.get("statusCode"),
+            registration_state,
+        )
+        return registration
 
     if method == "POST" and path.startswith("/v2/installations/") and path.endswith("/revoke"):
         return revoke_installation_v2(event, path)
@@ -5277,9 +10388,17 @@ def lambda_handler(event, context):
 
     if method == "POST" and path.startswith("/v2/household/invitations/") and path.endswith("/revoke"):
         return revoke_household_invitation(event, path)
+    if method == "DELETE" and re.fullmatch(r"/v2/household/invitations/[^/]+", path):
+        return delete_household_invitation(event, path)
 
     if method == "POST" and path == "/v2/identity/join-household":
         return join_household(event)
+
+    if method == "POST" and path == "/v3/identity/household-joins/begin":
+        return begin_household_join(event)
+
+    if method == "POST" and path == "/v3/identity/household-joins/route-auth":
+        return route_household_join_auth(event)
 
     if path == "/v2/identity/social-links":
         if method == "GET":
@@ -5289,6 +10408,60 @@ def lambda_handler(event, context):
 
     if path == "/v2/identity/social-links/callback" and method in {"GET", "POST"}:
         return social_identity_link_callback(event)
+
+    if method == "GET" and path == "/v3/identity/me":
+        return identity_me_v3(event)
+
+    if method == "POST" and path == "/v3/identity/migrate-existing-account":
+        return migrate_existing_account_v3(event)
+
+    if method == "POST" and path == "/v3/identity/migrate-household-membership":
+        return migrate_household_membership_v3(event)
+
+    if method == "GET" and path == "/v3/identity/households/ownership-transfer/candidates":
+        return list_ownership_transfer_candidates_v3(event)
+
+    if method == "GET" and path == "/v3/identity/households/profiles":
+        return list_household_profiles_v3(event)
+
+    if method == "POST" and path == "/v3/identity/households/ownership-transfer":
+        return transfer_household_ownership_v3(event)
+
+    if method == "GET" and path == "/v3/identity/home-connector-binding":
+        return get_home_connector_binding_v3(event)
+
+    if method == "POST" and path == "/v3/identity/bind-home-connector":
+        return bind_home_connector_v3(event)
+
+    if method == "POST" and path == "/v3/identity/profiles":
+        return create_profile_v3(event)
+
+    if method == "POST" and profile_binding_path_id(path):
+        return create_profile_binding_v3(event, path)
+
+    if method == "PUT" and profile_jellyfin_binding_path_id(path):
+        return save_profile_jellyfin_binding_v3(event, path)
+
+    if method == "POST" and profile_jellyfin_binding_preflight_path_id(path):
+        return preflight_profile_jellyfin_binding_v3(event, path)
+
+    if method == "GET" and path.startswith("/v3/identity/jellyfin-binding-operations/"):
+        return get_profile_jellyfin_binding_operation_v3(event, path)
+
+    if method == "POST" and profile_deletion_path_id(path):
+        return delete_profile_v3(event, path)
+
+    if method == "GET" and path == "/v3/identity/profile-mappings":
+        return list_profile_mappings_v3(event)
+
+    if method == "POST" and path == "/v3/identity/profile-mappings/preview":
+        return preview_profile_mapping_v3(event)
+
+    if method == "POST" and path == "/v3/identity/profile-mappings/confirm":
+        return confirm_profile_mapping_v3(event)
+
+    if method == "POST" and path == "/v3/identity/profile-mappings/create-and-confirm":
+        return create_and_confirm_profile_mapping_v3(event)
 
     if method == "POST" and path == "/v3/home-connectors/pairing/authorizations":
         return issue_home_connector_pairing_authorization_v3(event)

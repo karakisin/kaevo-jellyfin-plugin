@@ -39,6 +39,7 @@ from pairing_v3 import (
 KAEVO_ENV = os.environ.get("KAEVO_ENV", "dev").strip().lower()
 HOME_CONNECTORS_TABLE = os.environ.get("HOME_CONNECTORS_TABLE", "")
 REMOTE_REQUESTS_TABLE = os.environ.get("REMOTE_REQUESTS_TABLE", "")
+BINDING_OPERATIONS_TABLE = os.environ.get("BINDING_OPERATIONS_TABLE", "")
 APP_SESSIONS_TABLE = os.environ.get("APP_SESSIONS_TABLE", "")
 IDENTITY_PROFILES_TABLE = os.environ.get("IDENTITY_PROFILES_TABLE", "")
 REMOTE_PAYLOADS_BUCKET = os.environ.get("REMOTE_PAYLOADS_BUCKET", "")
@@ -52,10 +53,18 @@ REMOTE_RESPONSE_COMPRESS_THRESHOLD_BYTES = 180_000
 REMOTE_RESPONSE_MAX_STORED_BYTES = 330_000
 SAFE_FINGERPRINT = re.compile(r"^sha256:[A-Za-z0-9_-]{43}$")
 SAFE_NONCE = re.compile(r"^[A-Za-z0-9_-]{22,128}$")
+BINDING_OPERATION_PHASE_RANK = {
+    "created": 0, "authorized": 1, "dispatch_pending": 2, "dispatched": 3,
+    "connector_claimed": 4, "inspection_completed": 5, "mutation_authorized": 6,
+    "plugin_cas_committed": 7, "cloud_persisted": 8, "snapshot_pending": 9,
+    "snapshot_published": 10, "completed": 11, "safely_refused": 12,
+    "reconciliation_required": 12, "failed_retryable": 12, "failed_terminal": 12,
+}
 
 dynamodb = boto3.resource("dynamodb")
 home_connectors_table = dynamodb.Table(HOME_CONNECTORS_TABLE) if HOME_CONNECTORS_TABLE else None
 remote_requests_table = dynamodb.Table(REMOTE_REQUESTS_TABLE) if REMOTE_REQUESTS_TABLE else None
+binding_operations_table = dynamodb.Table(BINDING_OPERATIONS_TABLE) if BINDING_OPERATIONS_TABLE else None
 app_sessions_table = dynamodb.Table(APP_SESSIONS_TABLE) if APP_SESSIONS_TABLE else None
 identity_profiles_table = dynamodb.Table(IDENTITY_PROFILES_TABLE) if IDENTITY_PROFILES_TABLE else None
 s3_client = boto3.client("s3") if REMOTE_PAYLOADS_BUCKET else None
@@ -152,7 +161,7 @@ def _auth_failure():
     return response(401, "connector_unauthorized")
 
 
-def authenticate_connector(event, connector_id, body):
+def authenticate_connector(event, connector_id, body, *, allow_revoked=False):
     """Verify the enrolled Ed25519 key and atomically consume the nonce."""
     if not all((home_connectors_table, app_sessions_table, connector_id)) or not isinstance(body, dict):
         return None
@@ -160,9 +169,19 @@ def authenticate_connector(event, connector_id, body):
     if body_connector_id and not hmac.compare_digest(body_connector_id, connector_id):
         return None
     item = home_connectors_table.get_item(Key={"connector_id": connector_id}, ConsistentRead=True).get("Item")
-    if not item or bool(item.get("revoked")):
+    if not item:
         return None
-    if item.get("protocol_version") != PROTOCOL or item.get("auth_state") != "v3_active" or item.get("state") != "active":
+    active = (
+        not bool(item.get("revoked"))
+        and item.get("auth_state") == "v3_active"
+        and item.get("state") == "active"
+    )
+    revoked = (
+        bool(item.get("revoked"))
+        and item.get("auth_state") == "v3_revoked"
+        and item.get("state") == "revoked"
+    )
+    if item.get("protocol_version") != PROTOCOL or not (active or (allow_revoked and revoked)):
         return None
     try:
         public_key = b64url_decode(str(item.get("plugin_public_key") or ""))
@@ -205,6 +224,68 @@ def authenticate_connector(event, connector_id, body):
         return item
     except (PairingV3CryptoError, ClientError, TypeError, ValueError):
         return None
+
+
+def disconnect_connector(event, connector_id):
+    """Revoke one exact V3 connector and retain only a bounded tombstone."""
+    body = parse_json_body(event)
+    if body is None:
+        return response(400, "bad_request", code="invalid_json")
+    connector = authenticate_connector(
+        event,
+        connector_id,
+        body,
+        allow_revoked=True,
+    )
+    if not connector:
+        return _auth_failure()
+    if (
+        bool(connector.get("revoked"))
+        and connector.get("auth_state") == "v3_revoked"
+        and connector.get("state") == "revoked"
+    ):
+        return response(200, "disconnected", idempotent=True)
+
+    now = utc_now_iso()
+    values = {
+        ":protocol": PROTOCOL,
+        ":active_auth": "v3_active",
+        ":active_state": "active",
+        ":revoked_auth": "v3_revoked",
+        ":revoked_state": "revoked",
+        ":false": False,
+        ":true": True,
+        ":now": now,
+        ":plugin_instance": str(connector.get("plugin_instance_id") or ""),
+        ":fingerprint": str(connector.get("plugin_public_key_fingerprint") or ""),
+        ":plugin_key_id": str(connector.get("plugin_key_id") or "1"),
+    }
+    try:
+        home_connectors_table.update_item(
+            Key={"connector_id": connector_id},
+            ConditionExpression=(
+                "attribute_exists(connector_id) AND protocol_version = :protocol "
+                "AND auth_state = :active_auth AND #state = :active_state "
+                "AND (attribute_not_exists(revoked) OR revoked = :false) "
+                "AND plugin_instance_id = :plugin_instance "
+                "AND plugin_public_key_fingerprint = :fingerprint "
+                "AND plugin_key_id = :plugin_key_id"
+            ),
+            UpdateExpression=(
+                "SET revoked = :true, auth_state = :revoked_auth, #state = :revoked_state, "
+                "updated_at = :now, revoked_at = :now "
+                "REMOVE profile_id, account_binding, family_binding, connector_name, host_type, "
+                "app_version, last_seen_at, last_seen_epoch, capabilities_json, provider_status_json, "
+                "jellyfin_user_id, server_name"
+            ),
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues=values,
+        )
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return response(409, "connector_state_conflict")
+        return response(503, "dependency_failure")
+    return response(200, "disconnected", idempotent=False)
 
 
 def resolve_profile_binding(connector, requested_profile_id):
@@ -374,6 +455,64 @@ def public_remote_request(item):
     return result
 
 
+def _mirror_binding_operation(item, phase, *, inspection_result="", plugin_cas_result="", snapshot_result="", terminal_result=""):
+    """Mirror connector lifecycle before its short-lived request is removed.
+
+    The operation ID is never logged or returned from this connector boundary.
+    A missing journal is intentionally non-fatal for legacy remote requests.
+    """
+    operation_id = str((item or {}).get("binding_operation_id") or "")
+    if not operation_id or binding_operations_table is None:
+        return
+    try:
+        current = binding_operations_table.get_item(
+            Key={"operation_id": operation_id}, ConsistentRead=True,
+        ).get("Item")
+    except ClientError:
+        return
+    if not isinstance(current, dict) or BINDING_OPERATION_PHASE_RANK.get(
+        phase, -1,
+    ) < BINDING_OPERATION_PHASE_RANK.get(str(current.get("phase") or "created"), -1):
+        return
+    revision = int(current.get("revision") or 0)
+    values = {
+        ":phase": phase, ":updated_at": utc_now_iso(),
+        ":revision": revision, ":next_revision": revision + 1,
+    }
+    parts = ["#phase = :phase", "updated_at = :updated_at", "revision = :next_revision"]
+    for key, value in {
+        "inspection_result": inspection_result,
+        "plugin_cas_result": plugin_cas_result,
+        "snapshot_result": snapshot_result,
+        "terminal_result": terminal_result,
+    }.items():
+        if value:
+            placeholder = ":" + key
+            values[placeholder] = value[:80]
+            parts.append(f"{key} = {placeholder}")
+    try:
+        binding_operations_table.update_item(
+            Key={"operation_id": operation_id},
+            ConditionExpression="revision = :revision",
+            UpdateExpression="SET " + ", ".join(parts),
+            ExpressionAttributeNames={"#phase": "phase"},
+            ExpressionAttributeValues=values,
+        )
+    except ClientError:
+        # Connector execution must not repeat or alter a command only because
+        # durable telemetry is temporarily unavailable. Cloud reconciliation
+        # will surface the missing mirror as a safe retryable state.
+        return
+
+
+def _binding_command_kind(item):
+    try:
+        request = json.loads(str((item or {}).get("request_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    return str(request.get("path") or "").removeprefix("/commands/")
+
+
 def claim_remote_request(event):
     body = parse_json_body(event)
     if body is None:
@@ -404,6 +543,7 @@ def claim_remote_request(event):
                     }, ReturnValues="ALL_NEW",
                 ).get("Attributes", {})
                 if claimed:
+                    _mirror_binding_operation(claimed, "connector_claimed")
                     return response(200, "claimed", request=public_remote_request(claimed))
             except ClientError as error:
                 if error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
@@ -441,31 +581,22 @@ def complete_remote_request(event, path):
         return error
     request_id = str(item["request_id"])
     now = utc_now_iso()
-    try:
-        remote_requests_table.update_item(
-            Key={"request_id": request_id}, ConditionExpression="#status = :in_progress",
-            UpdateExpression="SET #status = :completing, updated_at = :now, status_created_at = :sort",
-            ExpressionAttributeNames={"#status": "status"},
-            ExpressionAttributeValues={
-                ":in_progress": "in_progress", ":completing": "completing", ":now": now,
-                ":sort": _status_sort_key("completing", now, request_id),
-            },
-        )
-    except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code")
-        return response(409, "request_not_in_progress", request_id=request_id) if code == "ConditionalCheckFailedException" else response(503, "dependency_failure")
-
+    # Fully prepare the bounded response before the single terminal state
+    # transition. A large snapshot without an object store must return 413
+    # while it is still in_progress so the connector can report failure
+    # normally, and an S3-backed snapshot must not be stranded in an
+    # intermediate state after the object write succeeds.
     encoded = json.dumps(body.get("response") if body.get("response") is not None else {}, separators=(",", ":")).encode("utf-8")
     set_parts = [
         "#status = :completed", "completed_at = :now", "updated_at = :now", "status_created_at = :sort",
         "http_status = :http_status", "truncated = :truncated",
     ]
     values = {
-        ":completing": "completing", ":completed": "completed", ":now": now,
+        ":completed": "completed", ":now": now,
         ":sort": _status_sort_key("completed", now, request_id),
         ":http_status": int(body.get("http_status") or 200), ":truncated": bool(body.get("truncated", False)),
     }
-    remove_parts = ["response_gzip_base64", "response_s3_key", "response_encoding", "response_stored_bytes"]
+    remove_parts = []
     if len(encoded) >= REMOTE_RESPONSE_COMPRESS_THRESHOLD_BYTES:
         compressed = gzip.compress(encoded, compresslevel=6)
         if REMOTE_PAYLOADS_BUCKET and s3_client is not None:
@@ -479,26 +610,45 @@ def complete_remote_request(event, path):
                 return response(503, "ambiguous_completion_state", request_id=request_id)
             set_parts.extend(["response_s3_key = :response_s3_key", "response_encoding = :response_encoding", "response_stored_bytes = :response_stored_bytes"])
             values.update({":response_s3_key": key, ":response_encoding": "s3+gzip", ":response_stored_bytes": len(compressed)})
-            remove_parts.append("response_json")
+            remove_parts.extend(["response_json", "response_gzip_base64"])
         elif len(compressed) > REMOTE_RESPONSE_MAX_STORED_BYTES:
             return response(413, "response_too_large", request_id=request_id)
         else:
             set_parts.extend(["response_gzip_base64 = :response_gzip", "response_encoding = :response_encoding"])
             values.update({":response_gzip": base64.b64encode(compressed).decode("ascii"), ":response_encoding": "gzip+base64"})
-            remove_parts.append("response_json")
+            remove_parts.extend(["response_json", "response_s3_key", "response_stored_bytes"])
     else:
         set_parts.append("response_json = :response_json")
         values[":response_json"] = encoded.decode("utf-8")
+        remove_parts.extend(["response_gzip_base64", "response_s3_key", "response_encoding", "response_stored_bytes"])
     try:
         updated = remote_requests_table.update_item(
-            Key={"request_id": request_id}, ConditionExpression="#status = :completing",
+            Key={"request_id": request_id}, ConditionExpression="#status = :in_progress",
             UpdateExpression="SET " + ", ".join(set_parts) + " REMOVE " + ", ".join(dict.fromkeys(remove_parts)),
-            ExpressionAttributeNames={"#status": "status"}, ExpressionAttributeValues=values,
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={**values, ":in_progress": "in_progress"},
             ReturnValues="ALL_NEW",
         ).get("Attributes", {})
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code")
-        return response(409, "ambiguous_completion_state", request_id=request_id) if code == "ConditionalCheckFailedException" else response(503, "ambiguous_completion_state", request_id=request_id)
+        return response(409, "request_not_in_progress", request_id=request_id) if code == "ConditionalCheckFailedException" else response(503, "dependency_failure")
+    command = _binding_command_kind(updated)
+    payload = body.get("response") if isinstance(body.get("response"), dict) else {}
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    if command == "jellyfin.inspect_profile_binding_owner":
+        _mirror_binding_operation(
+            updated, "inspection_completed",
+            inspection_result=str(result.get("owner_state") or "invalid"),
+        )
+    elif command == "jellyfin.reassign_stale_profile_binding":
+        _mirror_binding_operation(
+            updated, "plugin_cas_committed",
+            plugin_cas_result=str(result.get("state") or "invalid"),
+        )
+    elif command == "/kaevo/internal/main-snapshot":
+        _mirror_binding_operation(
+            updated, "snapshot_published", snapshot_result="published",
+        )
     return response(200, "completed", request=public_remote_request(updated))
 
 
@@ -528,6 +678,7 @@ def fail_remote_request(event, path):
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code")
         return response(409, "request_not_in_progress", request_id=request_id) if code == "ConditionalCheckFailedException" else response(503, "dependency_failure")
+    _mirror_binding_operation(updated, "failed_retryable", terminal_result="connector_failed")
     return response(200, "failed", request=public_remote_request(updated))
 
 
@@ -541,6 +692,9 @@ def lambda_handler(event, _context):
     heartbeat = re.fullmatch(r"/v3/home-connectors/([^/]+)/heartbeat", path)
     if heartbeat:
         return heartbeat_connector(event, heartbeat.group(1))
+    disconnect = re.fullmatch(r"/v3/home-connectors/([^/]+)/disconnect", path)
+    if disconnect:
+        return disconnect_connector(event, disconnect.group(1))
     relay = re.fullmatch(r"/v3/home-connectors/([^/]+)/relay-ticket", path)
     if relay:
         return relay_ticket(event, relay.group(1))

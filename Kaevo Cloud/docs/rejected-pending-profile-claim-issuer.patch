@@ -1,0 +1,21 @@
+--- a/api/src/claim_issuer.py
++++ b/api/src/claim_issuer.py
+@@
+-    "authz_version", "identity_schema_version", "kaevo_enrollment_required",
++    "authz_version", "identity_schema_version", "kaevo_enrollment_required",
++    "kaevo_onboarding_state",
+@@
++    if (
++        isinstance(principal, Mapping)
++        and isinstance(membership, Mapping)
++        and principal.get("state") == "pending_profile"
++        and membership.get("state") == "pending_profile"
++        and not membership.get("profile_id")
++        and not profile_id
++    ):
++        overrides["accessTokenGeneration"] = {
++            "claimsToAddOrOverride": {"kaevo_onboarding_state": "profile_setup_required"},
++            "claimsToSuppress": [claim for claim in KAEVO_CLAIMS if claim != "kaevo_onboarding_state"],
++        }
++        response["response"]["claimsAndScopeOverrideDetails"] = overrides
++        return response

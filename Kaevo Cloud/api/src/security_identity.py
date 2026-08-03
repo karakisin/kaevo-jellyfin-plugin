@@ -51,24 +51,25 @@ class Role(str, Enum):
 
 CAPABILITIES: dict[Role, frozenset[str]] = {
     Role.CHILD: frozenset({"browse", "playback", "request_child_safe"}),
-    Role.ADULT: frozenset({"browse", "playback", "request_media", "manage_lists"}),
+    Role.ADULT: frozenset({"browse", "playback", "request_media", "manage_lists", "register_own_device"}),
     Role.OWNER: frozenset({
         "browse", "playback", "request_media", "manage_lists",
         "manage_household", "manage_parental_policy", "configure_providers",
         "pair_connector", "revoke_connector", "revoke_device", "delete_media",
-        "run_optimizer", "delete_download", "recover_account", "register_device",
+        "run_optimizer", "delete_download", "recover_account", "register_device", "register_own_device",
     }),
     Role.DEVICE: frozenset({"register_device", "refresh_device_session"}),
     Role.CONNECTOR: frozenset({"connector_heartbeat", "connector_claim", "connector_complete"}),
     Role.SUPPORT: frozenset({"read_security_audit", "disable_compromised_session"}),
 }
 
-RECENT_AUTH_CAPABILITIES = frozenset({
+OWNER_RECENT_AUTH_CAPABILITIES = frozenset({
     "manage_household", "manage_parental_policy", "configure_providers",
     "pair_connector", "revoke_connector", "revoke_device", "delete_media",
     "run_optimizer", "delete_download", "recover_account",
     "register_device",
 })
+SELF_DEVICE_RECENT_AUTH_CAPABILITIES = frozenset({"register_own_device"})
 
 
 def _claim(claims: Mapping[str, Any], name: str) -> str:
@@ -183,9 +184,13 @@ def authorize(
         raise IdentityError("target_not_found", 404)
     if capability not in CAPABILITIES[context.role]:
         raise IdentityError("capability_denied", 403)
-    if capability in RECENT_AUTH_CAPABILITIES:
+    if capability in OWNER_RECENT_AUTH_CAPABILITIES:
         current = int(time.time()) if now is None else now
         if context.role is not Role.OWNER or current - context.authentication_time > RECENT_AUTH_MAX_AGE_SECONDS:
+            raise IdentityError("recent_auth_required", 401)
+    if capability in SELF_DEVICE_RECENT_AUTH_CAPABILITIES:
+        current = int(time.time()) if now is None else now
+        if current - context.authentication_time > RECENT_AUTH_MAX_AGE_SECONDS:
             raise IdentityError("recent_auth_required", 401)
     if target:
         for key, expected_value in (("account_id", context.account_id), ("household_id", context.household_id)):

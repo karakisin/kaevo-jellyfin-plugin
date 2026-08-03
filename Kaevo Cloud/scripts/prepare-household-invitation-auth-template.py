@@ -30,6 +30,7 @@ HOUSEHOLD_EVENT_IDS = {
     "HouseholdInvitations",
     "RevokeHouseholdInvitation",
 }
+DELETE_EVENT_ID = "DeleteHouseholdInvitation"
 
 
 def prepare_template(candidate: str, deployed: str) -> str:
@@ -38,7 +39,7 @@ def prepare_template(candidate: str, deployed: str) -> str:
     deployed_events, _, deployed_api = HELPER.api_events(deployed)
 
     added = sorted(set(candidate_events) - set(deployed_events))
-    if added:
+    if added not in ([], [DELETE_EVENT_ID]):
         raise ValueError(f"candidate adds unreviewed API events: {added}")
 
     updated_api = deployed_api
@@ -51,12 +52,31 @@ def prepare_template(candidate: str, deployed: str) -> str:
             raise ValueError(f"household event path changed for {logical_id}")
         updated_api = updated_api.replace(deployed_event.text, candidate_event.text, 1)
 
+    candidate_delete = candidate_events.get(DELETE_EVENT_ID)
+    deployed_delete = deployed_events.get(DELETE_EVENT_ID)
+    if candidate_delete is None:
+        raise ValueError(f"missing required household event {DELETE_EVENT_ID}")
+    if candidate_delete.path != "/v2/household/invitations/{invitationId}":
+        raise ValueError("household invitation DELETE path changed")
+    if deployed_delete is None:
+        revoke_event = candidate_events["RevokeHouseholdInvitation"]
+        updated_api = updated_api.replace(
+            revoke_event.text,
+            candidate_delete.text + revoke_event.text,
+            1,
+        )
+
     prepared = HELPER.replace_resource_section(prepared, HELPER.API_FUNCTION, updated_api)
     prepared = HELPER.preserve_http_api_metadata(prepared, deployed)
 
     actual_events = HELPER.api_events(prepared)[0]
+    if actual_events.get(DELETE_EVENT_ID) != candidate_delete:
+        raise ValueError("failed to apply household invitation DELETE event")
     for logical_id, deployed_event in deployed_events.items():
-        if logical_id in HOUSEHOLD_EVENT_IDS:
+        if logical_id == DELETE_EVENT_ID:
+            if actual_events[logical_id] != candidate_delete:
+                raise ValueError(f"failed to preserve household event {logical_id}")
+        elif logical_id in HOUSEHOLD_EVENT_IDS:
             if actual_events[logical_id] != candidate_events[logical_id]:
                 raise ValueError(f"failed to apply household event {logical_id}")
         elif actual_events[logical_id] != deployed_event:

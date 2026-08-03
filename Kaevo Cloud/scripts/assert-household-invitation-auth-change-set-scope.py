@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 ALLOWED_MODIFIES = {"KaevoCloudHttpApi"}
+ALLOWED_ADDS = {"KaevoCloudApiFunctionDeleteHouseholdInvitationPermission"}
 
 
 def scope_errors(change_set: dict) -> list[str]:
@@ -18,7 +19,11 @@ def scope_errors(change_set: dict) -> list[str]:
         logical_id = resource["LogicalResourceId"]
         action = resource["Action"]
         replacement = resource.get("Replacement")
-        if action != "Modify" or logical_id not in ALLOWED_MODIFIES:
+        allowed = (
+            (action == "Modify" and logical_id in ALLOWED_MODIFIES)
+            or (action == "Add" and logical_id in ALLOWED_ADDS)
+        )
+        if not allowed:
             errors.append(f"unexpected {action.lower()}: {logical_id}")
         if replacement in {"True", "Conditional", True}:
             errors.append(f"forbidden replacement: {logical_id} ({replacement})")

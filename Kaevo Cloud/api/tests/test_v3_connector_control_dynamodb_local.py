@@ -18,6 +18,15 @@ CONNECTOR_ID = "ddb-control-connector"
 PROFILE_ID = "ddb-control-profile"
 
 
+class RecordingS3:
+    def __init__(self):
+        self.objects = []
+
+    def put_object(self, **kwargs):
+        self.objects.append(kwargs)
+        return {}
+
+
 def resource():
     return boto3.resource(
         "dynamodb", endpoint_url=ENDPOINT, region_name="us-west-2",
@@ -173,3 +182,34 @@ def test_dynamodb_connector_control_concurrency_replay_and_transitions(control_t
     final = remotes.scan().get("Items", [])
     assert len(final) == 3
     assert len({item["request_id"] for item in final}) == 3
+
+
+def test_dynamodb_s3_backed_completion_uses_disjoint_response_attributes(control_tables, monkeypatch):
+    remotes = control_tables["v3-control-remotes"]
+    request_id = "ddb-remote-s3-complete"
+    remotes.put_item(Item={
+        "request_id": request_id, "connector_id": CONNECTOR_ID, "profile_id": PROFILE_ID,
+        "status": "in_progress", "status_created_at": "in_progress#3", "expires_at": control.epoch_now() + 60,
+        "request_json": "{}", "response_json": "stale", "response_gzip_base64": "stale",
+    })
+    storage = RecordingS3()
+    monkeypatch.setattr(control, "REMOTE_RESPONSE_COMPRESS_THRESHOLD_BYTES", 1)
+    monkeypatch.setattr(control, "REMOTE_PAYLOADS_BUCKET", "test-remote-payloads")
+    monkeypatch.setattr(control, "s3_client", storage)
+
+    route = f"/v3/remote-requests/{request_id}/complete"
+    result = control.lambda_handler(
+        event(route, {"connector_id": CONNECTOR_ID, "response": {"payload": "x" * 512}}, "ddbcontrols3completionnonce01"),
+        None,
+    )
+
+    assert result["statusCode"] == 200
+    assert json.loads(result["body"])["state"] == "completed"
+    item = remotes.get_item(Key={"request_id": request_id}, ConsistentRead=True)["Item"]
+    assert item["status"] == "completed"
+    assert item["response_encoding"] == "s3+gzip"
+    assert item["response_s3_key"].endswith(f"/{request_id}.json.gz")
+    assert item["response_stored_bytes"] > 0
+    assert "response_json" not in item
+    assert "response_gzip_base64" not in item
+    assert len(storage.objects) == 1

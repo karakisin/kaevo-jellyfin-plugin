@@ -217,7 +217,6 @@ Resources:
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
-
   KaevoEntitlementsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -286,6 +285,61 @@ Resources:
         - AttributeName: principal_id
           KeyType: HASH
 
+  KaevoAccountsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-accounts
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: account_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: account_id
+          KeyType: HASH
+      Tags:
+        - Key: KaevoDataClass
+          Value: identity-authority
+
+  KaevoAuthIdentitiesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-auth-identities
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: auth_identity_key
+          AttributeType: S
+        - AttributeName: account_id
+          AttributeType: S
+        - AttributeName: created_at_epoch
+          AttributeType: N
+      KeySchema:
+        - AttributeName: auth_identity_key
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: account_id-created_at_epoch-index
+          KeySchema:
+            - AttributeName: account_id
+              KeyType: HASH
+            - AttributeName: created_at_epoch
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: KaevoDataClass
+          Value: identity-authority
+
   KaevoIdentityMembershipsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -301,6 +355,128 @@ Resources:
       KeySchema:
         - AttributeName: principal_id
           KeyType: HASH
+      Tags:
+        - Key: KaevoDataClass
+          Value: identity-authority
+
+  KaevoHouseholdMembershipsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-household-memberships
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: household_id
+          AttributeType: S
+        - AttributeName: membership_id
+          AttributeType: S
+        - AttributeName: account_id
+          AttributeType: S
+        - AttributeName: updated_at_epoch
+          AttributeType: N
+      KeySchema:
+        - AttributeName: household_id
+          KeyType: HASH
+        - AttributeName: membership_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: account_id-updated_at_epoch-index
+          KeySchema:
+            - AttributeName: account_id
+              KeyType: HASH
+            - AttributeName: updated_at_epoch
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: KaevoDataClass
+          Value: identity-authority
+
+  KaevoProfilesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-profiles
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: profile_id
+          AttributeType: S
+        - AttributeName: household_id
+          AttributeType: S
+        - AttributeName: created_at_epoch
+          AttributeType: N
+      KeySchema:
+        - AttributeName: profile_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: household_id-created_at_epoch-index
+          KeySchema:
+            - AttributeName: household_id
+              KeyType: HASH
+            - AttributeName: created_at_epoch
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: KaevoDataClass
+          Value: identity-authority
+
+  KaevoProfileBindingsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-profile-bindings
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: account_id
+          AttributeType: S
+        - AttributeName: profile_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: account_id
+          KeyType: HASH
+        - AttributeName: profile_id
+          KeyType: RANGE
+      Tags:
+        - Key: KaevoDataClass
+          Value: identity-authority
+
+  KaevoProfileMappingsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-profile-mappings
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: installation_id
+          AttributeType: S
+        - AttributeName: local_profile_source_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: installation_id
+          KeyType: HASH
+        - AttributeName: local_profile_source_id
+          KeyType: RANGE
       Tags:
         - Key: KaevoDataClass
           Value: identity-authority
@@ -355,15 +531,61 @@ Resources:
       AttributeDefinitions:
         - AttributeName: code_hash
           AttributeType: S
+        - AttributeName: household_id
+          AttributeType: S
       KeySchema:
         - AttributeName: code_hash
           KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: household_id-index
+          KeySchema:
+            - AttributeName: household_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
       TimeToLiveSpecification:
         AttributeName: expires_at
         Enabled: true
       Tags:
         - Key: KaevoDataClass
           Value: short-lived-household-invitation
+
+  KaevoHouseholdJoinTransactionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-household-join-transactions
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: join_resume_hash
+          AttributeType: S
+        - AttributeName: invitation_id
+          AttributeType: S
+        - AttributeName: created_at_epoch
+          AttributeType: N
+      KeySchema:
+        - AttributeName: join_resume_hash
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: invitation_id-created_at_epoch-index
+          KeySchema:
+            - AttributeName: invitation_id
+              KeyType: HASH
+            - AttributeName: created_at_epoch
+              KeyType: RANGE
+          Projection:
+            ProjectionType: KEYS_ONLY
+      TimeToLiveSpecification:
+        AttributeName: cleanup_at
+        Enabled: true
+      Tags:
+        - Key: KaevoDataClass
+          Value: short-lived-household-join-routing
 
   KaevoInstallationsTable:
     Type: AWS::DynamoDB::Table
@@ -450,6 +672,8 @@ Resources:
           AttributeType: S
         - AttributeName: profile_id
           AttributeType: S
+        - AttributeName: household_id
+          AttributeType: S
         - AttributeName: updated_at
           AttributeType: S
       KeySchema:
@@ -459,6 +683,14 @@ Resources:
         - IndexName: profile_id-updated_at-index
           KeySchema:
             - AttributeName: profile_id
+              KeyType: HASH
+            - AttributeName: updated_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: household_id-updated_at-index
+          KeySchema:
+            - AttributeName: household_id
               KeyType: HASH
             - AttributeName: updated_at
               KeyType: RANGE
@@ -492,6 +724,44 @@ Resources:
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
+
+  KaevoBindingOperationsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-binding-operations
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: operation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: operation_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  KaevoProfileBindingTombstonesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-profile-binding-tombstones
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: profile_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: profile_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
 
   KaevoRemotePayloadsBucket:
     Type: AWS::S3::Bucket
@@ -662,6 +932,7 @@ Resources:
       GenerateSecret: false
       PreventUserExistenceErrors: ENABLED
       ExplicitAuthFlows:
+        - ALLOW_USER_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
       AllowedOAuthFlowsUserPoolClient: true
       AllowedOAuthFlows:
@@ -699,6 +970,11 @@ Resources:
         client_secret: !Sub '{{resolve:secretsmanager:${GoogleIdentityProviderSecretArn}:SecretString:client_secret}}'
       AttributeMapping:
         email: email
+        # Cognito marks a mapped federated email as unverified unless the
+        # provider's verification claim is mapped explicitly. The pre-sign-up
+        # guard rejects an unverified Google identity, so retain this mapping
+        # as part of the provider contract.
+        email_verified: email_verified
 
   KaevoAppleIdentityProvider:
     Type: AWS::Cognito::UserPoolIdentityProvider
@@ -976,6 +1252,8 @@ Resources:
       Environment:
         Variables:
           KAEVO_ENV: !Ref EnvironmentName
+          ACCOUNTS_TABLE: !Ref KaevoAccountsTable
+          AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable
           PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
           IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
           IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
@@ -996,6 +1274,8 @@ Resources:
                 - dynamodb:TransactWriteItems
               Resource:
                 - !GetAtt KaevoPrincipalsTable.Arn
+                - !GetAtt KaevoAccountsTable.Arn
+                - !GetAtt KaevoAuthIdentitiesTable.Arn
                 - !GetAtt KaevoIdentityMembershipsTable.Arn
                 - !GetAtt KaevoIdentityHouseholdsTable.Arn
                 - !GetAtt KaevoIdentityProfilesTable.Arn
@@ -1041,9 +1321,17 @@ Resources:
           ENTITLEMENTS_TABLE: !Ref KaevoEntitlementsTable
           HOME_CONNECTORS_TABLE: !Ref KaevoHomeConnectorsTable
           REMOTE_REQUESTS_TABLE: !Ref KaevoRemoteRequestsTable
+          BINDING_OPERATIONS_TABLE: !Ref KaevoBindingOperationsTable
+          PROFILE_BINDING_TOMBSTONES_TABLE: !Ref KaevoProfileBindingTombstonesTable
           REMOTE_PAYLOADS_BUCKET: !Ref KaevoRemotePayloadsBucket
           PROFILE_AVATARS_BUCKET: !Ref KaevoProfileAvatarsBucket
           APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
+          ACCOUNTS_TABLE: !Ref KaevoAccountsTable
+          AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable
+          HOUSEHOLD_MEMBERSHIPS_TABLE: !Ref KaevoHouseholdMembershipsTable
+          PROFILES_TABLE: !Ref KaevoProfilesTable
+          PROFILE_BINDINGS_TABLE: !Ref KaevoProfileBindingsTable
+          PROFILE_MAPPINGS_TABLE: !Ref KaevoProfileMappingsTable
           PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
           IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
           IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
@@ -1081,7 +1369,23 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoRemoteRequestsTable
         - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoBindingOperationsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoProfileBindingTombstonesTable
+        - DynamoDBCrudPolicy:
             TableName: !Ref KaevoAppSessionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoAccountsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoAuthIdentitiesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoHouseholdMembershipsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoProfilesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoProfileBindingsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoProfileMappingsTable
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoPrincipalsTable
         - DynamoDBCrudPolicy:
@@ -1095,7 +1399,7 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoInstallationsTable
         - Statement:
-            - Sid: ConnectorLifecycleTransactions
+            - Sid: ConnectorLifecycleAndIdentityTransactions
               Effect: Allow
               Action:
                 - dynamodb:PutItem
@@ -1104,8 +1408,15 @@ Resources:
                 - !GetAtt KaevoHomeConnectorsTable.Arn
                 - !GetAtt KaevoAppSessionsTable.Arn
                 - !GetAtt KaevoSecurityAuditTable.Arn
+                - !GetAtt KaevoAccountsTable.Arn
+                - !GetAtt KaevoAuthIdentitiesTable.Arn
+                - !GetAtt KaevoHouseholdMembershipsTable.Arn
+                - !GetAtt KaevoProfilesTable.Arn
+                - !GetAtt KaevoProfileBindingsTable.Arn
+                - !GetAtt KaevoProfileMappingsTable.Arn
                 - !GetAtt KaevoPrincipalsTable.Arn
                 - !GetAtt KaevoIdentityMembershipsTable.Arn
+                - !GetAtt KaevoIdentityHouseholdsTable.Arn
                 - !GetAtt KaevoIdentityProfilesTable.Arn
                 - !GetAtt KaevoHouseholdInvitationsTable.Arn
                 - !GetAtt KaevoEntitlementsTable.Arn
@@ -1133,8 +1444,13 @@ Resources:
               Resource:
                 - !If [HasGoogleIdentityProvider, !Ref GoogleIdentityProviderSecretArn, !Ref AWS::NoValue]
                 - !If [HasAppleIdentityProvider, !Ref AppleIdentityProviderSecretArn, !Ref AWS::NoValue]
-        - S3CrudPolicy:
-            BucketName: !Ref KaevoRemotePayloadsBucket
+        - Statement:
+            - Sid: ReadAndStoreBoundedRemoteResponses
+              Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: !Sub ${KaevoRemotePayloadsBucket.Arn}/remote-responses/*
         - S3CrudPolicy:
             BucketName: !Ref KaevoProfileAvatarsBucket
       Events:
@@ -1370,6 +1686,13 @@ Resources:
             Path: /v2/household/invitations
             Method: ANY
 
+        DeleteHouseholdInvitation:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/household/invitations/{invitationId}
+            Method: DELETE
+
         RevokeHouseholdInvitation:
           Type: HttpApi
           Properties:
@@ -1492,6 +1815,394 @@ Resources:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v1/remote-images/{provider}/{itemId}/{imageType}
             Method: GET
+
+  # Identity V3 routes deliberately share one API integration and one
+  # path-scoped invoke permission.  SAM HttpApi events would synthesize a
+  # permission per route, exceeding the main Lambda resource-policy limit.
+  KaevoIdentityV3ApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+      PayloadFormatVersion: "2.0"
+      IntegrationUri: !Sub
+        - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+        - FunctionArn: !GetAtt KaevoCloudApiFunction.Arn
+
+  KaevoIdentityV3InvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref KaevoCloudApiFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${KaevoCloudHttpApi}/*/*/v3/identity/*
+
+  KaevoIdentityV3GetContextRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: GET /v3/identity/me
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3MigrateExistingAccountRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/migrate-existing-account
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3MigrateHouseholdMembershipRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/migrate-household-membership
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3CreateProfileRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/profiles
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3CreateProfileBindingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/profiles/{profileId}/bindings
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3SaveProfileJellyfinBindingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: PUT /v3/identity/profiles/{profileId}/jellyfin-binding
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3DeleteProfileRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/profiles/{profileId}/deletion
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3ListProfileMappingsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: GET /v3/identity/profile-mappings
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3PreviewProfileMappingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/profile-mappings/preview
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3ConfirmProfileMappingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/profile-mappings/confirm
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3CreateAndConfirmProfileMappingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/profile-mappings/create-and-confirm
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3ListOwnershipTransferCandidatesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: GET /v3/identity/households/ownership-transfer/candidates
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3ListHouseholdProfilesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: GET /v3/identity/households/profiles
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3TransferHouseholdOwnershipRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/households/ownership-transfer
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoHouseholdJoinLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-household-join
+      RetentionInDays: 30
+
+  KaevoHouseholdJoinFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub kaevo-cloud-${EnvironmentName}-household-join
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KaevoHouseholdJoinLeastPrivilege
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteOwnLambdaLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/kaevo-cloud-${EnvironmentName}-household-join:*
+              - Sid: ReadAndTransitionJoinTransactions
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt KaevoHouseholdJoinTransactionsTable.Arn
+              - Sid: ReadInvitationAndOnboardingAuthority
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  - !GetAtt KaevoHouseholdInvitationsTable.Arn
+                  - !GetAtt KaevoPrincipalsTable.Arn
+                  - !GetAtt KaevoIdentityMembershipsTable.Arn
+                  - !GetAtt KaevoIdentityProfilesTable.Arn
+                  - !GetAtt KaevoEntitlementsTable.Arn
+                  - !GetAtt KaevoAccountsTable.Arn
+                  - !GetAtt KaevoAuthIdentitiesTable.Arn
+                  - !GetAtt KaevoHouseholdMembershipsTable.Arn
+                  - !GetAtt KaevoProfilesTable.Arn
+                  - !GetAtt KaevoProfileBindingsTable.Arn
+                  - !GetAtt KaevoProfileMappingsTable.Arn
+              - Sid: AtomicallyAdvanceHouseholdJoinOnboarding
+                Effect: Allow
+                Action:
+                  - dynamodb:TransactWriteItems
+                Resource:
+                  - !GetAtt KaevoHouseholdJoinTransactionsTable.Arn
+                  - !GetAtt KaevoHouseholdInvitationsTable.Arn
+                  - !GetAtt KaevoPrincipalsTable.Arn
+                  - !GetAtt KaevoIdentityMembershipsTable.Arn
+                  - !GetAtt KaevoIdentityProfilesTable.Arn
+                  - !GetAtt KaevoEntitlementsTable.Arn
+                  - !GetAtt KaevoAccountsTable.Arn
+                  - !GetAtt KaevoAuthIdentitiesTable.Arn
+                  - !GetAtt KaevoHouseholdMembershipsTable.Arn
+                  - !GetAtt KaevoProfilesTable.Arn
+                  - !GetAtt KaevoProfileBindingsTable.Arn
+                  - !GetAtt KaevoProfileMappingsTable.Arn
+              # DynamoDB authorizes the individual writes inside a transaction.
+              # The Join table's own PutItem/UpdateItem statement covers the
+              # pending pointer and transaction state; this statement covers
+              # only the four additional completion writes and only in a
+              # TransactWriteItems call.
+              - Sid: PutHouseholdJoinCompletionRecordsTransactionally
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  - !GetAtt KaevoHouseholdInvitationsTable.Arn
+                  - !GetAtt KaevoAccountsTable.Arn
+                  - !GetAtt KaevoAuthIdentitiesTable.Arn
+                  - !GetAtt KaevoHouseholdMembershipsTable.Arn
+                Condition:
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+              # Profile Setup is a separate all-or-nothing transition.  Keep
+              # its underlying DynamoDB authorizations distinct from Join
+              # completion and confined to an enclosing transaction.
+              - Sid: PutProfileSetupRecordsTransactionally
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  - !GetAtt KaevoIdentityProfilesTable.Arn
+                  - !GetAtt KaevoProfilesTable.Arn
+                  - !GetAtt KaevoProfileBindingsTable.Arn
+                  - !GetAtt KaevoProfileMappingsTable.Arn
+                  - !GetAtt KaevoEntitlementsTable.Arn
+                  - !GetAtt KaevoPrincipalsTable.Arn
+                  - !GetAtt KaevoIdentityMembershipsTable.Arn
+                Condition:
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+              - Sid: ActivatePendingProfileMembershipTransactionally
+                Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt KaevoHouseholdMembershipsTable.Arn
+                Condition:
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+              - Sid: ResolveAuthenticatedSubjectOnly
+                Effect: Allow
+                Action:
+                  - cognito-idp:ListUsers
+                Resource: !GetAtt KaevoUserPool.Arn
+  KaevoHouseholdJoinFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - KaevoHouseholdJoinLogGroup
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-household-join
+      CodeUri: ../api/src/
+      Handler: household_join_handler.lambda_handler
+      Role: !GetAtt KaevoHouseholdJoinFunctionRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Environment:
+        Variables:
+          HOUSEHOLD_JOIN_TRANSACTIONS_TABLE: !Ref KaevoHouseholdJoinTransactionsTable
+          HOUSEHOLD_INVITATIONS_TABLE: !Ref KaevoHouseholdInvitationsTable
+          PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
+          IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
+          IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
+          ACCOUNTS_TABLE: !Ref KaevoAccountsTable
+          AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable
+          HOUSEHOLD_MEMBERSHIPS_TABLE: !Ref KaevoHouseholdMembershipsTable
+          CLOUD_PROFILES_TABLE: !Ref KaevoProfilesTable
+          PROFILE_BINDINGS_TABLE: !Ref KaevoProfileBindingsTable
+          PROFILE_MAPPINGS_TABLE: !Ref KaevoProfileMappingsTable
+          ENTITLEMENTS_TABLE: !Ref KaevoEntitlementsTable
+          COGNITO_USER_POOL_ID: !Ref KaevoUserPool
+          EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
+          EXPECTED_NATIVE_CLIENT_ID: !If [HasNativeOidc, !Ref KaevoSecurityStageNativeOidcClient, ""]
+          EXPECTED_NATIVE_CALLBACK_URI: !If [IsSecurityStage, kaevo-security-stage://oauth/callback, !If [IsDevelopment, kaevo://oauth/callback, ""]]
+          # The app exchanges the authorization code against its configured
+          # custom domain.  The browser handoff must use that same domain;
+          # otherwise Cognito rejects the cross-domain code redemption after
+          # a successful managed-login callback.
+          NATIVE_OIDC_AUTHORIZATION_ENDPOINT: !If [HasCognitoCustomDomain, !Sub "https://${CognitoCustomDomainName}/oauth2/authorize", !If [IsSecurityStage, https://kaevo-security-stage-48c1664d38f4.auth.us-west-2.amazoncognito.com/oauth2/authorize, !If [IsDevelopment, https://kaevo-cloud-dev-295055514343-us-west-2.auth.us-west-2.amazoncognito.com/oauth2/authorize, ""]]]
+          PUBLIC_API_BASE_URL: !If
+            - HasApiCustomDomain
+            - !Sub https://${ApiCustomDomainName}
+            - !Sub https://${KaevoCloudHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${EnvironmentName}
+          HOUSEHOLD_JOIN_AUTHORIZE_BASE_URL: !If
+            - HasApiCustomDomain
+            - !Sub https://${ApiCustomDomainName}/v3/identity/household-joins/authorize
+            - !Sub https://${KaevoCloudHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${EnvironmentName}/v3/identity/household-joins/authorize
+  KaevoHouseholdJoinIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+      PayloadFormatVersion: "2.0"
+      IntegrationUri: !Sub
+        - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+        - FunctionArn: !GetAtt KaevoHouseholdJoinFunction.Arn
+
+  KaevoHouseholdJoinAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizerType: JWT
+      IdentitySource:
+        - $request.header.Authorization
+      JwtConfiguration:
+        Issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
+        Audience:
+          - !If [HasNativeOidc, !Ref KaevoSecurityStageNativeOidcClient, !Ref KaevoUserPoolClient]
+      Name: !Sub kaevo-cloud-${EnvironmentName}-household-join
+
+  KaevoHouseholdJoinInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref KaevoHouseholdJoinFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${KaevoCloudHttpApi}/*/*/v3/identity/household-joins/*
+
+  KaevoHouseholdJoinBeginRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/household-joins/begin
+      Target: !Join ["/", [integrations, !Ref KaevoHouseholdJoinIntegration]]
+
+  KaevoHouseholdJoinRouteAuthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/household-joins/route-auth
+      Target: !Join ["/", [integrations, !Ref KaevoHouseholdJoinIntegration]]
+
+  KaevoHouseholdJoinAuthorizeRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: GET /v3/identity/household-joins/authorize
+      Target: !Join ["/", [integrations, !Ref KaevoHouseholdJoinIntegration]]
+
+  # The receipt is DPoP-, state-, and installation-bound in the Lambda. It
+  # cannot use a JWT authorizer because it records failures before a valid
+  # access token exists; it performs no identity or household mutation.
+  KaevoHouseholdJoinAuthResultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/household-joins/auth-result
+      Target: !Join ["/", [integrations, !Ref KaevoHouseholdJoinIntegration]]
+
+  KaevoHouseholdJoinCompleteRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: JWT
+      AuthorizerId: !Ref KaevoHouseholdJoinAuthorizer
+      RouteKey: POST /v3/identity/household-joins/complete
+      Target: !Join ["/", [integrations, !Ref KaevoHouseholdJoinIntegration]]
+
+  KaevoHouseholdJoinOnboardingStatusRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: JWT
+      AuthorizerId: !Ref KaevoHouseholdJoinAuthorizer
+      RouteKey: GET /v3/identity/household-joins/onboarding-status
+      Target: !Join ["/", [integrations, !Ref KaevoHouseholdJoinIntegration]]
+
+  KaevoHouseholdJoinProfileSetupRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: JWT
+      AuthorizerId: !Ref KaevoHouseholdJoinAuthorizer
+      RouteKey: POST /v3/identity/household-joins/profile-setup
+      Target: !Join ["/", [integrations, !Ref KaevoHouseholdJoinIntegration]]
 
   KaevoSocialIdentityApiLogGroup:
     Type: AWS::Logs::LogGroup
@@ -1626,6 +2337,12 @@ Resources:
                   - dynamodb:GetItem
                   - dynamodb:UpdateItem
                 Resource: !GetAtt KaevoRemoteRequestsTable.Arn
+              - Sid: MirrorBindingOperationLifecycle
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt KaevoBindingOperationsTable.Arn
               - Sid: QueryPendingRemoteRequestsByConnector
                 Effect: Allow
                 Action:
@@ -1659,6 +2376,7 @@ Resources:
           KAEVO_ENV: !Ref EnvironmentName
           HOME_CONNECTORS_TABLE: !Ref KaevoHomeConnectorsTable
           REMOTE_REQUESTS_TABLE: !Ref KaevoRemoteRequestsTable
+          BINDING_OPERATIONS_TABLE: !Ref KaevoBindingOperationsTable
           APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
           IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
           REMOTE_PAYLOADS_BUCKET: !Ref KaevoRemotePayloadsBucket
@@ -1676,6 +2394,12 @@ Resources:
           Properties:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v3/home-connectors/{connectorId}/heartbeat
+            Method: POST
+        DisconnectHomeConnectorV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/home-connectors/{connectorId}/disconnect
             Method: POST
         CreateConnectorRelayTicketV3:
           Type: HttpApi

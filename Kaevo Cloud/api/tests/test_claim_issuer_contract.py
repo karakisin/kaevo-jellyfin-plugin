@@ -127,7 +127,7 @@ def native_cognito(**overrides):
         "SupportedIdentityProviders": ["COGNITO"],
         "CallbackURLs": ["kaevo-security-stage://oauth/callback"],
         "LogoutURLs": ["kaevo-security-stage://oauth/logout"],
-        "ExplicitAuthFlows": ["ALLOW_REFRESH_TOKEN_AUTH"],
+        "ExplicitAuthFlows": ["ALLOW_USER_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
         "DefaultRedirectURI": "kaevo-security-stage://oauth/callback",
     }
     configuration.update(overrides)
@@ -227,11 +227,53 @@ def test_normal_app_native_callback_is_validated_from_the_deployed_environment(m
     assert claims["role"] == "owner"
 
 
+def test_native_refresh_receives_authoritative_claims_after_household_graph_changes():
+    dynamo, _ = graph()
+    result = issue_claims(
+        native_event(triggerSource="TokenGeneration_RefreshTokens"),
+        dynamodb=dynamo,
+        cognito=native_cognito(),
+    )
+    claims = result["response"]["claimsAndScopeOverrideDetails"]["accessTokenGeneration"]["claimsToAddOrOverride"]
+    assert claims["role"] == "owner"
+    assert claims["household_id"] == "household-1"
+
+
+def test_native_member_refresh_uses_its_member_account_with_the_owner_household():
+    dynamo, _ = graph()
+    principal = {
+        "principal_id": "member-2", "account_id": "member-account", "household_id": "household-1",
+        "role": "adult", "authz_version": 1, "profile_ids": ["member-profile"], "state": "active", "revoked": False,
+    }
+    membership = {
+        "principal_id": "member-2", "account_id": "member-account", "household_id": "household-1",
+        "profile_id": "member-profile", "role": "adult", "authz_version": 1, "state": "active",
+    }
+    profile = {
+        "profile_id": "member-profile", "account_id": "member-account", "household_id": "household-1",
+        "profile_type": "adult", "state": "active",
+    }
+    dynamo.tables["principals"].items["member-2"] = principal
+    dynamo.tables["memberships"].items["member-2"] = membership
+    dynamo.tables["profiles"].items["member-profile"] = profile
+    result = issue_claims(
+        native_event(
+            triggerSource="TokenGeneration_RefreshTokens",
+            request={"userAttributes": {"sub": "member-2"}},
+        ),
+        dynamodb=dynamo,
+        cognito=native_cognito(),
+    )
+    claims = result["response"]["claimsAndScopeOverrideDetails"]["accessTokenGeneration"]["claimsToAddOrOverride"]
+    assert claims["account_id"] == "member-account"
+    assert claims["household_id"] == "household-1"
+    assert claims["role"] == "adult"
+
+
 @pytest.mark.parametrize("trigger", [
     "TokenGeneration_Authentication",
     "TokenGeneration_NewPasswordChallenge",
     "TokenGeneration_AuthenticateDevice",
-    "TokenGeneration_RefreshTokens",
     "TokenGeneration_ClientCredentials",
 ])
 def test_native_rejects_every_non_hosted_auth_trigger(trigger):
@@ -263,6 +305,16 @@ def test_native_client_configuration_mismatch_fails_closed(field, value):
     dynamo, _ = graph()
     with pytest.raises(AuthorityError, match="unexpected_native_client_configuration"):
         issue_claims(native_event(), dynamodb=dynamo, cognito=native_cognito(**{field: value}))
+
+
+def test_native_client_accepts_cognito_flow_order_without_broadening_policy():
+    dynamo, _ = graph()
+    result = issue_claims(
+        native_event(),
+        dynamodb=dynamo,
+        cognito=native_cognito(ExplicitAuthFlows=["ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_AUTH"]),
+    )
+    assert result["response"]["claimsAndScopeOverrideDetails"]
 
 
 def test_client_metadata_cannot_spoof_native_identity_role_or_household():

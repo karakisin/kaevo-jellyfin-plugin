@@ -22,6 +22,10 @@ public sealed class PluginConfiguration : BasePluginConfiguration
 
     public string JellyfinUserId { get; set; } = string.Empty;
 
+    // Exact Cloud profile -> Jellyfin user bindings. New household members must
+    // never inherit the connector owner's Jellyfin identity by fallback.
+    public string ProfileJellyfinBindingsJson { get; set; } = string.Empty;
+
     public bool RemoteMetadataEnabled { get; set; } = true;
 
     public bool RemoteArtworkEnabled { get; set; } = true;

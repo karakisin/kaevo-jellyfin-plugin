@@ -28,6 +28,7 @@ def template(
     household_authorizer: bool,
     unrelated_method: str = "POST",
     include_deployed_only_route: bool = False,
+    include_delete_route: bool = True,
 ) -> str:
     auth = "" if not household_authorizer else """            Auth:
               Authorizer: KaevoOwnerAuthorizer
@@ -39,6 +40,14 @@ def template(
               Ref: KaevoCloudHttpApi
             Path: /v2/deployed-only
             Method: POST
+"""
+    delete_route = "" if not include_delete_route else """        DeleteHouseholdInvitation:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: KaevoCloudHttpApi
+            Path: /v2/household/invitations/{invitationId}
+            Method: DELETE
 """
     return f"""Resources:
   KaevoCloudApiFunction:
@@ -60,7 +69,7 @@ def template(
               Ref: KaevoCloudHttpApi
             Path: /v2/household/invitations
             Method: ANY
-{auth}        RevokeHouseholdInvitation:
+{auth}{delete_route}        RevokeHouseholdInvitation:
           Type: HttpApi
           Properties:
             ApiId:
@@ -80,11 +89,12 @@ def test_source_household_routes_rely_on_lambda_dpop_validation_not_gateway_jwt(
     source = (ROOT / "infra" / "template.yaml").read_text()
     events = PREPARE.HELPER.api_events(source)[0]
     assert "Authorizer:" not in events["HouseholdInvitations"].text
+    assert "Authorizer:" not in events["DeleteHouseholdInvitation"].text
     assert "Authorizer:" not in events["RevokeHouseholdInvitation"].text
 
 
-def test_preparation_changes_only_two_household_event_blocks():
-    deployed = template(household_authorizer=True)
+def test_preparation_changes_only_household_event_blocks_and_adds_exact_delete():
+    deployed = template(household_authorizer=True, include_delete_route=False)
     candidate = template(household_authorizer=False)
     prepared = PREPARE.prepare_template(candidate, deployed)
     actual = PREPARE.HELPER.api_events(prepared)[0]
@@ -92,13 +102,18 @@ def test_preparation_changes_only_two_household_event_blocks():
     wanted = PREPARE.HELPER.api_events(candidate)[0]
 
     assert actual["HouseholdInvitations"] == wanted["HouseholdInvitations"]
+    assert actual["DeleteHouseholdInvitation"] == wanted["DeleteHouseholdInvitation"]
     assert actual["RevokeHouseholdInvitation"] == wanted["RevokeHouseholdInvitation"]
     assert actual["ExistingRoute"] == before["ExistingRoute"]
     assert PREPARE.HELPER.resource_section(prepared, "KaevoCloudApiFunction").count("CodeUri: s3://immutable/api") == 1
 
 
 def test_preparation_preserves_deployed_legacy_events_missing_from_clean_checkout():
-    deployed = template(household_authorizer=True, include_deployed_only_route=True)
+    deployed = template(
+        household_authorizer=True,
+        include_deployed_only_route=True,
+        include_delete_route=False,
+    )
     candidate = template(household_authorizer=False)
 
     prepared = PREPARE.prepare_template(candidate, deployed)
@@ -107,11 +122,12 @@ def test_preparation_preserves_deployed_legacy_events_missing_from_clean_checkou
 
     assert actual["DeployedOnlyV2Route"] == before["DeployedOnlyV2Route"]
     assert "Authorizer:" not in actual["HouseholdInvitations"].text
+    assert "Authorizer:" not in actual["DeleteHouseholdInvitation"].text
     assert "Authorizer:" not in actual["RevokeHouseholdInvitation"].text
 
 
 def test_preparation_rejects_any_unrelated_event_drift():
-    deployed = template(household_authorizer=True)
+    deployed = template(household_authorizer=True, include_delete_route=False)
     candidate = template(household_authorizer=False, unrelated_method="GET")
     prepared = PREPARE.prepare_template(candidate, deployed)
     actual = PREPARE.HELPER.api_events(prepared)[0]
@@ -120,12 +136,20 @@ def test_preparation_rejects_any_unrelated_event_drift():
 
 
 def test_scope_accepts_only_in_place_http_api_modification():
-    approved = {"Changes": [{"ResourceChange": {
-        "LogicalResourceId": "KaevoCloudHttpApi",
-        "ResourceType": "AWS::ApiGatewayV2::Api",
-        "Action": "Modify",
-        "Replacement": "False",
-    }}]}
+    approved = {"Changes": [
+        {"ResourceChange": {
+            "LogicalResourceId": "KaevoCloudHttpApi",
+            "ResourceType": "AWS::ApiGatewayV2::Api",
+            "Action": "Modify",
+            "Replacement": "False",
+        }},
+        {"ResourceChange": {
+            "LogicalResourceId": "KaevoCloudApiFunctionDeleteHouseholdInvitationPermission",
+            "ResourceType": "AWS::Lambda::Permission",
+            "Action": "Add",
+            "Replacement": "False",
+        }},
+    ]}
     assert SCOPE.scope_errors(json.loads(json.dumps(approved))) == []
 
 

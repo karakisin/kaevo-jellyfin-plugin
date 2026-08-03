@@ -65,6 +65,8 @@ def test_social_identity_providers_are_optional_and_secret_backed():
     assert "ProviderType: Google" in google
     assert "SecretString:client_id" in google
     assert "SecretString:client_secret" in google
+    assert "email: email" in google
+    assert "email_verified: email_verified" in google
     assert "Condition: HasAppleIdentityProvider" in apple
     assert "ProviderType: SignInWithApple" in apple
     for key in ("client_id", "team_id", "key_id", "private_key"):

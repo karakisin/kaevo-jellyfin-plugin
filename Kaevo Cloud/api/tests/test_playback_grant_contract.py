@@ -73,3 +73,30 @@ def test_grant_rejects_paths_and_unknown_modes(monkeypatch):
         "media_source_id": "source-1", "playback_session_id": "session-1", "mode": "proxy",
     }))
     assert result["statusCode"] == 400
+
+
+def test_v3_connector_receives_cloud_signed_grant_without_legacy_secret(monkeypatch):
+    monkeypatch.setattr(handler, "DEV_API_KEY", "dev-key")
+    monkeypatch.setattr(handler, "PLAYBACK_GRANT_SIGNING_KEY", "x" * 48)
+    monkeypatch.setattr(handler, "PAIRING_V3_AUTHORIZATION_SIGNING_SEED", handler.pairing_v3_b64url_encode(b"s" * 32))
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _: ({
+        "cloud_enabled": True,
+        "subscription_state": "trialing",
+        "feature_flags": {},
+    }, None))
+    monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda _: {
+        "connector_id": "connector-v3-1",
+        "protocol_version": handler.PAIRING_V3_PROTOCOL,
+        "auth_state": "v3_active",
+        "state": "active",
+        "revoked": False,
+    })
+    result = handler.create_playback_grant(event({
+        "profile_id": "profile-1", "device_id": "device-1", "item_id": "a" * 32,
+        "media_source_id": "source-1", "playback_session_id": "session-1", "mode": "transcode",
+    }))
+    assert result["statusCode"] == 201
+    payload = json.loads(handler.pairing_v3_b64url_decode(json.loads(result["body"])["grant"].split(".", 1)[0]))
+    assert payload["protocol"] == handler.PAIRING_V3_PROTOCOL
+    assert payload["home_sig"].count(".") == 2
+    assert "playback_grant_key" not in payload

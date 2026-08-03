@@ -20,13 +20,17 @@ public sealed class ControllerAuthorizationTests
 
     [Theory]
     [InlineData(nameof(KaevoController.ActivateCloud))]
+    [InlineData(nameof(KaevoController.RefreshJellyfinCredential))]
+    [InlineData(nameof(KaevoController.BindProfileJellyfinIdentity))]
     [InlineData(nameof(KaevoController.GetProviderStatus))]
     [InlineData(nameof(KaevoController.ProvisionProvider))]
+    [InlineData(nameof(KaevoController.ProvisionSeerrJellyfinUser))]
     [InlineData(nameof(KaevoController.PairLifecycle))]
     [InlineData(nameof(KaevoController.RotateLifecycle))]
     [InlineData(nameof(KaevoController.RecoverLifecycle))]
     [InlineData(nameof(KaevoController.RevokeLifecycle))]
     [InlineData(nameof(KaevoController.UnpairLifecycle))]
+    [InlineData(nameof(KaevoController.ReconnectPairingV3))]
     public void SensitiveConfigurationEndpointsRequireElevation(string methodName)
     {
         var method = typeof(KaevoController).GetMethod(methodName);

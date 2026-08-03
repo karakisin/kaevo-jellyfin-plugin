@@ -22,7 +22,15 @@ SUPPORTED_TRIGGERS = frozenset({
     "TokenGeneration_AuthenticateDevice",
     "TokenGeneration_RefreshTokens",
 })
-NATIVE_TRIGGERS = frozenset({"TokenGeneration_HostedAuth"})
+# Native managed-login users first receive a short-lived enrollment marker.
+# Once the enrollment or invitation transaction commits the authoritative
+# graph, the iOS client exchanges its refresh token to receive the new
+# household claims.  Rejecting that refresh event strands a successfully
+# created account before it can ever become an authorized household member.
+NATIVE_TRIGGERS = frozenset({
+    "TokenGeneration_HostedAuth",
+    "TokenGeneration_RefreshTokens",
+})
 KAEVO_CLAIMS = [
     "account_id", "household_id", "profile_id", "role",
     "authz_version", "identity_schema_version", "kaevo_enrollment_required",
@@ -125,9 +133,15 @@ def _validate_native_configuration(client: Mapping[str, Any]) -> None:
         "SupportedIdentityProviders": expected_identity_providers,
         "CallbackURLs": [callback_uri],
         "LogoutURLs": [logout_uri],
-        "ExplicitAuthFlows": ["ALLOW_REFRESH_TOKEN_AUTH"],
+        # Cognito does not guarantee the order of this list.  The two entries
+        # together are the narrow native policy: interactive managed login and
+        # refresh-token renewal, without password/admin/custom API flows.
+        "ExplicitAuthFlows": frozenset({"ALLOW_USER_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"}),
     }
-    if any(client.get(key) != value for key, value in exact_lists.items()):
+    if any(
+        frozenset(client.get(key) or []) != value if key == "ExplicitAuthFlows" else client.get(key) != value
+        for key, value in exact_lists.items()
+    ):
         raise AuthorityError("unexpected_native_client_configuration")
     if client.get("DefaultRedirectURI") != callback_uri:
         raise AuthorityError("unexpected_native_client_configuration")
