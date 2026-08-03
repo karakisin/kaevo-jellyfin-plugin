@@ -46,7 +46,19 @@
             border: 1px solid rgba(231,196,139,.55) !important; box-shadow: none !important;
             cursor: not-allowed; opacity: 1;
         }
-        #KaevoConfigPage #KaevoRepairPairing { margin-top: .8rem; }
+        #KaevoConfigPage #KaevoRepairPairing {
+            display: block; width: 100%; margin-top: .8rem; min-height: 48px;
+            border: 1px solid rgba(231,196,139,.55) !important; border-radius: 999px;
+            color: var(--kaevo-gold) !important; background: rgba(8,10,13,.74) !important;
+            font-weight: 750; box-shadow: none !important; cursor: pointer;
+        }
+        #KaevoConfigPage #KaevoRepairPairing:hover {
+            border-color: var(--kaevo-gold) !important; background: rgba(185,135,63,.14) !important;
+        }
+        #KaevoConfigPage #KaevoRepairPairing:focus-visible {
+            outline: 3px solid rgba(231,196,139,.52); outline-offset: 3px;
+        }
+        #KaevoConfigPage .kaevo-repair-hint { margin: .7rem 0 0; color: var(--kaevo-muted); line-height: 1.45; }
         #KaevoConfigPage .kaevo-warning {
             margin-top: 1.2rem; padding: 1rem 1.1rem; border: 1px solid rgba(231,196,139,.36);
             border-radius: 16px; background: rgba(185,135,63,.10); color: var(--kaevo-muted); line-height: 1.5;
@@ -132,7 +144,17 @@
                 border:1px solid rgba(231,196,139,.55) !important; box-shadow:none !important;
                 cursor:not-allowed; opacity:1;
             }
-            #KaevoConfigPage #KaevoRepairPairing { margin-top:.8rem; }
+            #KaevoConfigPage #KaevoRepairPairing {
+                display:block; width:100%; margin-top:.8rem; min-height:48px;
+                border:1px solid rgba(231,196,139,.55) !important; border-radius:999px;
+                color:var(--kaevo-gold) !important; background:rgba(8,10,13,.74) !important;
+                font-weight:750; box-shadow:none !important; cursor:pointer;
+            }
+            #KaevoConfigPage #KaevoRepairPairing:hover {
+                border-color:var(--kaevo-gold) !important; background:rgba(185,135,63,.14) !important;
+            }
+            #KaevoConfigPage #KaevoRepairPairing:focus-visible { outline:3px solid rgba(231,196,139,.52); outline-offset:3px; }
+            #KaevoConfigPage .kaevo-repair-hint { margin:.7rem 0 0; color:var(--kaevo-muted); line-height:1.45; }
             #KaevoConfigPage .kaevo-warning {
                 margin-top:1.2rem; padding:1rem 1.1rem; border:1px solid rgba(231,196,139,.36);
                 border-radius:16px; background:rgba(185,135,63,.10); color:var(--kaevo-muted); line-height:1.5;
@@ -202,6 +224,7 @@
                     <button id="KaevoRepairPairing" is="emby-button" type="button" class="emby-button" hidden>
                         <span>Repair Kaevo Connection</span>
                     </button>
+                    <p id="KaevoRepairHint" class="kaevo-repair-hint" hidden>Use this only if Kaevo asks this server to reconnect. Your current connection stays active until the repair is completed.</p>
                     <section id="KaevoPairingTicket" hidden aria-live="polite">
                         <img id="KaevoPairingQr" alt="Kaevo one-time pairing QR code" width="240" height="240" />
                         <p id="KaevoPairingCodeLabel" class="kaevo-code-label">Here’s your one-time code</p>
@@ -278,6 +301,7 @@
                 var paired = enabled && KaevoConfig.pairingV3Connected === true;
                 var button = document.querySelector('#KaevoCreatePairing');
                 var repairButton = document.querySelector('#KaevoRepairPairing');
+                var repairHint = document.querySelector('#KaevoRepairHint');
                 button.disabled = paired;
                 button.setAttribute('aria-disabled', paired ? 'true' : 'false');
                 button.setAttribute('data-connected', paired ? 'true' : 'false');
@@ -292,6 +316,7 @@
                         : 'Create a signed Pairing V3 QR, then confirm this Jellyfin server in Kaevo while you are at home.'
                     : 'Create a private connection, then scan the QR code or enter the one-time code in Kaevo while you are at home.';
                 repairButton.hidden = !paired;
+                repairHint.hidden = !paired;
             }
 
             function renderPairingV3Status(status) {
