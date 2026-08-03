@@ -15,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.77";
+    private const string PluginVersion = "0.2.82";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -23,7 +23,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private static readonly object ProfileBindingSync = new();
     private static readonly HashSet<string> SupportedLocalProviders = new(StringComparer.OrdinalIgnoreCase)
     {
-        "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr"
+        "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr", "sabnzbd", "qbittorrent"
     };
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly HashSet<string> SafeMetadataQuery = new(StringComparer.OrdinalIgnoreCase)
@@ -449,7 +449,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         if (!string.Equals(request.Provider, "jellyfin", StringComparison.OrdinalIgnoreCase))
         {
             if (!SupportedLocalProviders.Contains(request.Provider)
-                || !IsAllowedProviderReadPath(request.Provider, request.Path)
+                || !IsAllowedProviderReadRequest(request.Provider, request.Path, request.Query)
                 || HasUnsafeProviderQuery(request.Query))
             {
                 throw new InvalidOperationException("remoteProviderRouteNotAllowed");
@@ -1162,19 +1162,37 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         providerName = providerName.Trim().ToLowerInvariant();
         var provider = secrets.GetProvider(providerName);
-        var requiresApiKey = providerName != "tdarr";
+        var requiresApiKey = RequiresProviderApiKey(providerName);
+        var requiresUsernamePassword = RequiresProviderUsernamePassword(providerName);
         if (provider?.Enabled != true
             || !Uri.TryCreate(provider.BaseUrl, UriKind.Absolute, out var baseUri)
             || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps)
-            || (requiresApiKey && string.IsNullOrWhiteSpace(provider.ApiKey)))
+            || (requiresApiKey && string.IsNullOrWhiteSpace(provider.ApiKey))
+            || (requiresUsernamePassword && (string.IsNullOrWhiteSpace(provider.Username) || string.IsNullOrWhiteSpace(provider.Password))))
         {
             throw new InvalidOperationException($"{providerName}NotProvisioned");
         }
 
         var uri = BuildProviderUri(baseUri, path, query);
+        if (providerName == "sabnzbd")
+        {
+            uri = AddProviderQueryParameters(uri, new[]
+            {
+                new KeyValuePair<string, string>("apikey", provider.ApiKey),
+                new KeyValuePair<string, string>("output", "json")
+            });
+        }
+
+        var qbittorrentCookie = providerName == "qbittorrent"
+            ? await AuthenticateQbittorrentAsync(provider, cancellationToken).ConfigureAwait(false)
+            : null;
         using var message = new HttpRequestMessage(HttpMethod.Get, uri);
         message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        if (!string.IsNullOrWhiteSpace(provider.ApiKey))
+        if (!string.IsNullOrWhiteSpace(qbittorrentCookie))
+        {
+            message.Headers.TryAddWithoutValidation("Cookie", qbittorrentCookie);
+        }
+        else if (!string.IsNullOrWhiteSpace(provider.ApiKey) && providerName != "sabnzbd")
         {
             message.Headers.TryAddWithoutValidation(
                 providerName == "bazarr" ? "X-API-KEY" : "X-Api-Key",
@@ -1203,6 +1221,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
         var payload = bounded.Data.Length == 0
             ? JsonSerializer.SerializeToElement(new { state = "ok" }, JsonOptions)
+            : providerName == "qbittorrent" && path == "/api/v2/app/version"
+                ? JsonSerializer.SerializeToElement(new { version = Encoding.UTF8.GetString(bounded.Data).Trim() }, JsonOptions)
             : JsonSerializer.Deserialize<JsonElement>(bounded.Data, JsonOptions);
         return new CommandResult((int)response.StatusCode, payload, bounded.Truncated);
     }
@@ -1226,16 +1246,92 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return builder.Uri;
     }
 
+    private static Uri AddProviderQueryParameters(Uri uri, IEnumerable<KeyValuePair<string, string>> parameters)
+    {
+        var existing = uri.Query.TrimStart('?');
+        var additions = parameters
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Key))
+            .Select(pair => $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value ?? string.Empty)}");
+        var query = string.Join('&', new[] { existing }.Where(value => !string.IsNullOrWhiteSpace(value)).Concat(additions));
+        return new UriBuilder(uri) { Query = query }.Uri;
+    }
+
+    private async Task<string> AuthenticateQbittorrentAsync(KaevoLocalProviderSecret provider, CancellationToken cancellationToken)
+    {
+        var loginUri = new Uri(provider.BaseUrl.TrimEnd('/') + "/api/v2/auth/login", UriKind.Absolute);
+        using var login = new HttpRequestMessage(HttpMethod.Post, loginUri)
+        {
+            Content = new FormUrlEncodedContent(new[]
+            {
+                new KeyValuePair<string, string>("username", provider.Username),
+                new KeyValuePair<string, string>("password", provider.Password)
+            })
+        };
+        using var response = await _providerTransport.SendAsync(
+            "qbittorrent",
+            provider,
+            login,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        if ((int)response.StatusCode is >= 300 and < 400)
+        {
+            throw new InvalidOperationException("qbittorrentRedirectRejected");
+        }
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"qbittorrentHttp{(int)response.StatusCode}");
+        }
+
+        var body = await ReadBoundedAsync(response.Content, 4_096, cancellationToken).ConfigureAwait(false);
+        if (body.Truncated || !string.Equals(Encoding.UTF8.GetString(body.Data).Trim(), "Ok.", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("qbittorrentAuthenticationFailed");
+        }
+
+        var sessionCookie = ExtractQbittorrentSessionCookie(response);
+        if (sessionCookie is null)
+        {
+            throw new InvalidOperationException("qbittorrentSessionMissing");
+        }
+        return sessionCookie;
+    }
+
+    internal static string? ExtractQbittorrentSessionCookie(HttpResponseMessage response)
+    {
+        if (!response.Headers.TryGetValues("Set-Cookie", out var setCookies))
+        {
+            return null;
+        }
+        foreach (var header in setCookies)
+        {
+            var cookie = header.Split(';', 2)[0].Trim();
+            if (Regex.IsMatch(cookie, "^SID=[A-Za-z0-9_-]{16,512}$", RegexOptions.CultureInvariant))
+            {
+                return cookie;
+            }
+        }
+        return null;
+    }
+
+    private static bool RequiresProviderApiKey(string providerName)
+        => providerName is not ("tdarr" or "qbittorrent");
+
+    private static bool RequiresProviderUsernamePassword(string providerName)
+        => string.Equals(providerName, "qbittorrent", StringComparison.Ordinal);
+
     private async Task<object> ReadProviderHealthAsync(
         KaevoConnectorSecrets secrets,
         string providerName,
         CancellationToken cancellationToken)
     {
+        providerName = providerName.Trim().ToLowerInvariant();
         var provider = secrets.GetProvider(providerName);
-        var requiresApiKey = providerName != "tdarr";
+        var requiresApiKey = RequiresProviderApiKey(providerName);
+        var requiresUsernamePassword = RequiresProviderUsernamePassword(providerName);
         if (provider?.Enabled != true
             || !Uri.TryCreate(provider.BaseUrl, UriKind.Absolute, out _)
-            || (requiresApiKey && string.IsNullOrWhiteSpace(provider.ApiKey)))
+            || (requiresApiKey && string.IsNullOrWhiteSpace(provider.ApiKey))
+            || (requiresUsernamePassword && (string.IsNullOrWhiteSpace(provider.Username) || string.IsNullOrWhiteSpace(provider.Password))))
         {
             throw new InvalidOperationException($"{providerName}NotProvisioned");
         }
@@ -1245,13 +1341,31 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             "seerr" => "/api/v1/status",
             "bazarr" => "/api/system/status",
             "tdarr" => "/api/v2/status",
+            "sabnzbd" => "/api",
+            "qbittorrent" => "/api/v2/app/version",
             "lidarr" or "readarr" or "prowlarr" => "/api/v1/system/status",
             _ => "/api/v3/system/status"
         };
         var uri = new Uri(provider.BaseUrl.TrimEnd('/') + path, UriKind.Absolute);
+        if (providerName == "sabnzbd")
+        {
+            uri = AddProviderQueryParameters(uri, new[]
+            {
+                new KeyValuePair<string, string>("mode", "version"),
+                new KeyValuePair<string, string>("apikey", provider.ApiKey),
+                new KeyValuePair<string, string>("output", "json")
+            });
+        }
+        var qbittorrentCookie = providerName == "qbittorrent"
+            ? await AuthenticateQbittorrentAsync(provider, cancellationToken).ConfigureAwait(false)
+            : null;
         using var message = new HttpRequestMessage(HttpMethod.Get, uri);
         message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        if (!string.IsNullOrWhiteSpace(provider.ApiKey))
+        if (!string.IsNullOrWhiteSpace(qbittorrentCookie))
+        {
+            message.Headers.TryAddWithoutValidation("Cookie", qbittorrentCookie);
+        }
+        else if (!string.IsNullOrWhiteSpace(provider.ApiKey) && providerName != "sabnzbd")
         {
             message.Headers.TryAddWithoutValidation(providerName == "bazarr" ? "X-API-KEY" : "X-Api-Key", provider.ApiKey);
         }
@@ -1290,7 +1404,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         string? version;
         try
         {
-            version = ValidateProviderHealthResponse(bounded.Data, response.Content.Headers.ContentType?.MediaType);
+            version = providerName == "qbittorrent"
+                ? Encoding.UTF8.GetString(bounded.Data).Trim()
+                : ValidateProviderHealthResponse(bounded.Data, response.Content.Headers.ContentType?.MediaType);
         }
         catch (JsonException)
         {
@@ -2056,9 +2172,43 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             "prowlarr" => new[] { "/api/v1/system/status", "/api/v1/indexer", "/api/v1/indexerstatus" },
             "bazarr" => new[] { "/api/system/status" },
             "tdarr" => new[] { "/api/v2/status" },
+            "sabnzbd" => new[] { "/api" },
+            "qbittorrent" => new[] { "/api/v2/app/version", "/api/v2/transfer/info", "/api/v2/torrents/info" },
             _ => Array.Empty<string>()
         };
-        return prefixes.Any(prefix => path.StartsWith(prefix, StringComparison.Ordinal));
+        return provider.Equals("sabnzbd", StringComparison.OrdinalIgnoreCase)
+            ? path.Equals("/api", StringComparison.Ordinal)
+            : prefixes.Any(prefix => path.StartsWith(prefix, StringComparison.Ordinal));
+    }
+
+    internal static bool IsAllowedProviderReadRequest(
+        string provider,
+        string path,
+        IReadOnlyDictionary<string, JsonElement>? query)
+    {
+        if (!IsAllowedProviderReadPath(provider, path))
+        {
+            return false;
+        }
+
+        if (provider.Equals("sabnzbd", StringComparison.OrdinalIgnoreCase))
+        {
+            if (query is null
+                || query.Count != 1
+                || !query.TryGetValue("mode", out var mode)
+                || mode.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+            return mode.GetString() is "version" or "queue" or "history" or "fullstatus";
+        }
+
+        if (provider.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
+        {
+            return query is null || query.Count == 0;
+        }
+
+        return true;
     }
 
     private static bool HasUnsafeProviderQuery(IReadOnlyDictionary<string, JsonElement>? query)

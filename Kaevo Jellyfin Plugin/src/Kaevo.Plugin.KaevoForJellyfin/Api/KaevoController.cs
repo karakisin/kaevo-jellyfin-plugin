@@ -19,18 +19,20 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
-    private const string PluginVersion = "0.2.77";
-    private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey)> SupportedProviders =
-        new Dictionary<string, (string DisplayName, bool RequiresApiKey)>(StringComparer.OrdinalIgnoreCase)
+    private const string PluginVersion = "0.2.82";
+    private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey, bool RequiresUsernamePassword, string Category)> SupportedProviders =
+        new Dictionary<string, (string DisplayName, bool RequiresApiKey, bool RequiresUsernamePassword, string Category)>(StringComparer.OrdinalIgnoreCase)
         {
-            ["sonarr"] = ("Sonarr", true),
-            ["radarr"] = ("Radarr", true),
-            ["seerr"] = ("Seerr", true),
-            ["lidarr"] = ("Lidarr", true),
-            ["readarr"] = ("Readarr", true),
-            ["prowlarr"] = ("Prowlarr", true),
-            ["bazarr"] = ("Bazarr", true),
-            ["tdarr"] = ("Tdarr", false)
+            ["sonarr"] = ("Sonarr", true, false, "Media Automation"),
+            ["radarr"] = ("Radarr", true, false, "Media Automation"),
+            ["seerr"] = ("Seerr", true, false, "Media Automation"),
+            ["lidarr"] = ("Lidarr", true, false, "Media Automation"),
+            ["readarr"] = ("Readarr", true, false, "Media Automation"),
+            ["prowlarr"] = ("Prowlarr", true, false, "Media Automation"),
+            ["bazarr"] = ("Bazarr", true, false, "Media Automation"),
+            ["tdarr"] = ("Tdarr", false, false, "Media Automation"),
+            ["sabnzbd"] = ("SABnzbd", true, false, "Download Clients"),
+            ["qbittorrent"] = ("qBittorrent", false, true, "Download Clients")
         };
     private const int DefaultItemLimit = 50;
     private const int MaximumItemLimit = 100;
@@ -620,14 +622,18 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             var provider = secrets?.GetProvider(entry.Key);
             var configured = provider is not null
                 && !string.IsNullOrWhiteSpace(provider.BaseUrl)
-                && (!entry.Value.RequiresApiKey || !string.IsNullOrWhiteSpace(provider.ApiKey));
+                && (!entry.Value.RequiresApiKey || !string.IsNullOrWhiteSpace(provider.ApiKey))
+                && (!entry.Value.RequiresUsernamePassword
+                    || (!string.IsNullOrWhiteSpace(provider.Username) && !string.IsNullOrWhiteSpace(provider.Password)));
             return new KaevoProviderStatusResponse(
                 entry.Key,
                 entry.Value.DisplayName,
                 provider?.Enabled == true,
                 configured,
                 provider?.BaseUrl ?? string.Empty,
-                entry.Value.RequiresApiKey);
+                entry.Value.RequiresApiKey,
+                entry.Value.RequiresUsernamePassword,
+                entry.Value.Category);
         }).ToArray();
         return Ok(response);
     }
@@ -650,12 +656,19 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         var current = existing.GetProvider(provider);
         var baseUrl = request.BaseUrl?.Trim().TrimEnd('/') ?? string.Empty;
         var apiKey = string.IsNullOrWhiteSpace(request.ApiKey) ? current?.ApiKey ?? string.Empty : request.ApiKey.Trim();
+        var username = string.IsNullOrWhiteSpace(request.Username) ? current?.Username ?? string.Empty : request.Username.Trim();
+        var password = string.IsNullOrWhiteSpace(request.Password) ? current?.Password ?? string.Empty : request.Password;
         KaevoApprovedDestination? approved = null;
         try
         {
             if (request.Enabled)
             {
                 if (definition.RequiresApiKey && string.IsNullOrWhiteSpace(apiKey))
+                {
+                    throw new ArgumentException("providerCredentialRequired");
+                }
+                if (definition.RequiresUsernamePassword
+                    && (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password)))
                 {
                     throw new ArgumentException("providerCredentialRequired");
                 }
@@ -677,7 +690,9 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             apiKey,
             request.Enabled,
             approved?.Addresses ?? current?.ApprovedAddresses,
-            approved?.SecurityClass ?? current?.DestinationClass ?? "private");
+            approved?.SecurityClass ?? current?.DestinationClass ?? "private",
+            username,
+            password);
         await _secretStore.WriteAsync(
             existing with
             {

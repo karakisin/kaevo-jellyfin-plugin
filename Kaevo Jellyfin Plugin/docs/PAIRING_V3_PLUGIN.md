@@ -57,6 +57,18 @@ server/setup-user provenance, enrollment timestamp, state, attempt ID, and
 protocol. It does not retain a Pairing Authorization, owner credential,
 Cognito credential, DPoP proof, ticket secret, or challenge private material.
 
+## Household repair
+
+Repair is connector-scoped, not Owner-scoped. When a replacement plugin key is
+paired by the same authenticated Owner on the same Jellyfin server, Cloud
+atomically moves every already-bound active household profile from the retired
+connector to the replacement connector. Each profile keeps its own immutable
+Jellyfin user ID; the repair never guesses by name, merges users, grants Owner
+authority, or invents a binding for an unbound profile. If any existing binding
+cannot be proven, the transaction is rejected and the previous connector stays
+active. Removing the plugin removes its local key and secrets, so reinstalling
+requires a fresh signed repair QR.
+
 `PrepareConnectorRequestAsync` prepares canonical body-digest, timestamp,
 unique nonce, connector ID, key ID, and Ed25519 proof for a future connector
 management call. Phase C does not migrate heartbeat, revoke, relay-ticket, or

@@ -6875,6 +6875,12 @@ def issue_home_connector_pairing_authorization_v3(event):
         # not placed in the signed Pairing Authorization returned to iOS or
         # forwarded to the plugin.
         "profile_id": str(session.get("profile_id") or ""),
+        # This is retained only in the Cloud-side authorization record.  The
+        # signed QR never carries a household identifier.  Redemption uses it
+        # to bind the *exact* authenticated profile to the exact Jellyfin user
+        # selected by the administrator while rejecting cross-household or
+        # already-owned identities before any connector state is changed.
+        "household_id": str(session.get("household_id") or ""),
         "authorization_expires_at": claims["exp"],
         "created_at": utc_now_iso(),
         # The logical token expires in 60 seconds. This TTL retains its replay
@@ -7000,6 +7006,158 @@ def pairing_v3_authorization_record(authorization_jti):
     ).get("Item") if app_sessions_table else None
 
 
+def pairing_v3_profile_jellyfin_binding_writes(authorization, connector, jellyfin_user_id):
+    """Build exact profile binding writes for a V3 redemption or connector repair.
+
+    The QR proof binds a concrete Jellyfin user to the authenticated Owner's
+    profile.  It must become the canonical profile binding used by cellular
+    metadata and playback.  This deliberately refuses display-name recovery,
+    cross-household writes, and replacement of a different active binding.
+    """
+    if identity_profiles_table is None or home_connectors_table is None:
+        return [], "profile_binding_unavailable"
+    profile_id = str(authorization.get("profile_id") or "")
+    expected_household_id = str(authorization.get("household_id") or "")
+    connector_id = str((connector or {}).get("connector_id") or "")
+    user_id = _normalized_jellyfin_user_id(jellyfin_user_id)
+    if not profile_id or not expected_household_id or not connector_id or not user_id:
+        return [], "profile_binding_unavailable"
+    profile = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if (
+        not isinstance(profile, dict)
+        or str(profile.get("profile_id") or "") != profile_id
+        or profile.get("state") != "active"
+        or not hmac.compare_digest(str(profile.get("household_id") or ""), expected_household_id)
+    ):
+        return [], "profile_binding_target_missing"
+
+    current_user_id = _normalized_jellyfin_user_id(profile.get("jellyfin_user_id"))
+    current_connector_id = str(profile.get("jellyfin_connector_id") or "")
+    if str(profile.get("jellyfin_binding_state") or "") == "active":
+        if hmac.compare_digest(current_connector_id, connector_id) and current_user_id and hmac.compare_digest(current_user_id, user_id):
+            # The exact edge already exists. Redemption remains idempotent and
+            # no unnecessary profile mutation is performed.
+            return [], None
+        if not current_user_id or not hmac.compare_digest(current_user_id, user_id):
+            return [], "profile_jellyfin_binding_conflict"
+
+        # A plugin reinstallation receives a fresh key and connector ID. A
+        # freshly signed Owner authorization may rotate that *household's*
+        # connector only when it proves the same Owner/Jellyfin user on the
+        # same server. Every existing profile bound to the retired connector is
+        # migrated atomically while retaining its own immutable user ID.
+        previous = home_connectors_table.get_item(
+            Key={"connector_id": current_connector_id}, ConsistentRead=True,
+        ).get("Item")
+        if not isinstance(previous, dict) or not (
+            previous.get("protocol_version") == PAIRING_V3_PROTOCOL
+            and previous.get("state") == "active"
+            and previous.get("auth_state") == "v3_active"
+            and not bool_value(previous.get("revoked"), False)
+            and hmac.compare_digest(str(previous.get("account_binding") or ""), str(connector.get("account_binding") or ""))
+            and hmac.compare_digest(str(previous.get("family_binding") or ""), str(connector.get("family_binding") or ""))
+            and hmac.compare_digest(str(previous.get("jellyfin_server_id") or ""), str(connector.get("jellyfin_server_id") or ""))
+        ):
+            return [], "profile_jellyfin_binding_conflict"
+
+        profile_updates = []
+        profiles = _household_identity_profile_records(expected_household_id)
+        # A Kaevo household is intentionally small. Refuse rather than risk a
+        # non-atomic migration beyond DynamoDB's transaction limit.
+        if len(profiles) > 16:
+            return [], "household_connector_repair_too_large"
+        for candidate in profiles:
+            candidate_id = str(candidate.get("profile_id") or "")
+            if candidate.get("state") != "active" or not candidate_id:
+                continue
+            if str(candidate.get("jellyfin_binding_state") or "") != "active":
+                continue
+            if not hmac.compare_digest(str(candidate.get("jellyfin_connector_id") or ""), current_connector_id):
+                continue
+            candidate_user_id = _normalized_jellyfin_user_id(candidate.get("jellyfin_user_id"))
+            if not candidate_user_id:
+                return [], "profile_jellyfin_binding_conflict"
+            if candidate_id != profile_id and hmac.compare_digest(candidate_user_id, user_id):
+                return [], "jellyfin_identity_already_bound"
+            profile_updates.append({
+                "kind": "update",
+                "table": identity_profiles_table.name,
+                "key": {"profile_id": candidate_id},
+                "update_expression": (
+                    "SET jellyfin_connector_id = :connector_id, jellyfin_binding_updated_at = :updated_at"
+                ),
+                "condition": (
+                    "#state = :profile_active AND household_id = :household_id AND "
+                    "jellyfin_binding_state = :binding_state AND jellyfin_connector_id = :previous_connector_id AND "
+                    "attribute_exists(jellyfin_user_id)"
+                ),
+                "names": {"#state": "state"},
+                "values": {
+                    ":profile_active": "active", ":household_id": expected_household_id,
+                    ":binding_state": "active", ":previous_connector_id": current_connector_id,
+                    ":connector_id": connector_id, ":updated_at": utc_now_iso(),
+                },
+            })
+        if not profile_updates:
+            return [], "profile_jellyfin_binding_conflict"
+        profile_updates.append({
+            "kind": "update",
+            "table": home_connectors_table.name,
+            "key": {"connector_id": current_connector_id},
+            "update_expression": "SET #state = :retired, auth_state = :retired_auth, revoked = :revoked, revoked_at = :revoked_at",
+                "condition": "#state = :active AND auth_state = :active_auth AND (attribute_not_exists(revoked) OR revoked = :not_revoked)",
+            "names": {"#state": "state"},
+            "values": {
+                ":active": "active", ":active_auth": "v3_active", ":not_revoked": False,
+                ":retired": "retired", ":retired_auth": "v3_retired", ":revoked": True,
+                ":revoked_at": utc_now_iso(),
+            },
+        })
+        return profile_updates, None
+
+    # A provider identity may belong to only one active canonical profile in a
+    # household. This uses membership Query + exact profile gets; never Scan.
+    for other in _household_identity_profile_records(expected_household_id):
+        other_id = str(other.get("profile_id") or "")
+        if other_id == profile_id or other.get("state") != "active":
+            continue
+        if (
+            str(other.get("jellyfin_binding_state") or "") == "active"
+            and hmac.compare_digest(str(other.get("jellyfin_connector_id") or ""), connector_id)
+            and hmac.compare_digest(_normalized_jellyfin_user_id(other.get("jellyfin_user_id")), user_id)
+        ):
+            return [], "jellyfin_identity_already_bound"
+
+    return [{
+        "kind": "update",
+        "table": identity_profiles_table.name,
+        "key": {"profile_id": profile_id},
+        "update_expression": (
+            "SET jellyfin_connector_id = :connector_id, jellyfin_user_id = :user_id, "
+            "jellyfin_binding_state = :binding_state, jellyfin_binding_updated_at = :updated_at"
+        ),
+        # A raced update may only be the exact idempotent mapping. Any other
+        # active edge fails the redemption transaction rather than overwriting
+        # identity state.
+        "condition": (
+            "#state = :profile_active AND household_id = :household_id AND "
+            "(attribute_not_exists(jellyfin_binding_state) OR jellyfin_binding_state <> :binding_state "
+            "OR (jellyfin_connector_id = :connector_id AND jellyfin_user_id = :user_id))"
+        ),
+        "names": {"#state": "state"},
+        "values": {
+            ":profile_active": "active",
+            ":household_id": expected_household_id,
+            ":connector_id": connector_id,
+            ":user_id": user_id,
+            ":binding_state": "active",
+            ":updated_at": utc_now_iso(),
+        },
+    }], None
+
+
 def redeem_home_connector_pairing_v3(event):
     route = "/v3/home-connectors/pairing/redemptions"
     correlation_id = pairing_v3_correlation_id(event)
@@ -7007,7 +7165,7 @@ def redeem_home_connector_pairing_v3(event):
     if not isinstance(body, dict) or body.get("protocol") != PAIRING_V3_PROTOCOL:
         pairing_v3_log(correlation_id, "none", route, "redemption_rejected", 400, "malformed_request")
         return pairing_v3_response(400, "malformed_request", correlation_id)
-    if app_sessions_table is None or home_connectors_table is None:
+    if app_sessions_table is None or home_connectors_table is None or identity_profiles_table is None:
         pairing_v3_log(correlation_id, "none", route, "redemption_failed", 503, "cloud_unavailable")
         return pairing_v3_response(503, "cloud_unavailable", correlation_id, retryable=True)
     now = epoch_now()
@@ -7089,6 +7247,12 @@ def redeem_home_connector_pairing_v3(event):
             "profile_id": str(authorization.get("profile_id") or ""),
             "paired_at": utc_now_iso(), "last_contact_at": utc_now_iso(), "revoked": False,
         }
+    profile_binding_writes, profile_binding_error = pairing_v3_profile_jellyfin_binding_writes(
+        authorization, connector, jellyfin_user_id,
+    )
+    if profile_binding_error:
+        pairing_v3_log(correlation_id, attempt_id, route, "redemption_rejected", 409, profile_binding_error)
+        return pairing_v3_response(409, profile_binding_error, correlation_id)
     nonce_item = {
         "token_hash": nonce_key,
         "record_type": "pairing_v3_plugin_nonce", "expires_at": now + PAIRING_V3_TERMINAL_RETENTION_SECONDS,
@@ -7120,6 +7284,7 @@ def redeem_home_connector_pairing_v3(event):
             {"table": home_connectors_table.name, "item": connector, "condition": "attribute_not_exists(connector_id)"},
             {"table": home_connectors_table.name, "item": binding, "condition": "attribute_not_exists(connector_id)"},
         ))
+    writes.extend(profile_binding_writes)
     try:
         pairing_v3_transact_write(writes)
     except ClientError as error:

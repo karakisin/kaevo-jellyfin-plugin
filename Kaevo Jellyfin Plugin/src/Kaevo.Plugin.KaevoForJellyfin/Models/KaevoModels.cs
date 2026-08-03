@@ -130,7 +130,9 @@ public sealed record KaevoPairingV3RecoveryRequest(
 public sealed record KaevoProviderProvisionRequest(
     string BaseUrl,
     string? ApiKey,
-    bool Enabled = true);
+    bool Enabled = true,
+    string? Username = null,
+    string? Password = null);
 
 public sealed record KaevoProviderProvisionResponse(
     string State,
@@ -150,7 +152,9 @@ public sealed record KaevoProviderStatusResponse(
     bool Enabled,
     bool Configured,
     string BaseUrl,
-    bool RequiresApiKey);
+    bool RequiresApiKey,
+    bool RequiresUsernamePassword = false,
+    string Category = "Media Automation");
 
 public sealed record KaevoMediaScanResponse(
     int Libraries,

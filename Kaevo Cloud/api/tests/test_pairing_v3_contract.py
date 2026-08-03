@@ -50,8 +50,14 @@ def client_error(code):
 def v3_tables(monkeypatch):
     sessions = FakeTable("sessions", "token_hash")
     connectors = FakeTable("connectors", "connector_id")
+    profiles = FakeTable("profiles", "profile_id")
+    profiles.put_item(Item={
+        "profile_id": "profile-1", "state": "active", "household_id": "family-1",
+    })
     monkeypatch.setattr(handler, "app_sessions_table", sessions)
     monkeypatch.setattr(handler, "home_connectors_table", connectors)
+    monkeypatch.setattr(handler, "identity_profiles_table", profiles)
+    monkeypatch.setattr(handler, "_household_identity_profile_records", lambda _household_id: list(profiles.items.values()))
     monkeypatch.setattr(handler, "PAIRING_V3_AUTHORIZATION_SIGNING_SEED", pairing_v3.b64url_encode(SIGNING_SEED))
     monkeypatch.setattr(handler, "PAIRING_V3_AUTHORIZATION_KEY_ID", "vector-key-1")
     monkeypatch.setattr(handler, "KAEVO_ENV", "test")
@@ -62,29 +68,61 @@ def v3_tables(monkeypatch):
     }, None))
 
     def transact(writes):
-        staged = {sessions.name: dict(sessions.items), connectors.name: dict(connectors.items)}
-        tables = {sessions.name: sessions, connectors.name: connectors}
+        staged = {
+            sessions.name: dict(sessions.items), connectors.name: dict(connectors.items),
+            profiles.name: dict(profiles.items),
+        }
+        tables = {sessions.name: sessions, connectors.name: connectors, profiles.name: profiles}
         for write in writes:
             table = tables[write["table"]]
             item = write.get("item") or write["key"]
             key = item[table.key]
             existing = staged[table.name].get(key)
             condition = write.get("condition") or ""
-            if "attribute_not_exists" in condition and existing:
+            allows_legacy_unrevoked_connector = (
+                write.get("kind") == "update"
+                and table is connectors
+                and "OR revoked = :not_revoked" in condition
+                and existing
+                and existing.get("revoked") is False
+            )
+            if (
+                "attribute_not_exists" in condition
+                and existing
+                and not (write.get("kind") == "update" and table is profiles)
+                and not allows_legacy_unrevoked_connector
+            ):
                 raise client_error("TransactionCanceledException")
             if "#state = :active" in condition and (not existing or existing.get("state") != "active"):
                 raise client_error("TransactionCanceledException")
             if write.get("kind") == "update":
                 updated = dict(existing or {})
-                updated.update({"state": "redeemed", "redeemed_at": write["values"][":redeemed_at"]})
+                if table is profiles:
+                    if ":user_id" in write["values"]:
+                        updated.update({
+                            "jellyfin_connector_id": write["values"][":connector_id"],
+                            "jellyfin_user_id": write["values"][":user_id"],
+                            "jellyfin_binding_state": write["values"][":binding_state"],
+                            "jellyfin_binding_updated_at": write["values"][":updated_at"],
+                        })
+                    else:
+                        updated.update({
+                            "jellyfin_connector_id": write["values"][":connector_id"],
+                            "jellyfin_binding_updated_at": write["values"][":updated_at"],
+                        })
+                elif table is connectors and ":retired" in write["values"]:
+                    updated.update({"state": "retired", "auth_state": "v3_retired", "revoked": True})
+                else:
+                    updated.update({"state": "redeemed", "redeemed_at": write["values"][":redeemed_at"]})
                 staged[table.name][key] = updated
             else:
                 staged[table.name][key] = dict(item)
         sessions.items = staged[sessions.name]
         connectors.items = staged[connectors.name]
+        profiles.items = staged[profiles.name]
 
     monkeypatch.setattr(handler, "pairing_v3_transact_write", transact)
-    return sessions, connectors
+    return sessions, connectors, profiles
 
 
 def event(route, body, headers=None):
@@ -104,7 +142,7 @@ def bindings():
         "pluginInstanceId": "plugin-v3-test-01",
         "pluginPublicKeyFingerprint": pairing_v3.plugin_fingerprint(pairing_v3.ed25519_public_key_from_seed(PLUGIN_SEED)),
         "jellyfinServerId": "jellyfin-v3-test-01",
-        "jellyfinUserId": "jellyfin-user-1",
+        "jellyfinUserId": "0123456789abcdef0123456789abcdef",
         "iosDeviceId": "ios-device-1",
     }
 
@@ -115,7 +153,7 @@ def issue_authorization():
     return json.loads(issued["body"])["authorization"]
 
 
-def signed_redemption(authorization, *, nonce="abcdefghijklmnopqrstuvwxyz012345", jellyfin_user="jellyfin-user-1"):
+def signed_redemption(authorization, *, nonce="abcdefghijklmnopqrstuvwxyz012345", jellyfin_user="0123456789abcdef0123456789abcdef"):
     public = pairing_v3.ed25519_public_key_from_seed(PLUGIN_SEED)
     claims = handler.pairing_v3_verify_authorization_claims(authorization, handler.epoch_now()).claims
     body = {
@@ -188,7 +226,7 @@ def test_correlation_values_are_canonical_or_replaced(value):
 
 
 def test_authorization_redemption_is_single_use_and_idempotent(v3_tables):
-    sessions, connectors = v3_tables
+    sessions, connectors, profiles = v3_tables
     authorization = issue_authorization()
     first = handler.redeem_home_connector_pairing_v3(signed_redemption(authorization))
     assert first["statusCode"] == 201
@@ -199,12 +237,61 @@ def test_authorization_redemption_is_single_use_and_idempotent(v3_tables):
     assert second["statusCode"] == 200
     assert json.loads(second["body"])["idempotent"] is True
     assert len(connectors.items) == 2
+    assert profiles.items["profile-1"]["jellyfin_binding_state"] == "active"
     states = [item.get("state") for item in sessions.items.values() if item.get("record_type") == "pairing_v3_authorization"]
     assert states == ["redeemed"]
 
 
+def test_connector_repair_migrates_all_existing_household_profiles_without_rebinding_users(v3_tables):
+    _, connectors, profiles = v3_tables
+    profiles.put_item(Item={
+        "profile_id": "profile-2", "state": "active", "household_id": "family-1",
+        "jellyfin_binding_state": "active", "jellyfin_connector_id": "old-connector",
+        "jellyfin_user_id": "fedcba9876543210fedcba9876543210",
+    })
+    profiles.items["profile-1"].update({
+        "jellyfin_binding_state": "active", "jellyfin_connector_id": "old-connector",
+        "jellyfin_user_id": "0123456789abcdef0123456789abcdef",
+    })
+    connectors.put_item(Item={
+        "connector_id": "old-connector", "protocol_version": handler.PAIRING_V3_PROTOCOL,
+        "state": "active", "auth_state": "v3_active", "revoked": False,
+        "account_binding": pairing_v3.sha256_b64url(b"account-1"),
+        "family_binding": pairing_v3.sha256_b64url(b"family-1"),
+        "jellyfin_server_id": "jellyfin-v3-test-01",
+    })
+    authorization = {"profile_id": "profile-1", "household_id": "family-1"}
+    replacement = {
+        "connector_id": "new-connector",
+        "account_binding": pairing_v3.sha256_b64url(b"account-1"),
+        "family_binding": pairing_v3.sha256_b64url(b"family-1"),
+        "jellyfin_server_id": "jellyfin-v3-test-01",
+    }
+
+    writes, error = handler.pairing_v3_profile_jellyfin_binding_writes(
+        authorization, replacement, "0123456789abcdef0123456789abcdef",
+    )
+
+    assert error is None
+    profile_writes = [write for write in writes if write["table"] == profiles.name]
+    assert {write["key"]["profile_id"] for write in profile_writes} == {"profile-1", "profile-2"}
+    assert all(write["values"][":connector_id"] == "new-connector" for write in profile_writes)
+    assert all(":user_id" not in write["values"] for write in profile_writes)
+    assert writes[-1]["table"] == connectors.name
+    assert writes[-1]["key"] == {"connector_id": "old-connector"}
+
+    handler.pairing_v3_transact_write(writes)
+
+    assert profiles.items["profile-1"]["jellyfin_connector_id"] == "new-connector"
+    assert profiles.items["profile-2"]["jellyfin_connector_id"] == "new-connector"
+    assert profiles.items["profile-1"]["jellyfin_user_id"] == "0123456789abcdef0123456789abcdef"
+    assert profiles.items["profile-2"]["jellyfin_user_id"] == "fedcba9876543210fedcba9876543210"
+    assert connectors.items["old-connector"]["state"] == "retired"
+    assert connectors.items["old-connector"]["revoked"] is True
+
+
 def test_v3_connector_registers_and_becomes_online_with_signed_control_request(v3_tables):
-    _, connectors = v3_tables
+    _, connectors, _ = v3_tables
     authorization = issue_authorization()
     redeemed = handler.redeem_home_connector_pairing_v3(signed_redemption(authorization))
     connector_id = json.loads(redeemed["body"])["connectorId"]
@@ -328,8 +415,25 @@ def test_redemption_rejects_jellyfin_user_binding_mismatch(v3_tables):
     assert json.loads(result["body"])["code"] == "binding_mismatch"
 
 
+def test_redemption_never_replaces_a_different_active_profile_binding(v3_tables):
+    sessions, _, profiles = v3_tables
+    profiles.items["profile-1"].update({
+        "jellyfin_binding_state": "active",
+        "jellyfin_connector_id": "v3_existing_connector",
+        "jellyfin_user_id": "ffffffffffffffffffffffffffffffff",
+    })
+    authorization = issue_authorization()
+
+    result = handler.redeem_home_connector_pairing_v3(signed_redemption(authorization))
+
+    assert result["statusCode"] == 409
+    assert "profile_jellyfin_binding_conflict" in result["body"]
+    assert profiles.items["profile-1"]["jellyfin_user_id"] == "ffffffffffffffffffffffffffffffff"
+    assert sessions.items[next(key for key, value in sessions.items.items() if value.get("record_type") == "pairing_v3_authorization")]["state"] == "active"
+
+
 def test_bad_plugin_signature_does_not_consume_authorization(v3_tables):
-    sessions, _ = v3_tables
+    sessions, _, _ = v3_tables
     authorization = issue_authorization()
     request = signed_redemption(authorization)
     request["headers"]["X-Kaevo-Plugin-Signature"] = "A" * 86
@@ -345,7 +449,7 @@ def test_structured_logging_does_not_emit_authorization_or_identifiers(v3_tables
     assert result["statusCode"] == 201
     emitted = "\n".join(record.getMessage() for record in caplog.records)
     assert authorization not in emitted
-    assert "jellyfin-user-1" not in emitted
+    assert "0123456789abcdef0123456789abcdef" not in emitted
     assert "jellyfin-v3-test-01" not in emitted
     assert "pairingAttemptId" not in emitted
     v3_records = [record for record in caplog.records if "kaevo_pairing_v3" in record.getMessage()]

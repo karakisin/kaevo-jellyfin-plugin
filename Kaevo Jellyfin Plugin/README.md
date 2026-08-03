@@ -9,7 +9,7 @@ metadata access without requiring a separate Kaevo server installation.
 - Jellyfin: `10.11.x`
 - .NET target: `net8.0`
 - Foundation baseline: `0.1.0`
-- Current repository build: `0.2.53`
+- Current repository build: `0.2.82`
 - Supported phase: local metadata, app-guided Cloud activation, and guarded remote playback
 
 Current endpoints:
@@ -35,11 +35,11 @@ transcoded to AAC before secure delivery. Remote mutations and optimizer
 execution remain disabled.
 
 The plugin settings page can privately store and independently enable local
-connections for Sonarr, Radarr, Seerr, Lidarr, Readarr, Prowlarr, Bazarr, and
-Tdarr. API keys and local addresses remain on the Jellyfin server. Sonarr
-missing-episode search, progress, cancellation, and guarded removal are the
-first active provider workflow; the other connections are foundations for the
-next provider-specific features.
+connections for Sonarr, Radarr, Seerr, Lidarr, Readarr, Prowlarr, Bazarr,
+Tdarr, SABnzbd, and qBittorrent. API keys, download-client credentials, and
+local addresses remain on the Jellyfin server. SABnzbd and qBittorrent are
+read-only health and queue integrations; Kaevo Cloud cannot submit, remove, or
+otherwise mutate downloads through them.
 
 ## Privacy boundary
 

@@ -46,6 +46,12 @@
             border: 1px solid rgba(231,196,139,.55) !important; box-shadow: none !important;
             cursor: not-allowed; opacity: 1;
         }
+        #KaevoConfigPage #KaevoRepairPairing { margin-top: .8rem; }
+        #KaevoConfigPage .kaevo-warning {
+            margin-top: 1.2rem; padding: 1rem 1.1rem; border: 1px solid rgba(231,196,139,.36);
+            border-radius: 16px; background: rgba(185,135,63,.10); color: var(--kaevo-muted); line-height: 1.5;
+        }
+        #KaevoConfigPage .kaevo-warning strong { color: var(--kaevo-text); }
         #KaevoConfigPage #KaevoPairingTicket {
             padding: 1.4rem; margin: 1.2rem 0 0; border: 1px solid var(--kaevo-border);
             border-radius: 18px; background: rgba(8,10,13,.52);
@@ -126,6 +132,12 @@
                 border:1px solid rgba(231,196,139,.55) !important; box-shadow:none !important;
                 cursor:not-allowed; opacity:1;
             }
+            #KaevoConfigPage #KaevoRepairPairing { margin-top:.8rem; }
+            #KaevoConfigPage .kaevo-warning {
+                margin-top:1.2rem; padding:1rem 1.1rem; border:1px solid rgba(231,196,139,.36);
+                border-radius:16px; background:rgba(185,135,63,.10); color:var(--kaevo-muted); line-height:1.5;
+            }
+            #KaevoConfigPage .kaevo-warning strong { color:var(--kaevo-text); }
             #KaevoConfigPage #KaevoPairingTicket {
                 padding:1.4rem; margin:1.2rem 0 0; border:1px solid var(--kaevo-border);
                 border-radius:18px; background:rgba(8,10,13,.52); text-align:center;
@@ -187,6 +199,9 @@
                     <button id="KaevoCreatePairing" is="emby-button" type="button" class="raised button-submit block emby-button">
                         <span>Connect Kaevo App</span>
                     </button>
+                    <button id="KaevoRepairPairing" is="emby-button" type="button" class="emby-button" hidden>
+                        <span>Repair Kaevo Connection</span>
+                    </button>
                     <section id="KaevoPairingTicket" hidden aria-live="polite">
                         <img id="KaevoPairingQr" alt="Kaevo one-time pairing QR code" width="240" height="240" />
                         <p id="KaevoPairingCodeLabel" class="kaevo-code-label">Here’s your one-time code</p>
@@ -194,6 +209,10 @@
                         <p id="KaevoPairingExpiry" class="kaevo-countdown">It expires in <strong id="KaevoPairingCountdown">10:00</strong> and works once.</p>
                     </section>
                     </section>
+
+                    <aside class="kaevo-warning" role="note">
+                        <strong>Before uninstalling:</strong> removing Kaevo removes this server's local private key and connection secrets. Kaevo will lose access to this Jellyfin server. To reconnect, reinstall the plugin and use <strong>Repair Kaevo Connection</strong> to scan a new signed QR code.
+                    </aside>
 
                     <section class="kaevo-card">
                     <h3>Library Snapshot</h3>
@@ -219,6 +238,7 @@
                 <div class="kaevo-card">
                     <h3>Media Services</h3>
                     <p class="kaevo-card-intro">Connect services running on this home server. Each connection stays here and can be turned on or off independently.</p>
+                    <p class="fieldDescription">Supported services include Sonarr, Radarr, Seerr, SABnzbd, and qBittorrent. Download-client credentials remain local to this server.</p>
                     <div id="KaevoProviderList"></div>
                 </div>
             </div>
@@ -257,6 +277,7 @@
                 var enabled = KaevoConfig.pairingV3Enabled;
                 var paired = enabled && KaevoConfig.pairingV3Connected === true;
                 var button = document.querySelector('#KaevoCreatePairing');
+                var repairButton = document.querySelector('#KaevoRepairPairing');
                 button.disabled = paired;
                 button.setAttribute('aria-disabled', paired ? 'true' : 'false');
                 button.setAttribute('data-connected', paired ? 'true' : 'false');
@@ -270,6 +291,7 @@
                         ? 'Secure Pairing V3 is complete. Create another QR only if Kaevo asks you to reconnect.'
                         : 'Create a signed Pairing V3 QR, then confirm this Jellyfin server in Kaevo while you are at home.'
                     : 'Create a private connection, then scan the QR code or enter the one-time code in Kaevo while you are at home.';
+                repairButton.hidden = !paired;
             }
 
             function renderPairingV3Status(status) {
@@ -325,7 +347,9 @@
                         Enabled: raw.Enabled === true || raw.enabled === true,
                         Configured: raw.Configured === true || raw.configured === true,
                         BaseUrl: raw.BaseUrl || raw.baseUrl || '',
-                        RequiresApiKey: raw.RequiresApiKey === true || raw.requiresApiKey === true
+                        RequiresApiKey: raw.RequiresApiKey === true || raw.requiresApiKey === true,
+                        RequiresUsernamePassword: raw.RequiresUsernamePassword === true || raw.requiresUsernamePassword === true,
+                        Category: raw.Category || raw.category || 'Media Automation'
                     };
                 });
                 KaevoConfig.providers = providers;
@@ -333,6 +357,12 @@
                     var keyField = provider.RequiresApiKey
                         ? '<div class="inputContainer"><label class="inputLabel inputLabelUnfocused">API key</label>'
                             + '<input id="KaevoProvider-' + provider.Provider + '-key" type="password" is="emby-input" autocomplete="new-password" placeholder="Leave blank to keep the saved key" /></div>'
+                        : '';
+                    var loginFields = provider.RequiresUsernamePassword
+                        ? '<div class="inputContainer"><label class="inputLabel inputLabelUnfocused">Username</label>'
+                            + '<input id="KaevoProvider-' + provider.Provider + '-username" type="text" is="emby-input" autocomplete="username" placeholder="Leave blank to keep the saved username" /></div>'
+                            + '<div class="inputContainer"><label class="inputLabel inputLabelUnfocused">Password</label>'
+                            + '<input id="KaevoProvider-' + provider.Provider + '-password" type="password" is="emby-input" autocomplete="new-password" placeholder="Leave blank to keep the saved password" /></div>'
                         : '';
                     var connected = provider.Enabled && provider.Configured;
                     return '<section class="kaevo-provider-card">'
@@ -344,6 +374,7 @@
                         + '<div class="inputContainer"><label class="inputLabel inputLabelUnfocused">Local address</label>'
                         + '<input id="KaevoProvider-' + provider.Provider + '-url" type="url" is="emby-input" value="' + escapeHtml(provider.BaseUrl) + '" placeholder="http://192.168.1.10:port" /></div>'
                         + keyField
+                        + loginFields
                         + '<button is="emby-button" type="button" class="raised emby-button" data-save-provider="' + provider.Provider + '"><span>Save ' + provider.DisplayName + '</span></button>'
                         + '</section>';
                 }).join('');
@@ -394,6 +425,8 @@
                 if (!button) return;
                 var provider = button.getAttribute('data-save-provider');
                 var keyInput = providerValue(provider, 'key');
+                var usernameInput = providerValue(provider, 'username');
+                var passwordInput = providerValue(provider, 'password');
                 Dashboard.showLoadingMsg();
                 ApiClient.ajax({
                     type: 'POST',
@@ -402,6 +435,8 @@
                     data: JSON.stringify({
                         BaseUrl: providerValue(provider, 'url').value.trim(),
                         ApiKey: keyInput ? keyInput.value.trim() : '',
+                        Username: usernameInput ? usernameInput.value.trim() : '',
+                        Password: passwordInput ? passwordInput.value : '',
                         Enabled: providerValue(provider, 'enabled').checked
                     })
                 }).then(function () {
@@ -415,8 +450,8 @@
                 });
             });
 
-            document.querySelector('#KaevoCreatePairing').addEventListener('click', function () {
-                if (KaevoConfig.pairingV3Enabled && KaevoConfig.pairingV3Connected) return;
+            function createPairingTicket(isRepair) {
+                if (KaevoConfig.pairingV3Enabled && KaevoConfig.pairingV3Connected && !isRepair) return;
                 Dashboard.showLoadingMsg();
                 var startRequest;
                 if (KaevoConfig.pairingV3Enabled) {
@@ -469,6 +504,15 @@
                 }).finally(function () {
                     Dashboard.hideLoadingMsg();
                 });
+            }
+
+            document.querySelector('#KaevoCreatePairing').addEventListener('click', function () {
+                createPairingTicket(false);
+            });
+
+            document.querySelector('#KaevoRepairPairing').addEventListener('click', function () {
+                if (!window.confirm('Create a new one-time signed repair QR? Your current Kaevo connection stays active until the repair is completed.')) return;
+                createPairingTicket(true);
             });
 
             document.querySelector('#KaevoConfigPage').addEventListener('pagehide', stopPairingCountdown);

@@ -28,7 +28,7 @@ def local_v3_tables(monkeypatch):
     dynamo = resource()
     client = dynamo.meta.client
     tables = {}
-    for name, key in (("pairing-v3-sessions", "token_hash"), ("pairing-v3-connectors", "connector_id")):
+    for name, key in (("pairing-v3-sessions", "token_hash"), ("pairing-v3-connectors", "connector_id"), ("pairing-v3-profiles", "profile_id")):
         try:
             client.delete_table(TableName=name)
             client.get_waiter("table_not_exists").wait(TableName=name)
@@ -40,6 +40,15 @@ def local_v3_tables(monkeypatch):
     monkeypatch.setattr(handler, "dynamodb", dynamo)
     monkeypatch.setattr(handler, "app_sessions_table", tables["pairing-v3-sessions"])
     monkeypatch.setattr(handler, "home_connectors_table", tables["pairing-v3-connectors"])
+    monkeypatch.setattr(handler, "identity_profiles_table", tables["pairing-v3-profiles"])
+    tables["pairing-v3-profiles"].put_item(Item={"profile_id": "profile-1", "state": "active", "household_id": "family-1"})
+    monkeypatch.setattr(
+        handler,
+        "_household_identity_profile_records",
+        lambda _household_id: [item] if (item := tables["pairing-v3-profiles"].get_item(
+            Key={"profile_id": "profile-1"}, ConsistentRead=True,
+        ).get("Item")) else [],
+    )
     monkeypatch.setattr(handler, "PAIRING_V3_AUTHORIZATION_SIGNING_SEED", pairing_v3.b64url_encode(b"A" * 32))
     monkeypatch.setattr(handler, "PAIRING_V3_AUTHORIZATION_KEY_ID", "dynamodb-local-vector")
     monkeypatch.setattr(handler, "KAEVO_ENV", "test")
@@ -52,7 +61,7 @@ def local_v3_tables(monkeypatch):
 
 def bindings():
     public = pairing_v3.ed25519_public_key_from_seed(b"B" * 32)
-    return {"protocol": pairing_v3.PROTOCOL, "pairingAttemptId": "123e4567-e89b-12d3-a456-426614174000", "ticketId": "ticket-v3-ddb-01", "pluginInstanceId": "plugin-v3-ddb-01", "pluginPublicKeyFingerprint": pairing_v3.plugin_fingerprint(public), "jellyfinServerId": "server-v3-ddb-01", "jellyfinUserId": "jellyfin-user-1", "iosDeviceId": "ios-device-1"}
+    return {"protocol": pairing_v3.PROTOCOL, "pairingAttemptId": "123e4567-e89b-12d3-a456-426614174000", "ticketId": "ticket-v3-ddb-01", "pluginInstanceId": "plugin-v3-ddb-01", "pluginPublicKeyFingerprint": pairing_v3.plugin_fingerprint(public), "jellyfinServerId": "server-v3-ddb-01", "jellyfinUserId": "0123456789abcdef0123456789abcdef", "iosDeviceId": "ios-device-1"}
 
 
 def redemption(authorization, nonce):

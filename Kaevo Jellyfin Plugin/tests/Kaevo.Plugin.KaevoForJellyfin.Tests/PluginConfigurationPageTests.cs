@@ -26,6 +26,11 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("Kaevo App Connected", page, StringComparison.Ordinal);
         Assert.Contains("button.disabled = paired", page, StringComparison.Ordinal);
         Assert.Contains("KaevoConfig.pairingV3Connected", page, StringComparison.Ordinal);
+        Assert.Contains("KaevoRepairPairing", page, StringComparison.Ordinal);
+        Assert.Contains("Create a new one-time signed repair QR", page, StringComparison.Ordinal);
+        Assert.Contains("Before uninstalling:", page, StringComparison.Ordinal);
+        Assert.Contains("SABnzbd", page, StringComparison.Ordinal);
+        Assert.Contains("qBittorrent", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoCreatePairing:disabled", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoCreatePairing[data-connected=\"true\"]", page, StringComparison.Ordinal);
         Assert.Contains("button.setAttribute('data-connected', paired ? 'true' : 'false')", page, StringComparison.Ordinal);

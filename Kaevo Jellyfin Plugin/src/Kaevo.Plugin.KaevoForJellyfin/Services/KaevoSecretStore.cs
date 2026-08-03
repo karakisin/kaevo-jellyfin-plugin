@@ -8,7 +8,9 @@ public sealed record KaevoLocalProviderSecret(
     string ApiKey,
     bool Enabled = true,
     string[]? ApprovedAddresses = null,
-    string DestinationClass = "private");
+    string DestinationClass = "private",
+    string Username = "",
+    string Password = "");
 
 public sealed record KaevoConnectorSecrets(
     string ConnectorToken,
