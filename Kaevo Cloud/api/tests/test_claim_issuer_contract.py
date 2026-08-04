@@ -127,7 +127,11 @@ def native_cognito(**overrides):
         "SupportedIdentityProviders": ["COGNITO"],
         "CallbackURLs": ["kaevo-security-stage://oauth/callback"],
         "LogoutURLs": ["kaevo-security-stage://oauth/logout"],
-        "ExplicitAuthFlows": ["ALLOW_USER_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
+        "ExplicitAuthFlows": [
+            "ALLOW_USER_AUTH",
+            "ALLOW_USER_PASSWORD_AUTH",
+            "ALLOW_REFRESH_TOKEN_AUTH",
+        ],
         "DefaultRedirectURI": "kaevo-security-stage://oauth/callback",
     }
     configuration.update(overrides)
@@ -271,7 +275,6 @@ def test_native_member_refresh_uses_its_member_account_with_the_owner_household(
 
 
 @pytest.mark.parametrize("trigger", [
-    "TokenGeneration_Authentication",
     "TokenGeneration_NewPasswordChallenge",
     "TokenGeneration_AuthenticateDevice",
     "TokenGeneration_ClientCredentials",
@@ -280,6 +283,17 @@ def test_native_rejects_every_non_hosted_auth_trigger(trigger):
     dynamo, _ = graph()
     with pytest.raises(AuthorityError):
         issue_claims(native_event(triggerSource=trigger), dynamodb=dynamo, cognito=native_cognito())
+
+
+def test_native_client_accepts_direct_email_password_authentication_trigger():
+    dynamo, _ = graph()
+    result = issue_claims(
+        native_event(triggerSource="TokenGeneration_Authentication"),
+        dynamodb=dynamo,
+        cognito=native_cognito(),
+    )
+    claims = result["response"]["claimsAndScopeOverrideDetails"]["accessTokenGeneration"]["claimsToAddOrOverride"]
+    assert claims["role"] == "owner"
 
 
 @pytest.mark.parametrize("client_name", [
@@ -312,7 +326,11 @@ def test_native_client_accepts_cognito_flow_order_without_broadening_policy():
     result = issue_claims(
         native_event(),
         dynamodb=dynamo,
-        cognito=native_cognito(ExplicitAuthFlows=["ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_AUTH"]),
+        cognito=native_cognito(ExplicitAuthFlows=[
+            "ALLOW_REFRESH_TOKEN_AUTH",
+            "ALLOW_USER_PASSWORD_AUTH",
+            "ALLOW_USER_AUTH",
+        ]),
     )
     assert result["response"]["claimsAndScopeOverrideDetails"]
 

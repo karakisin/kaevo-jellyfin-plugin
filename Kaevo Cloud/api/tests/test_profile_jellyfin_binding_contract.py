@@ -712,7 +712,7 @@ def test_failed_connector_compare_and_swap_never_updates_cloud(monkeypatch):
     assert "jellyfin_user_id" not in profiles.records[target_id]
 
 
-def test_binding_preflight_retains_absent_source_refusal_without_connector_record(monkeypatch):
+def test_binding_preflight_authorizes_an_explicitly_selected_unbound_target(monkeypatch):
     install_manager(monkeypatch)
     target_id = "profile_member_1234567890"
     provider_id = "0123456789abcdef0123456789abcdef"
@@ -739,9 +739,9 @@ def test_binding_preflight_retains_absent_source_refusal_without_connector_recor
 
     assert result["statusCode"] == 200
     operation = body(result)["operation"]
-    assert operation["phase"] == "safely_refused"
-    assert operation["source_state"] == "absent_without_proof"
-    assert operation["terminal_result"] == "safely_refused"
+    assert operation["phase"] == "mutation_authorized"
+    assert operation["source_state"] == "unbound_target_explicit"
+    assert operation["terminal_result"] == "preflight_eligible"
     persisted = next(iter(operations.records.values()))
     assert persisted["provider_user_fingerprint"] == handler._binding_operation_fingerprint(provider_id)
     assert "jellyfin_user_id" not in persisted
@@ -778,8 +778,41 @@ def test_binding_preflight_reuses_exact_operation_without_second_dispatch(monkey
     repeated = handler.preflight_profile_jellyfin_binding_v3(event, path)
 
     assert repeated["statusCode"] == 200
-    assert body(repeated)["operation"]["source_state"] == "absent_without_proof"
+    assert body(repeated)["operation"]["source_state"] == "unbound_target_explicit"
     assert calls == [1]
+
+
+def test_binding_preflight_refuses_a_partially_populated_target_when_owner_is_missing(monkeypatch):
+    install_manager(monkeypatch)
+    target_id = "profile_member_1234567890"
+    provider_id = "0123456789abcdef0123456789abcdef"
+    operations = BindingOperationTable()
+    profiles = ExactProfileTable([{
+        "profile_id": target_id,
+        "household_id": "household-1",
+        "state": "active",
+        "jellyfin_connector_id": "connector-stale",
+    }])
+    monkeypatch.setattr(handler, "binding_operations_table", operations)
+    monkeypatch.setattr(handler, "identity_profiles_table", profiles)
+    monkeypatch.setattr(handler, "remote_requests_table", object())
+    monkeypatch.setattr(handler, "_execute_profile_binding_connector_command", lambda *_args, **_kwargs: {
+        "state": "completed",
+        "connector_id": "connector-1",
+        "result": {"provider": "jellyfin", "owner_state": "missing"},
+    })
+
+    result = handler.preflight_profile_jellyfin_binding_v3({"body": json.dumps({
+        "operation_id": "operation_abcdefghijklmnopqrstuv",
+        "jellyfin_user_id": provider_id,
+        "explicit_confirmation": True,
+    })}, f"/v3/identity/profiles/{target_id}/jellyfin-binding-operations")
+
+    assert result["statusCode"] == 200
+    operation = body(result)["operation"]
+    assert operation["phase"] == "safely_refused"
+    assert operation["source_state"] == "absent_without_proof"
+    assert operation["terminal_result"] == "safely_refused"
 
 
 def test_binding_preflight_authorizes_only_a_same_household_deleted_source_tombstone(monkeypatch):

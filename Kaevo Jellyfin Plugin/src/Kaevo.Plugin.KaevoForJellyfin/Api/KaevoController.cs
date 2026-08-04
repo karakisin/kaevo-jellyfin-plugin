@@ -748,6 +748,42 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             : StatusCode(502, response);
     }
 
+    /// <summary>
+    /// Deletes one exact Seerr identity through the paired plugin.  The app
+    /// supplies the already-bound Jellyfin and Seerr identifiers; Seerr
+    /// administrator credentials remain server-side and deletion is reported
+    /// only after the plugin confirms the identity is absent.
+    /// </summary>
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpDelete("providers/seerr/jellyfin-user")]
+    public async Task<ActionResult<KaevoSeerrJellyfinUserDeletionResponse>> DeleteSeerrJellyfinUser(
+        [FromBody] KaevoSeerrJellyfinUserDeletionRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                request.JellyfinUserId,
+                out var normalizedUserId)
+            || request.SeerrUserId <= 0)
+        {
+            return BadRequest(new KaevoSeerrJellyfinUserDeletionResponse("invalid"));
+        }
+
+        var secrets = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (secrets?.GetProvider("seerr") is not { Enabled: true })
+        {
+            return Conflict(new KaevoSeerrJellyfinUserDeletionResponse("seerr_not_configured"));
+        }
+
+        var response = await _seerrIdentityProvisioning.DeleteExactJellyfinUserAsync(
+            secrets,
+            normalizedUserId,
+            request.SeerrUserId,
+            cancellationToken).ConfigureAwait(false);
+        return response.State == "deleted"
+            ? Ok(response)
+            : StatusCode(502, response);
+    }
+
     [HttpGet("media-scan")]
     public ActionResult<KaevoMediaScanResponse> GetMediaScan()
     {

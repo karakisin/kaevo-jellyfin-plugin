@@ -91,6 +91,48 @@ public sealed class SeerrIdentityProvisioningServiceTests
         Assert.DoesNotContain("DELETE", methods);
     }
 
+    [Fact]
+    public async Task DeletesOnlyTheExactBoundSeerrAndJellyfinIdentity()
+    {
+        var deleted = false;
+        var service = new KaevoSeerrIdentityProvisioningService((_, method, path, _, _) =>
+        {
+            if (method == HttpMethod.Delete && path == "/api/v1/user/42")
+            {
+                deleted = true;
+                return Task.FromResult(Response("{}"));
+            }
+            var users = deleted
+                ? "{\"results\":[]}"
+                : $"{{\"results\":[{{\"id\":42,\"jellyfinUserId\":\"{JellyfinUserId}\",\"permissions\":32}}]}}";
+            return Task.FromResult(Response(users));
+        });
+
+        var result = await service.DeleteExactJellyfinUserAsync(
+            Secrets(), JellyfinUserId, 42, CancellationToken.None);
+
+        Assert.Equal("deleted", result.State);
+        Assert.True(deleted);
+    }
+
+    [Fact]
+    public async Task RefusesDeletionWhenTheExactJellyfinBindingDoesNotMatch()
+    {
+        var deleted = false;
+        var service = new KaevoSeerrIdentityProvisioningService((_, method, _, _, _) =>
+        {
+            deleted |= method == HttpMethod.Delete;
+            return Task.FromResult(Response(
+                "{\"results\":[{\"id\":42,\"jellyfinUserId\":\"abcdefabcdefabcdefabcdefabcdefab\",\"permissions\":32}]}"));
+        });
+
+        var result = await service.DeleteExactJellyfinUserAsync(
+            Secrets(), JellyfinUserId, 42, CancellationToken.None);
+
+        Assert.Equal("seerr_identity_mismatch", result.State);
+        Assert.False(deleted);
+    }
+
     private static KaevoConnectorSecrets Secrets() => new(
         "connector", "playback", "jellyfin", Providers: new Dictionary<string, KaevoLocalProviderSecret>
         {

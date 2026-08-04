@@ -933,6 +933,11 @@ Resources:
       PreventUserExistenceErrors: ENABLED
       ExplicitAuthFlows:
         - ALLOW_USER_AUTH
+        # The Kaevo app uses this public-client flow for its first-party,
+        # native email/password screens. It does not expose a client secret
+        # and does not alter the managed-login OAuth code flow used by social
+        # providers.
+        - ALLOW_USER_PASSWORD_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
       AllowedOAuthFlowsUserPoolClient: true
       AllowedOAuthFlows:
@@ -1876,6 +1881,30 @@ Resources:
       ApiId: !Ref KaevoCloudHttpApi
       AuthorizationType: NONE
       RouteKey: POST /v3/identity/profiles/{profileId}/bindings
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3SetProfileSwitchPINRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: PUT /v3/identity/profiles/{profileId}/switch-pin
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3VerifyProfileSwitchPINRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/profiles/{profileId}/switch-pin/verify
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3UpdateProfileSwitchTargetsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: PUT /v3/identity/profiles/{profileId}/switch-targets
       Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
 
   KaevoIdentityV3SaveProfileJellyfinBindingRoute:

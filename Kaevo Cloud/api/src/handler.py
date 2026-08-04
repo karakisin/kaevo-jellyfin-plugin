@@ -734,7 +734,20 @@ def identity_me_v3(event, *, verified_session=None):
             for item in profile_access + canonical_profile_access
             if str(item.get("profile_id") or "")
         }
+        # Profile switching is an explicit household grant retained on the
+        # authenticated member's canonical profile. Merge only those exact
+        # server-owned IDs; do not broaden access from a device-local profile
+        # list or a display-name match.
+        for item in _authorized_switch_target_access(
+            source_profile=profile,
+            household_id=claims.household_id,
+        ):
+            profile_access_by_id.setdefault(str(item["profile_id"]), item)
         profile_access = sorted(profile_access_by_id.values(), key=lambda item: item["profile_id"])
+        profile_access = _decorate_profile_access_with_switch_protection(
+            profile_access,
+            household_id=claims.household_id,
+        )
         if profile_access and security_audit_table is not None:
             try:
                 commit_security_audit(_profile_binding_audit(
@@ -815,7 +828,96 @@ def _normalized_self_profile_access(*, claims, resolved_role, normalized_members
         "display_name": display_name,
         "access_level": access_level,
         "status": "active",
+        "is_self": True,
     }]
+
+
+def _profile_switch_pin_configured(profile):
+    """Return only the non-secret presence of a profile-switch PIN."""
+    pin = profile.get("profile_switch_pin") if isinstance(profile, dict) else None
+    return (
+        isinstance(pin, dict)
+        and int(pin.get("version") or 0) == 1
+        and isinstance(pin.get("salt"), str)
+        and isinstance(pin.get("hash"), str)
+    )
+
+
+def _profile_switch_protection(profile):
+    """Describe entry protection without exposing a credential or policy secret."""
+    if str((profile or {}).get("household_access_role") or "").lower() == HouseholdAccessRole.OWNER.value:
+        return "owner_direct"
+    return "pin_required" if _profile_switch_pin_configured(profile) else "not_configured"
+
+
+def _authorized_switch_target_access(*, source_profile, household_id):
+    """Resolve only explicit, active, same-household profile-switch grants.
+
+    The source profile is the authenticated member's exact canonical profile.
+    This deliberately uses its retained immutable IDs and strongly consistent
+    reads; display names, a local cache, and broad table scans never grant
+    entry to another household profile.
+    """
+    if not isinstance(source_profile, dict):
+        return []
+    candidates = source_profile.get("switch_profile_ids") or []
+    if not isinstance(candidates, list) or len(candidates) > 64:
+        return []
+    resolved = []
+    seen = set()
+    for value in candidates:
+        profile_id = str(value or "").strip()
+        if not profile_id or profile_id in seen:
+            continue
+        seen.add(profile_id)
+        target = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+        if (
+            not isinstance(target, dict)
+            or target.get("state") != "active"
+            or str(target.get("profile_id") or "") != profile_id
+            or str(target.get("household_id") or "") != household_id
+        ):
+            continue
+        display_name = str(target.get("display_name") or "").strip()
+        profile_type = str(target.get("profile_type") or "").strip().lower()
+        if not display_name or profile_type not in {"adult", "teen", "child", "kid"}:
+            continue
+        resolved.append({
+            "profile_id": profile_id,
+            "profile_type": profile_type,
+            "display_name": display_name,
+            "access_level": "switch",
+            "status": "active",
+            "switch_protection": _profile_switch_protection(target),
+        })
+    return resolved
+
+
+def _decorate_profile_access_with_switch_protection(items, *, household_id):
+    decorated = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        profile_id = str(item.get("profile_id") or "")
+        target = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item") if profile_id else None
+        result = dict(item)
+        if (
+            isinstance(target, dict)
+            and target.get("state") == "active"
+            and str(target.get("household_id") or "") == household_id
+        ):
+            result["switch_protection"] = _profile_switch_protection(target)
+        else:
+            # Legacy profile projections do not gain PIN protection by
+            # absence. They remain direct only until their canonical identity
+            # is available for a fresh server-authoritative decision.
+            result["switch_protection"] = "not_configured"
+        decorated.append(result)
+    return decorated
 
 
 def _identity_migration_audit(event, session, event_type, result, *, reason_code=""):
@@ -2353,6 +2455,21 @@ def profile_binding_path_id(path):
     return match.group(1) if match else ""
 
 
+def profile_switch_pin_path_id(path):
+    match = re.fullmatch(r"/v3/identity/profiles/([^/]+)/switch-pin", str(path or ""))
+    return match.group(1) if match else ""
+
+
+def profile_switch_pin_verification_path_id(path):
+    match = re.fullmatch(r"/v3/identity/profiles/([^/]+)/switch-pin/verify", str(path or ""))
+    return match.group(1) if match else ""
+
+
+def profile_switch_targets_path_id(path):
+    match = re.fullmatch(r"/v3/identity/profiles/([^/]+)/switch-targets", str(path or ""))
+    return match.group(1) if match else ""
+
+
 def profile_deletion_path_id(path):
     match = re.fullmatch(r"/v3/identity/profiles/([^/]+)/deletion", str(path or ""))
     return match.group(1) if match else ""
@@ -2890,7 +3007,24 @@ def _binding_operation_source_state(*, inspected, canonical, household_id, manag
     owner_state = str((result or {}).get("owner_state") or "") if isinstance(result, dict) else ""
     source_profile_id = str((result or {}).get("source_profile_id") or "") if isinstance(result, dict) else ""
     if owner_state == "missing":
-        return "absent_without_proof", "missing", ""
+        # This is a new, explicitly-confirmed binding only when the target is
+        # itself completely unbound.  The connector has proved that the exact
+        # Jellyfin user has no existing owner, while the canonical record
+        # proves the target is an active household profile.  Do not broaden
+        # this to a partially populated or active target: those states need
+        # durable lineage before any mutation can be authorized.
+        target_is_completely_unbound = (
+            isinstance(canonical, dict)
+            and str(canonical.get("state") or "") == "active"
+            and str(canonical.get("jellyfin_binding_state") or "") != "active"
+            and not str(canonical.get("jellyfin_connector_id") or "")
+            and not _normalized_jellyfin_user_id(canonical.get("jellyfin_user_id"))
+        )
+        return (
+            ("unbound_target_explicit", "missing", "")
+            if target_is_completely_unbound
+            else ("absent_without_proof", "missing", "")
+        )
     if owner_state != "found" or not re.fullmatch(r"profile_[A-Za-z0-9_-]{16,128}", source_profile_id):
         return "ambiguous", "invalid", ""
     target_profile_id = str((canonical or {}).get("profile_id") or "")
@@ -2978,6 +3112,7 @@ def preflight_profile_jellyfin_binding_v3(event, path):
         manager_profile_id=manager_profile_id,
     )
     eligible = source_state in {
+        "unbound_target_explicit",
         "inactive_or_deleted_with_lineage",
         "absent_with_valid_tombstone",
         "target_already_bound",
@@ -3092,6 +3227,7 @@ def save_profile_jellyfin_binding_v3(event, path):
         ):
             return response(409, {"state": "binding_operation_conflict"})
         if str(binding_operation.get("source_state") or "") not in {
+            "unbound_target_explicit",
             "inactive_or_deleted_with_lineage",
             "absent_with_valid_tombstone",
             "target_already_bound",
@@ -3540,6 +3676,217 @@ def create_profile_binding_v3(event, path, *, verified_session=None, retry_on_co
     return response(200, {"state": "profile_binding_created"})
 
 
+def _switch_pin_material(pin):
+    """Create a versioned, salted verifier; the PIN itself never persists."""
+    value = str(pin or "")
+    if not (4 <= len(value) <= 8 and value.isascii() and value.isdigit()):
+        raise AccountFoundationError("invalid_profile_switch_pin")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(value.encode("utf-8"), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+    return {
+        "version": 1,
+        "algorithm": "scrypt-n16384-r8-p1-dk32",
+        "salt": base64.b64encode(salt).decode("ascii"),
+        "hash": base64.b64encode(digest).decode("ascii"),
+        "updated_at": utc_now_iso(),
+        "updated_at_epoch": epoch_now(),
+    }
+
+
+def _verify_switch_pin(material, pin):
+    if not _profile_switch_pin_configured({"profile_switch_pin": material}):
+        return False
+    try:
+        salt = base64.b64decode(str(material["salt"]), validate=True)
+        expected = base64.b64decode(str(material["hash"]), validate=True)
+        actual = hashlib.scrypt(
+            str(pin or "").encode("utf-8"), salt=salt, n=2 ** 14, r=8, p=1, dklen=len(expected),
+        )
+        return hmac.compare_digest(actual, expected)
+    except (TypeError, ValueError):
+        return False
+
+
+def _exact_identity_profile(profile_id, *, household_id):
+    profile = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if (
+        not isinstance(profile, dict)
+        or profile.get("state") != "active"
+        or str(profile.get("profile_id") or "") != profile_id
+        or str(profile.get("household_id") or "") != household_id
+    ):
+        raise AccountFoundationError("profile_switch_target_not_authorized")
+    return profile
+
+
+def _profile_switch_failure(event, session, state, *, profile_id=""):
+    try:
+        commit_security_audit(_profile_binding_audit(
+            event, session, "profile_switch_security_rejected", "denied",
+            target_id=profile_id, reason_code=state,
+        ))
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    status = 403 if state in {
+        "profile_switch_not_authorized", "profile_switch_target_not_authorized",
+        "profile_switch_pin_configuration_not_authorized",
+    } else 409
+    return response(status, {"state": state})
+
+
+def set_profile_switch_pin_v3(event, path):
+    """Let only a signed-in profile set or change its own profile PIN."""
+    if any(table is None for table in (identity_profiles_table, security_audit_table)):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return failure
+    profile_id = profile_switch_pin_path_id(path)
+    body = parse_json_body(event)
+    if not profile_id or not isinstance(body, dict):
+        return _profile_switch_failure(event, session, "invalid_profile_switch_pin_request", profile_id=profile_id)
+    account_id = str((context.get("account") or {}).get("account_id") or "")
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    if profile_id != str(session.get("profile_id") or ""):
+        return _profile_switch_failure(event, session, "profile_switch_pin_configuration_not_authorized", profile_id=profile_id)
+    try:
+        profile = _exact_identity_profile(profile_id, household_id=household_id)
+        if str(profile.get("account_id") or "") != account_id:
+            return _profile_switch_failure(event, session, "profile_switch_pin_configuration_not_authorized", profile_id=profile_id)
+        material = _switch_pin_material(body.get("pin"))
+        identity_profiles_table.update_item(
+            Key={"profile_id": profile_id},
+            UpdateExpression="SET profile_switch_pin = :pin, updated_at = :updated, updated_at_epoch = :epoch",
+            ConditionExpression="#state = :active AND account_id = :account AND household_id = :household",
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":pin": material, ":updated": material["updated_at"], ":epoch": material["updated_at_epoch"],
+                ":active": "active", ":account": account_id, ":household": household_id,
+            },
+        )
+        commit_security_audit(_profile_binding_audit(
+            event, session, "profile_switch_pin_set", "success", target_id=profile_id,
+        ))
+    except AccountFoundationError as error:
+        return _profile_switch_failure(event, session, error.reason, profile_id=profile_id)
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError:
+        return _profile_switch_failure(event, session, "profile_switch_pin_conflict", profile_id=profile_id)
+    return response(200, {"state": "profile_switch_pin_configured", "pin_configured": True})
+
+
+def verify_profile_switch_pin_v3(event, path):
+    """Verify a target's PIN only after exact server-authorized switch access."""
+    if any(table is None for table in (identity_profiles_table, security_audit_table)):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return failure
+    profile_id = profile_switch_pin_verification_path_id(path)
+    body = parse_json_body(event)
+    if not profile_id or not isinstance(body, dict):
+        return _profile_switch_failure(event, session, "invalid_profile_switch_pin_request", profile_id=profile_id)
+    allowed = {
+        str(item.get("profile_id") or "")
+        for item in (context.get("profile_access") or [])
+        if item.get("status") == "active" and item.get("access_level") in {"switch", "manage"}
+    }
+    if profile_id not in allowed:
+        return _profile_switch_failure(event, session, "profile_switch_target_not_authorized", profile_id=profile_id)
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    try:
+        profile = _exact_identity_profile(profile_id, household_id=household_id)
+    except AccountFoundationError as error:
+        return _profile_switch_failure(event, session, error.reason, profile_id=profile_id)
+    if _profile_switch_protection(profile) == "owner_direct":
+        return response(200, {"state": "profile_switch_owner_direct", "verified": True})
+    if not _profile_switch_pin_configured(profile):
+        # A missing PIN intentionally leaves an explicitly granted profile
+        # accessible. The profile owner is invited to add protection later.
+        return response(200, {"state": "profile_switch_pin_not_configured", "verified": True})
+    if not _verify_switch_pin(profile.get("profile_switch_pin"), body.get("pin")):
+        return _profile_switch_failure(event, session, "profile_switch_pin_invalid", profile_id=profile_id)
+    try:
+        commit_security_audit(_profile_binding_audit(
+            event, session, "profile_switch_pin_verified", "success", target_id=profile_id,
+        ))
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    return response(200, {"state": "profile_switch_pin_verified", "verified": True})
+
+
+def update_profile_switch_targets_v3(event, path):
+    """Update explicit switch grants without changing a profile's identity.
+
+    Owners and household Admins may maintain member access. An Admin cannot
+    alter the Owner's grants, preserving the Owner's final household authority.
+    """
+    if any(table is None for table in (identity_profiles_table, security_audit_table)):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return failure
+    profile_id = profile_switch_targets_path_id(path)
+    body = parse_json_body(event)
+    if not profile_id or not isinstance(body, dict) or not isinstance(body.get("profile_ids"), list):
+        return _profile_switch_failure(event, session, "invalid_profile_switch_targets_request", profile_id=profile_id)
+    capabilities = set((context.get("household") or {}).get("capabilities") or [])
+    if "profile.switch_grant" not in capabilities:
+        return _profile_switch_failure(event, session, "profile_switch_not_authorized", profile_id=profile_id)
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    source_role = str((context.get("household") or {}).get("role") or "").lower()
+    requested = body.get("profile_ids")
+    if len(requested) > 32:
+        return _profile_switch_failure(event, session, "invalid_profile_switch_targets_request", profile_id=profile_id)
+    try:
+        source = _exact_identity_profile(profile_id, household_id=household_id)
+        if (
+            source_role != CanonicalRole.OWNER.value
+            and str(source.get("household_access_role") or "").lower() == HouseholdAccessRole.OWNER.value
+        ):
+            return _profile_switch_failure(event, session, "profile_switch_not_authorized", profile_id=profile_id)
+        profile_ids = []
+        for candidate in requested:
+            target_id = str(candidate or "").strip()
+            if not target_id or target_id == profile_id or target_id in profile_ids:
+                raise AccountFoundationError("invalid_profile_switch_targets_request")
+            _exact_identity_profile(target_id, household_id=household_id)
+            profile_ids.append(target_id)
+        now = utc_now_iso()
+        identity_profiles_table.update_item(
+            Key={"profile_id": profile_id},
+            UpdateExpression="SET switch_profile_ids = :targets, updated_at = :updated, updated_at_epoch = :epoch",
+            ConditionExpression="#state = :active AND household_id = :household",
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":targets": profile_ids, ":updated": now, ":epoch": epoch_now(),
+                ":active": "active", ":household": household_id,
+            },
+        )
+        commit_security_audit(_profile_binding_audit(
+            event, session, "profile_switch_grants_updated", "success", target_id=profile_id,
+        ))
+    except AccountFoundationError as error:
+        return _profile_switch_failure(event, session, error.reason, profile_id=profile_id)
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError:
+        return _profile_switch_failure(event, session, "profile_switch_targets_conflict", profile_id=profile_id)
+    return response(200, {"state": "profile_switch_targets_updated", "profile_ids": profile_ids})
+
+
 def _mapping_context(event, *, verified_session=None):
     session = verified_session if verified_session is not None else authenticated_app_session(event)
     if not session or session.get("record_type") != "access":
@@ -3662,9 +4009,37 @@ def _canonical_profile_deletion_context(*, profile_id, household_id, session):
         not isinstance(owner_principal, dict)
         or str(owner_principal.get("household_id") or "") != household_id
         or str(owner_principal.get("role") or "") != CanonicalRole.OWNER.value
-        or str(canonical_profile.get("owner_principal_id") or "") != owner_subject
     ):
         raise AccountFoundationError("profile_deletion_ownership_ambiguous")
+
+    recorded_owner_subject = str(canonical_profile.get("owner_principal_id") or "")
+    if recorded_owner_subject and not hmac.compare_digest(recorded_owner_subject, owner_subject):
+        # A retained owner edge is authoritative. Never overwrite a different
+        # owner during deletion, even when the active session is an Owner.
+        raise AccountFoundationError("profile_deletion_ownership_ambiguous")
+    if not recorded_owner_subject:
+        # Some pre-canonical member profiles have a complete exact member and
+        # household membership graph but predate the retained owner edge. The
+        # active, exact Owner session above is the only authority permitted to
+        # write that missing edge. A conditional write prevents this repair
+        # from replacing a concurrently established owner relationship.
+        try:
+            identity_profiles_table.update_item(
+                Key={"profile_id": profile_id},
+                UpdateExpression="SET #owner_principal_id = :owner_principal_id, updated_at = :updated_at",
+                ConditionExpression="attribute_not_exists(#owner_principal_id)",
+                ExpressionAttributeNames={"#owner_principal_id": "owner_principal_id"},
+                ExpressionAttributeValues={
+                    ":owner_principal_id": owner_subject,
+                    ":updated_at": utc_now_iso(),
+                },
+            )
+        except ClientError as error:
+            if str((error.response or {}).get("Error", {}).get("Code") or "") == "ConditionalCheckFailedException":
+                raise AccountFoundationError("profile_deletion_ownership_ambiguous") from error
+            raise
+        canonical_profile = dict(canonical_profile)
+        canonical_profile["owner_principal_id"] = owner_subject
 
     return {
         "profile": canonical_profile,
@@ -4153,16 +4528,13 @@ def _execute_canonical_profile_deletion(
                 devices_table.delete_item(Key={"device_id": device_id})
         if PROFILE_AVATARS_BUCKET and s3_client is not None:
             avatar_key = profile_avatar_key(profile_id)
+            # S3 delete operations are strongly consistent.  A successful
+            # DeleteObject response therefore confirms this exact avatar key
+            # is no longer readable, including when the key was already
+            # absent.  Do not follow it with HeadObject: without ListBucket,
+            # S3 deliberately returns 403 for an absent key, which used to
+            # turn a completed provider cleanup into a false Cloud failure.
             s3_client.delete_object(Bucket=PROFILE_AVATARS_BUCKET, Key=avatar_key)
-            try:
-                s3_client.head_object(Bucket=PROFILE_AVATARS_BUCKET, Key=avatar_key)
-            except ClientError as error:
-                if str((error.response or {}).get("Error", {}).get("Code") or "") not in {
-                    "404", "NoSuchKey", "NotFound",
-                }:
-                    raise
-            else:
-                raise AccountFoundationError("profile_deletion_absence_unconfirmed")
 
         if isinstance(membership, dict):
             household_memberships_table.delete_item(Key={
@@ -7752,10 +8124,7 @@ def create_household_invitation(event):
     )
     if (
         issuer_access_role == HouseholdAccessRole.ADMIN.value
-        and (
-            access_role is not HouseholdAccessRole.MEMBER
-            or switch_profile_ids
-        )
+        and access_role is not HouseholdAccessRole.MEMBER
     ):
         return response(403, {"state": "owner_required_for_authority_grant"})
     if access_role is HouseholdAccessRole.ADMIN and age_classification != "adult":
@@ -10600,6 +10969,15 @@ def lambda_handler(event, context):
 
     if method == "POST" and path == "/v3/identity/profiles":
         return create_profile_v3(event)
+
+    if method == "PUT" and profile_switch_pin_path_id(path):
+        return set_profile_switch_pin_v3(event, path)
+
+    if method == "POST" and profile_switch_pin_verification_path_id(path):
+        return verify_profile_switch_pin_v3(event, path)
+
+    if method == "PUT" and profile_switch_targets_path_id(path):
+        return update_profile_switch_targets_v3(event, path)
 
     if method == "POST" and profile_binding_path_id(path):
         return create_profile_binding_v3(event, path)

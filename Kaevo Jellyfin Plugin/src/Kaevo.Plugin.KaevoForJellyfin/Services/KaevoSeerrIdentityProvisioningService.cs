@@ -155,6 +155,71 @@ public sealed class KaevoSeerrIdentityProvisioningService
         }
     }
 
+    /// <summary>
+    /// Deletes only the Seerr user whose immutable Jellyfin identity and Seerr
+    /// identifier both match the caller's verified binding.  A successful
+    /// DELETE response is not sufficient: the subsequent authoritative user
+    /// list must contain neither identifier before deletion is reported.
+    /// </summary>
+    public async Task<KaevoSeerrJellyfinUserDeletionResponse> DeleteExactJellyfinUserAsync(
+        KaevoConnectorSecrets secrets,
+        string jellyfinUserId,
+        int seerrUserId,
+        CancellationToken cancellationToken)
+    {
+        if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(jellyfinUserId, out var normalizedUserId)
+            || seerrUserId <= 0)
+        {
+            return new("invalid");
+        }
+
+        try
+        {
+            var users = await ReadUsersAsync(secrets, cancellationToken).ConfigureAwait(false);
+            var exactMatches = users
+                .Where(user => user.Id == seerrUserId && user.JellyfinUserId == normalizedUserId)
+                .ToArray();
+            if (exactMatches.Length != 1) return new("seerr_identity_mismatch");
+
+            // Refuse an ambiguous relationship even if one row happens to
+            // match the requested Seerr ID.  Deletion must have one exact,
+            // immutable provider edge.
+            if (users.Count(user => user.JellyfinUserId == normalizedUserId) != 1)
+            {
+                return new("seerr_user_ambiguous");
+            }
+
+            await SendAsync(
+                secrets,
+                HttpMethod.Delete,
+                $"/api/v1/user/{seerrUserId}",
+                null,
+                cancellationToken).ConfigureAwait(false);
+
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                if (attempt > 0)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(350), cancellationToken).ConfigureAwait(false);
+                }
+                var readback = await ReadUsersAsync(secrets, cancellationToken).ConfigureAwait(false);
+                var targetStillExists = readback.Any(user =>
+                    user.Id == seerrUserId || user.JellyfinUserId == normalizedUserId);
+                if (!targetStillExists) return new("deleted");
+            }
+
+            return new("seerr_delete_unconfirmed");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return new("provider_unavailable");
+        }
+    }
+
     private async Task<IReadOnlyList<SeerrUser>> ReadUsersAsync(
         KaevoConnectorSecrets secrets,
         CancellationToken cancellationToken)

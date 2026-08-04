@@ -146,6 +146,18 @@ public sealed record KaevoSeerrJellyfinUserProvisionResponse(
     string State,
     int? SeerrUserId = null);
 
+/// <summary>
+/// Deletes one exact Seerr identity which was previously imported from the
+/// supplied Jellyfin user.  Both identifiers are required so this endpoint
+/// can never select a provider account by display name.
+/// </summary>
+public sealed record KaevoSeerrJellyfinUserDeletionRequest(
+    string JellyfinUserId,
+    int SeerrUserId);
+
+public sealed record KaevoSeerrJellyfinUserDeletionResponse(
+    string State);
+
 public sealed record KaevoProviderStatusResponse(
     string Provider,
     string DisplayName,

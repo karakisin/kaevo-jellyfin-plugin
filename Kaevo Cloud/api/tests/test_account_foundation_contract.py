@@ -110,6 +110,9 @@ class Table:
             item["deletion_execute_at_epoch"] = values[":execute_at"]
         if ":updated_at" in values:
             item["updated_at"] = values[":updated_at"]
+        if ":owner_principal_id" in values:
+            item["owner_principal_id"] = values[":owner_principal_id"]
+        self.items[key] = item
         if ":updated_epoch" in values:
             item["updated_at_epoch"] = values[":updated_epoch"]
         self.items[key] = item
@@ -894,6 +897,8 @@ def test_identity_me_exposes_only_the_exact_normalized_self_profile_for_replacem
         "display_name": "Owner",
         "access_level": "manage",
         "status": "active",
+        "is_self": True,
+        "switch_protection": "not_configured",
     }]
 
     # The exact profile edge is mandatory: a stale or unrelated pointer is
@@ -1343,6 +1348,46 @@ def test_canonical_member_retention_revokes_access_and_preserves_exact_recovery_
     assert tables["profile-settings"].items
     assert tables["entitlements"].items
     assert tables["devices"].items
+
+
+def test_canonical_member_deletion_repairs_only_a_missing_exact_owner_edge(monkeypatch):
+    tables, session, profile_id, _account_id, _subject, _source = (
+        install_canonical_member_deletion_graph(monkeypatch)
+    )
+    canonical = tables["identity-profiles"].items[profile_id]
+    canonical.pop("owner_principal_id")
+    tables["identity-profiles"].items[profile_id] = canonical
+
+    result = handler.delete_profile_v3(
+        {"body": json.dumps({
+            "mode": "retained_30_days",
+            "explicit_confirmation": True,
+        })},
+        f"/v3/identity/profiles/{profile_id}/deletion",
+    )
+
+    assert result["statusCode"] == 200
+    assert tables["identity-profiles"].items[profile_id]["owner_principal_id"] == session["principal_id"]
+
+
+def test_canonical_member_deletion_never_replaces_a_different_owner_edge(monkeypatch):
+    tables, _session, profile_id, _account_id, _subject, _source = (
+        install_canonical_member_deletion_graph(monkeypatch)
+    )
+    canonical = tables["identity-profiles"].items[profile_id]
+    canonical["owner_principal_id"] = "different-owner"
+    tables["identity-profiles"].items[profile_id] = canonical
+
+    result = handler.delete_profile_v3(
+        {"body": json.dumps({
+            "mode": "immediate",
+            "explicit_confirmation": True,
+        })},
+        f"/v3/identity/profiles/{profile_id}/deletion",
+    )
+
+    assert result["statusCode"] == 409
+    assert json.loads(result["body"])["state"] == "profile_deletion_ownership_ambiguous"
 
 
 def test_due_retained_profile_is_finalized_and_exact_absence_is_verified_on_owner_refresh(monkeypatch):
