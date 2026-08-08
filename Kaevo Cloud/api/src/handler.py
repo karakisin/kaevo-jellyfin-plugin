@@ -4545,6 +4545,49 @@ def _retain_deleted_profile_binding_tombstone(profile, *, household_id, now_epoc
         raise AccountFoundationError("profile_binding_tombstone_conflict")
 
 
+def _release_deleted_profile_cloud_seat(profile, *, household_id, now_iso):
+    """Release a deleted device profile from the exact household seat ledger.
+
+    A ledger may be absent on a household created before seat accounting. That
+    is safe: the next reservation rebuilds it from exact active memberships.
+    Cleanup never changes deletion success after the canonical profile is gone.
+    """
+    if not bool_value(profile.get("cloud_access_enabled"), True):
+        return
+    profile_id = str(profile.get("profile_id") or "")
+    account_id = str(profile.get("account_id") or "")
+    if not profile_id or not account_id or identity_households_table is None:
+        return
+    try:
+        identity_households_table.update_item(
+            Key={"household_id": household_id},
+            ConditionExpression=(
+                "account_id = :account_id AND #state = :active AND "
+                "(attribute_not_exists(cloud_seat_profile_ids) "
+                "OR contains(cloud_seat_profile_ids, :profile_id))"
+            ),
+            UpdateExpression=(
+                "DELETE cloud_seat_profile_ids :profile_id_set "
+                "SET updated_at = :updated_at"
+            ),
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":account_id": account_id,
+                ":active": "active",
+                ":profile_id": profile_id,
+                ":profile_id_set": {profile_id},
+                ":updated_at": now_iso,
+            },
+        )
+    except ClientError:
+        # This is a rebuildable accounting cache, never deletion authority.
+        # Do not report a successful canonical deletion as a cleanup failure.
+        LOGGER.warning(
+            "household_cloud_seat_release_deferred profile=%s",
+            _protected_identity_fingerprint(profile_id),
+        )
+
+
 def _execute_canonical_profile_deletion(
     event, session, context, graph, *, profile_id, household_id, mode,
 ):
@@ -4852,6 +4895,11 @@ def _execute_canonical_profile_deletion(
     if mode == "immediate":
         if exact_profile is not None:
             raise AccountFoundationError("profile_deletion_absence_unconfirmed")
+        _release_deleted_profile_cloud_seat(
+            exact_profile if isinstance(exact_profile, dict) else graph["profile"],
+            household_id=household_id,
+            now_iso=now_iso,
+        )
     elif (
         not isinstance(exact_profile, dict)
         or exact_profile.get("state") != "deletion_pending"

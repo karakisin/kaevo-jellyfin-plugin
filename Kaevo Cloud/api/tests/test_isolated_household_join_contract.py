@@ -586,6 +586,7 @@ def test_profile_setup_iam_allows_only_its_transactional_record_writes():
         "KaevoPrincipalsTable",
         "KaevoIdentityMembershipsTable",
         "KaevoHouseholdMembershipsTable",
+        "KaevoIdentityHouseholdsTable",
     }
     referenced = {
         line.strip().removeprefix("- !GetAtt ").removeprefix("Resource: !GetAtt ").removesuffix(".Arn")

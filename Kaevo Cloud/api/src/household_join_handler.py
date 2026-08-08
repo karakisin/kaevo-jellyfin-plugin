@@ -16,6 +16,7 @@ import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import boto3
+from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from account_foundation import (
     AccountFoundationError,
@@ -54,6 +55,7 @@ HOUSEHOLD_MEMBERSHIPS_TABLE = os.environ.get("HOUSEHOLD_MEMBERSHIPS_TABLE", "")
 PROFILE_BINDINGS_TABLE = os.environ.get("PROFILE_BINDINGS_TABLE", "")
 PROFILE_MAPPINGS_TABLE = os.environ.get("PROFILE_MAPPINGS_TABLE", "")
 CLOUD_PROFILES_TABLE = os.environ.get("CLOUD_PROFILES_TABLE", "")
+HOUSEHOLDS_TABLE = os.environ.get("IDENTITY_HOUSEHOLDS_TABLE", "")
 USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 EXPECTED_ISSUER = os.environ.get("EXPECTED_COGNITO_ISSUER", "")
 EXPECTED_CLIENT_ID = os.environ.get("EXPECTED_NATIVE_CLIENT_ID", "")
@@ -89,6 +91,7 @@ household_memberships = dynamodb.Table(HOUSEHOLD_MEMBERSHIPS_TABLE) if HOUSEHOLD
 profile_bindings = dynamodb.Table(PROFILE_BINDINGS_TABLE) if PROFILE_BINDINGS_TABLE else None
 profile_mappings = dynamodb.Table(PROFILE_MAPPINGS_TABLE) if PROFILE_MAPPINGS_TABLE else None
 cloud_profiles = dynamodb.Table(CLOUD_PROFILES_TABLE) if CLOUD_PROFILES_TABLE else None
+households = dynamodb.Table(HOUSEHOLDS_TABLE) if HOUSEHOLDS_TABLE else None
 cognito = boto3.client("cognito-idp")
 LOGGER = logging.getLogger(__name__)
 
@@ -119,6 +122,142 @@ def _sha(value):
 def _safe_fingerprint(value):
     """Return a short, domain-separated digest suitable for diagnostic correlation."""
     return _sha(f"household-join-diagnostic-v1:{value}")[:24] if value else ""
+
+
+def _active_cloud_seat_profile_ids(household_id):
+    """Return exact active, device-linked profile IDs for one household.
+
+    The household membership table is partitioned by its canonical household
+    ID, so this is a strongly consistent partition query rather than a Scan.
+    Parent-managed profiles do not create a membership and therefore never
+    consume a Cloud seat.
+    """
+    if household_memberships is None or not household_id:
+        raise AccountFoundationError("household_seat_storage_unavailable")
+    profile_ids = set()
+    query = {
+        "KeyConditionExpression": Key("household_id").eq(household_id),
+        "ConsistentRead": True,
+    }
+    while True:
+        page = household_memberships.query(**query)
+        for membership in page.get("Items", []):
+            if not isinstance(membership, dict):
+                continue
+            if (
+                membership.get("entity_type") != "HouseholdMembership"
+                or membership.get("status") != "active"
+            ):
+                continue
+            cloud_access = membership.get("cloud_access_enabled", True)
+            if not isinstance(cloud_access, bool):
+                raise AccountFoundationError("household_seat_membership_invalid")
+            profile_id = str(membership.get("profile_id") or "")
+            if cloud_access and profile_id:
+                profile_ids.add(profile_id)
+        last_key = page.get("LastEvaluatedKey")
+        if not last_key:
+            return profile_ids
+        query["ExclusiveStartKey"] = last_key
+
+
+def _family_seat_limit(entitlement_item):
+    """Read the owner-issued Family capacity without accepting client input."""
+    try:
+        entitlement = json.loads(str((entitlement_item or {}).get("entitlements_json") or "{}"))
+        if not isinstance(entitlement, dict):
+            raise AccountFoundationError("household_seat_entitlement_invalid")
+        limit = int(entitlement.get("family_seats"))
+    except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+        raise AccountFoundationError("household_seat_entitlement_invalid")
+    if (
+        entitlement.get("family_enabled") is not True
+        or entitlement.get("cloud_enabled") is not True
+        or not 1 <= limit <= 100
+    ):
+        raise AccountFoundationError("household_seat_entitlement_invalid")
+    return limit
+
+
+def _stored_household_cloud_seat_profile_ids(household_id, account_id):
+    """Read the exact seat ledger, if this household already has one."""
+    if households is None or not household_id or not account_id:
+        raise AccountFoundationError("household_seat_storage_unavailable")
+    household = households.get_item(
+        Key={"household_id": household_id}, ConsistentRead=True,
+    ).get("Item")
+    if not isinstance(household, dict) or not (
+        hmac.compare_digest(str(household.get("account_id") or ""), account_id)
+        and household.get("state") == "active"
+    ):
+        raise AccountFoundationError("household_seat_household_invalid")
+    stored = household.get("cloud_seat_profile_ids")
+    if stored is None:
+        return None
+    if not isinstance(stored, (set, list, tuple)):
+        raise AccountFoundationError("household_seat_ledger_invalid")
+    profile_ids = {str(profile_id or "") for profile_id in stored}
+    if not profile_ids or "" in profile_ids:
+        raise AccountFoundationError("household_seat_ledger_invalid")
+    return profile_ids
+
+
+def _household_seat_reservation_operation(
+    *, household_id, account_id, profile_id, seat_limit, existing_profile_ids,
+    stored_profile_ids, now_iso,
+):
+    """Atomically reserve one exact Cloud seat during Profile Setup.
+
+    Existing households have no ledger yet. Their first reservation seeds an
+    exact set from the strongly read active membership partition. If an older
+    ledger ever differs from that source of truth, this same guarded write
+    repairs it; no stale release can over-allocate a household.
+    """
+    if households is None or not household_id or not account_id or not profile_id:
+        raise AccountFoundationError("household_seat_storage_unavailable")
+    seeded_ids = set(existing_profile_ids)
+    if profile_id in seeded_ids or len(seeded_ids) >= seat_limit:
+        raise AccountFoundationError("family_seat_limit_reached")
+    seeded_ids.add(profile_id)
+    conditions = (
+        "account_id = :account_id AND #state = :active AND "
+    )
+    values = {
+        ":account_id": account_id,
+        ":active": "active",
+        ":seat_limit": seat_limit,
+        ":updated_at": now_iso,
+    }
+    if stored_profile_ids is None:
+        conditions += "attribute_not_exists(cloud_seat_profile_ids) AND :baseline_count < :seat_limit"
+        update_expression = "ADD cloud_seat_profile_ids :reservation SET updated_at = :updated_at"
+        values.update({
+            ":baseline_count": len(existing_profile_ids),
+            ":reservation": seeded_ids,
+        })
+    elif stored_profile_ids == set(existing_profile_ids):
+        conditions += "size(cloud_seat_profile_ids) < :seat_limit"
+        update_expression = "ADD cloud_seat_profile_ids :reservation SET updated_at = :updated_at"
+        values[":reservation"] = {profile_id}
+    else:
+        conditions += "cloud_seat_profile_ids = :stored_ledger AND :baseline_count < :seat_limit"
+        update_expression = "SET cloud_seat_profile_ids = :reservation, updated_at = :updated_at"
+        values.update({
+            ":stored_ledger": set(stored_profile_ids),
+            ":baseline_count": len(existing_profile_ids),
+            ":reservation": seeded_ids,
+        })
+    return {
+        "label": "household_seat_reservation",
+        "transaction": {"Update": {
+            "TableName": HOUSEHOLDS_TABLE,
+            "Key": {"household_id": household_id},
+            "ConditionExpression": conditions,
+            "UpdateExpression": update_expression,
+            "ExpressionAttributeNames": {"#state": "state"},
+            "ExpressionAttributeValues": values,
+        }},
+    }
 
 
 def _onboarding_status_rejection(event, reason, *, subject="", installation_hash="", item=None):
@@ -591,6 +730,16 @@ def _profile_setup_transaction_failure(error, operations):
                 index for index, reason in enumerate(reasons)
                 if isinstance(reason, dict) and reason.get("Code") != "None"
             ]
+            if (
+                len(failed) == 1
+                and reasons[failed[0]].get("Code") == "ConditionalCheckFailed"
+                and isinstance(operations[failed[0]], dict)
+                and str(operations[failed[0]].get("label") or "") == "household_seat_reservation"
+            ):
+                diagnostic["safe_error_category"] = "family_seat_limit_reached"
+                diagnostic["failed_transaction_operation"] = "household_seat_reservation"
+                print(json.dumps(diagnostic, separators=(",", ":")))
+                return _error("family_seat_limit_reached", 409)
             if (
                 len(failed) == 1
                 and reasons[failed[0]].get("Code") == "ConditionalCheckFailed"
@@ -1847,7 +1996,7 @@ def _consumed_invitation_jellyfin_binding(
 
 def profile_setup(event):
     required = (joins, invitations, principals, memberships, profiles, cloud_profiles, entitlements, household_memberships, profile_bindings, profile_mappings)
-    if any(table is None for table in required):
+    if households is None or any(table is None for table in required):
         return _error("household_join_unavailable", 503, True)
     subject, item, body, failure = _resume_context(event, method="POST", url=_profile_setup_url())
     if failure:
@@ -2002,11 +2151,27 @@ def profile_setup(event):
     except AccountFoundationError:
         return _error("transaction_invalid")
     entitlement = None
+    seat_reservation = None
     if action == "create_profile":
         owner_entitlement = entitlements.get_item(Key={"profile_id": str(item.get("owner_profile_id") or "")}, ConsistentRead=True).get("Item")
         if not owner_entitlement:
             return _error("manual_review_required", 409)
         entitlement = {"profile_id": profile_id, "entitlements_json": str(owner_entitlement.get("entitlements_json") or "{}"), "created_at": created, "updated_at": created}
+        if cloud_access_enabled:
+            try:
+                seat_reservation = _household_seat_reservation_operation(
+                    household_id=household_id,
+                    account_id=account_id,
+                    profile_id=profile_id,
+                    seat_limit=_family_seat_limit(owner_entitlement),
+                    existing_profile_ids=_active_cloud_seat_profile_ids(household_id),
+                    stored_profile_ids=_stored_household_cloud_seat_profile_ids(
+                        household_id, account_id,
+                    ),
+                    now_iso=created,
+                )
+            except AccountFoundationError as error:
+                return _error(error.reason, 409)
     normalized_key = {"household_id": household_id, "membership_id": household_membership_id(account_id, household_id)}
     active_authority = {
         "role": role,
@@ -2045,6 +2210,7 @@ def profile_setup(event):
         {"label": "profile_binding", "transaction": {"Put": {"TableName": PROFILE_BINDINGS_TABLE, "Item": binding, "ConditionExpression": "attribute_not_exists(account_id) AND attribute_not_exists(profile_id)"}}} if binding else None,
         {"label": "profile_mapping", "transaction": {"Put": {"TableName": PROFILE_MAPPINGS_TABLE, "Item": mapping, "ConditionExpression": "attribute_not_exists(installation_id) AND attribute_not_exists(local_profile_source_id)"}}},
         {"label": "copied_entitlement", "transaction": {"Put": {"TableName": ENTITLEMENTS_TABLE, "Item": entitlement, "ConditionExpression": "attribute_not_exists(profile_id)"}}} if entitlement else None,
+        seat_reservation,
         {"label": "principal", "transaction": {"Put": {
             "TableName": PRINCIPALS_TABLE,
             "Item": active_principal,

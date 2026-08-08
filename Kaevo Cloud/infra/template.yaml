@@ -2048,6 +2048,12 @@ Resources:
                   - !GetAtt KaevoProfilesTable.Arn
                   - !GetAtt KaevoProfileBindingsTable.Arn
                   - !GetAtt KaevoProfileMappingsTable.Arn
+                  - !GetAtt KaevoIdentityHouseholdsTable.Arn
+              - Sid: ReadActiveHouseholdCloudSeats
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource: !GetAtt KaevoHouseholdMembershipsTable.Arn
               - Sid: AtomicallyAdvanceHouseholdJoinOnboarding
                 Effect: Allow
                 Action:
@@ -2059,6 +2065,7 @@ Resources:
                   - !GetAtt KaevoIdentityMembershipsTable.Arn
                   - !GetAtt KaevoIdentityProfilesTable.Arn
                   - !GetAtt KaevoEntitlementsTable.Arn
+                  - !GetAtt KaevoIdentityHouseholdsTable.Arn
                   - !GetAtt KaevoAccountsTable.Arn
                   - !GetAtt KaevoAuthIdentitiesTable.Arn
                   - !GetAtt KaevoHouseholdMembershipsTable.Arn
@@ -2108,6 +2115,14 @@ Resources:
                 Condition:
                   StringEquals:
                     dynamodb:EnclosingOperation: TransactWriteItems
+              - Sid: ReserveHouseholdCloudSeatTransactionally
+                Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt KaevoIdentityHouseholdsTable.Arn
+                Condition:
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
               - Sid: ResolveAuthenticatedSubjectOnly
                 Effect: Allow
                 Action:
@@ -2131,6 +2146,7 @@ Resources:
           PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
           IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
           IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
+          IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
           ACCOUNTS_TABLE: !Ref KaevoAccountsTable
           AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable
           HOUSEHOLD_MEMBERSHIPS_TABLE: !Ref KaevoHouseholdMembershipsTable

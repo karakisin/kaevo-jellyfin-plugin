@@ -1,6 +1,7 @@
 import json
 
 import boto3
+import pytest
 
 from botocore.exceptions import ClientError
 
@@ -18,6 +19,16 @@ class ExactTable:
         if self.error:
             raise self.error
         return {"Item": dict(self.item)} if self.item is not None else {}
+
+
+class ExactQueryTable:
+    def __init__(self, items):
+        self.items = items
+        self.calls = []
+
+    def query(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"Items": self.items}
 
 
 def payload(result):
@@ -125,6 +136,83 @@ def test_profile_setup_transaction_conflict_logs_only_the_safe_failed_operation(
         "safe_error_category": "conditional_conflict",
         "failed_transaction_operation": "profile_mapping",
     }
+
+
+def test_profile_setup_seat_limit_is_an_explicit_safe_conflict(capsys):
+    operations = [
+        {"label": "cloud_profile", "transaction": {"Put": {"TableName": "safe", "Item": {}}}},
+        {"label": "household_seat_reservation", "transaction": {"Update": {"TableName": "safe", "Key": {}}}},
+    ]
+    result = join._profile_setup_transaction_failure(cancellation(reasons_at(1, 2)), operations)
+    assert result["statusCode"] == 409
+    assert payload(result)["state"] == "family_seat_limit_reached"
+    assert json.loads(capsys.readouterr().out) == {
+        "event": "household_join_profile_setup_transaction_failure",
+        "operation_count": 2,
+        "safe_error_category": "family_seat_limit_reached",
+        "failed_transaction_operation": "household_seat_reservation",
+    }
+
+
+def test_cloud_seat_reservation_uses_only_exact_active_device_memberships(monkeypatch):
+    table = ExactQueryTable([
+        {"entity_type": "HouseholdMembership", "status": "active", "cloud_access_enabled": True, "profile_id": "owner-profile"},
+        {"entity_type": "HouseholdMembership", "status": "active", "cloud_access_enabled": False, "profile_id": "local-only"},
+        {"entity_type": "HouseholdMembership", "status": "pending_profile", "cloud_access_enabled": True, "profile_id": "pending-profile"},
+        {"entity_type": "Other", "status": "active", "cloud_access_enabled": True, "profile_id": "wrong-entity"},
+    ])
+    monkeypatch.setattr(join, "household_memberships", table)
+    monkeypatch.setattr(join, "households", object())
+    monkeypatch.setattr(join, "HOUSEHOLDS_TABLE", "safe-households")
+
+    existing = join._active_cloud_seat_profile_ids("household-1")
+    operation = join._household_seat_reservation_operation(
+        household_id="household-1",
+        account_id="account-1",
+        profile_id="new-profile",
+        seat_limit=6,
+        existing_profile_ids=existing,
+        stored_profile_ids=None,
+        now_iso="2026-08-08T12:00:00Z",
+    )
+
+    assert existing == {"owner-profile"}
+    assert len(table.calls) == 1
+    update = operation["transaction"]["Update"]
+    assert update["TableName"] == "safe-households"
+    assert update["ExpressionAttributeValues"][":reservation"] == {"owner-profile", "new-profile"}
+    assert update["ExpressionAttributeValues"][":baseline_count"] == 1
+
+
+def test_cloud_seat_reservation_rejects_capacity_without_client_supplied_limit(monkeypatch):
+    monkeypatch.setattr(join, "households", object())
+    with pytest.raises(join.AccountFoundationError, match="family_seat_limit_reached"):
+        join._household_seat_reservation_operation(
+            household_id="household-1",
+            account_id="account-1",
+            profile_id="new-profile",
+            seat_limit=1,
+            existing_profile_ids={"owner-profile"},
+            stored_profile_ids={"owner-profile"},
+            now_iso="2026-08-08T12:00:00Z",
+        )
+
+
+def test_cloud_seat_reservation_reconciles_stale_exact_ledger(monkeypatch):
+    monkeypatch.setattr(join, "households", object())
+    operation = join._household_seat_reservation_operation(
+        household_id="household-1",
+        account_id="account-1",
+        profile_id="new-profile",
+        seat_limit=6,
+        existing_profile_ids={"owner-profile"},
+        stored_profile_ids={"deleted-profile", "owner-profile"},
+        now_iso="2026-08-08T12:00:00Z",
+    )
+    update = operation["transaction"]["Update"]
+    assert update["UpdateExpression"].startswith("SET cloud_seat_profile_ids")
+    assert update["ExpressionAttributeValues"][":stored_ledger"] == {"deleted-profile", "owner-profile"}
+    assert update["ExpressionAttributeValues"][":reservation"] == {"owner-profile", "new-profile"}
 
 
 def test_profile_setup_non_cancellation_is_server_error_without_service_message(capsys):
