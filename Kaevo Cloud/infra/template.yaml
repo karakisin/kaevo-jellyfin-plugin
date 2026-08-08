@@ -1385,6 +1385,16 @@ Resources:
             TableName: !Ref KaevoAuthIdentitiesTable
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoHouseholdMembershipsTable
+        # The roster projection is a protected, read-only identity endpoint.
+        # Keep this explicit Query grant alongside the broader legacy CRUD
+        # policy so a future transform or role-policy recovery cannot remove
+        # the exact permission used to resolve canonical household members.
+        - Statement:
+            - Sid: ReadCanonicalHouseholdMembershipRoster
+              Effect: Allow
+              Action:
+                - dynamodb:Query
+              Resource: !GetAtt KaevoHouseholdMembershipsTable.Arn
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoProfilesTable
         - DynamoDBCrudPolicy:
@@ -1492,6 +1502,20 @@ Resources:
           Properties:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v1/events/recent
+            Method: GET
+
+        HouseholdProgressWrite:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/household-progress
+            Method: POST
+
+        HouseholdProgressRead:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/household-progress
             Method: GET
 
         GetEntitlements:

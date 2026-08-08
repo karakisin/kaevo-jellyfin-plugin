@@ -5865,6 +5865,279 @@ def recent_events(event):
     })
 
 
+HOUSEHOLD_PROGRESS_EVENT_TYPE = "household_playback_progress"
+HOUSEHOLD_PROGRESS_EVENT_PREFIX = "household-progress"
+HOUSEHOLD_PROGRESS_MAX_POSITION_SECONDS = 172_800
+
+
+def _household_progress_seconds(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= seconds <= HOUSEHOLD_PROGRESS_MAX_POSITION_SECONDS):
+        return None
+    return seconds
+
+
+def _household_progress_authorized_source(event):
+    """Resolve the protected session's exact active Cloud profile.
+
+    This deliberately does not accept a source profile from the request. The
+    app session is the authority, while the canonical profile record supplies
+    the household edge used for the explicit Who's Watching audience.
+    """
+    if identity_profiles_table is None:
+        return None, None, response(503, {"state": "identity_context_storage_unavailable"})
+    session = authenticated_app_session(event)
+    profile_id = str((session or {}).get("profile_id") or "").strip()
+    if not profile_id:
+        return None, None, response(401, {"state": "protected_session_required"})
+    source = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    household_id = str((source or {}).get("household_id") or "").strip()
+    if not (
+        isinstance(source, dict)
+        and source.get("state") == "active"
+        and str(source.get("profile_id") or "") == profile_id
+        and household_id
+    ):
+        return None, None, response(401, {"state": "identity_context_invalid"})
+    return source, household_id, None
+
+
+def _household_progress_authorized_target_ids(*, source_profile, household_id):
+    """Resolve only current, explicit Who's Watching targets by immutable ID.
+
+    Household Sync intentionally does not inspect a roster or use any display
+    metadata. A target is eligible only while its exact canonical ID remains
+    in the source profile's owner-managed watching grant and it is an active
+    member of the same household.
+    """
+    candidates = source_profile.get("watching_profile_ids") or []
+    if not isinstance(candidates, list) or len(candidates) > 64:
+        return set()
+    target_ids = set()
+    for value in candidates:
+        profile_id = str(value or "").strip()
+        if not profile_id or profile_id in target_ids:
+            continue
+        target = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+        if (
+            isinstance(target, dict)
+            and target.get("state") == "active"
+            and str(target.get("profile_id") or "") == profile_id
+            and str(target.get("household_id") or "") == household_id
+        ):
+            target_ids.add(profile_id)
+    return target_ids
+
+
+def _household_progress_payload(body, *, source_profile, household_id):
+    provider = str(body.get("provider") or "").strip().lower()
+    item_id = str(body.get("item_id") or "").strip().lower()
+    session_id = str(body.get("session_id") or "").strip()
+    media_type = str(body.get("media_type") or "").strip().lower()
+    # Millisecond precision makes a separately-started session on another
+    # household device order independently from a session begun in the same
+    # second. This is a server ordering key only, never identity authority.
+    session_started_at_epoch_milliseconds = positive_int(
+        body.get("session_started_at_epoch_milliseconds"),
+        maximum=(epoch_now() + 86_400) * 1_000,
+    )
+    sequence = positive_int(body.get("sequence"), maximum=2_147_483_647)
+    position_seconds = _household_progress_seconds(body.get("position_seconds"))
+    runtime_seconds = _household_progress_seconds(body.get("runtime_seconds"))
+    selected_ids = body.get("selected_viewer_profile_ids")
+    departed_ids = body.get("departed_viewer_profile_ids") or []
+
+    if provider != "jellyfin" or not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
+        return None, "invalid_media_identity"
+    if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(session_id):
+        return None, "invalid_session_id"
+    if media_type not in {"movie", "episode", "other"}:
+        return None, "invalid_media_type"
+    if session_started_at_epoch_milliseconds is None or sequence is None or position_seconds is None:
+        return None, "invalid_progress"
+    if runtime_seconds is not None and runtime_seconds < position_seconds:
+        return None, "invalid_runtime"
+    if not isinstance(selected_ids, list) or not selected_ids or len(selected_ids) > 64:
+        return None, "invalid_viewer_selection"
+    if not isinstance(departed_ids, list) or len(departed_ids) > 64:
+        return None, "invalid_departed_viewers"
+
+    source_profile_id = str(source_profile.get("profile_id") or "").strip()
+    requested_ids = []
+    for value in selected_ids:
+        profile_id = str(value or "").strip()
+        if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(profile_id) or profile_id in requested_ids:
+            return None, "invalid_viewer_selection"
+        requested_ids.append(profile_id)
+    if source_profile_id not in requested_ids:
+        return None, "active_profile_required"
+
+    departed_profile_ids = []
+    for value in departed_ids:
+        profile_id = str(value or "").strip()
+        if (
+            not SAFE_PLAYBACK_IDENTIFIER.fullmatch(profile_id)
+            or profile_id in requested_ids
+            or profile_id in departed_profile_ids
+        ):
+            return None, "invalid_departed_viewers"
+        departed_profile_ids.append(profile_id)
+
+    allowed_ids = {source_profile_id}
+    allowed_ids.update(
+        _household_progress_authorized_target_ids(
+            source_profile=source_profile,
+            household_id=household_id,
+        )
+    )
+    if not set(requested_ids + departed_profile_ids).issubset(allowed_ids):
+        return None, "viewer_selection_not_authorized"
+
+    return {
+        "provider": provider,
+        "item_id": item_id,
+        "session_id": session_id,
+        "media_type": media_type,
+        "session_started_at_epoch_milliseconds": session_started_at_epoch_milliseconds,
+        "sequence": sequence,
+        "position_seconds": position_seconds,
+        "runtime_seconds": runtime_seconds,
+        "selected_viewer_profile_ids": sorted(requested_ids),
+        "departed_viewer_profile_ids": sorted(departed_profile_ids),
+    }, None
+
+
+def save_household_progress(event):
+    """Project one playback checkpoint to explicit, currently-authorized viewers.
+
+    Each selected profile receives its own progress row. A late packet cannot
+    overwrite a newer playback session, or an earlier sequence in the same
+    session, because DynamoDB applies a monotonic conditional update.
+    """
+    if events_table is None:
+        return response(503, {"state": "household_progress_storage_unavailable"})
+    body = parse_json_body(event)
+    if body is None:
+        return response(400, {"state": "bad_request", "message": "invalid JSON body"})
+    source_profile, household_id, failure = _household_progress_authorized_source(event)
+    if failure:
+        return failure
+    progress, error = _household_progress_payload(
+        body,
+        source_profile=source_profile,
+        household_id=household_id,
+    )
+    if error:
+        return response(400 if error.startswith("invalid") or error == "active_profile_required" else 403, {"state": error})
+
+    received_at = utc_now_iso()
+    expires_at = epoch_now() + (90 * 24 * 60 * 60)
+    written_profile_ids = []
+    session_viewer_profile_ids = sorted(set(
+        progress["selected_viewer_profile_ids"] + progress["departed_viewer_profile_ids"]
+    ))
+    for profile_id in session_viewer_profile_ids:
+        event_key = "#".join((
+            HOUSEHOLD_PROGRESS_EVENT_PREFIX,
+            progress["provider"],
+            progress["item_id"],
+        ))
+        metadata = {
+            "media_type": progress["media_type"],
+            "position_seconds": progress["position_seconds"],
+            "runtime_seconds": progress["runtime_seconds"],
+            "viewer_profile_ids": session_viewer_profile_ids,
+            "source_profile_id": str(source_profile.get("profile_id") or ""),
+            "is_currently_selected": profile_id in progress["selected_viewer_profile_ids"],
+        }
+        try:
+            events_table.update_item(
+                Key={"profile_id": profile_id, "event_key": event_key},
+                UpdateExpression=(
+                    "SET event_id = :event_id, event_type = :event_type, item_id = :item_id, "
+                    "source = :source, session_id = :session_id, timestamp = :timestamp, "
+                    "received_at = :received_at, expires_at = :expires_at, metadata_json = :metadata_json, "
+                    "session_started_at_epoch_milliseconds = :session_started_at_epoch_milliseconds, sequence = :sequence"
+                ),
+                ConditionExpression=(
+                    Attr("session_started_at_epoch_milliseconds").not_exists()
+                    | Attr("session_started_at_epoch_milliseconds").lt(progress["session_started_at_epoch_milliseconds"])
+                    | (
+                        Attr("session_started_at_epoch_milliseconds").eq(progress["session_started_at_epoch_milliseconds"])
+                        & Attr("sequence").lt(progress["sequence"])
+                    )
+                ),
+                ExpressionAttributeValues={
+                    ":event_id": str(uuid.uuid4()),
+                    ":event_type": HOUSEHOLD_PROGRESS_EVENT_TYPE,
+                    ":item_id": progress["item_id"],
+                    ":source": "kaevo_household_sync",
+                    ":session_id": progress["session_id"],
+                    ":timestamp": received_at,
+                    ":received_at": received_at,
+                    ":expires_at": expires_at,
+                    ":metadata_json": json.dumps(metadata, separators=(",", ":")),
+                    ":session_started_at_epoch_milliseconds": progress["session_started_at_epoch_milliseconds"],
+                    ":sequence": progress["sequence"],
+                },
+            )
+            written_profile_ids.append(profile_id)
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                continue
+            LOGGER.error("household_progress_write_failed reason=%s", error.response.get("Error", {}).get("Code", "unknown"))
+            return response(503, {"state": "household_progress_unavailable"})
+
+    return response(202, {
+        "state": "accepted",
+        "profile_ids": written_profile_ids,
+        "deferred_profile_ids": sorted(set(session_viewer_profile_ids) - set(written_profile_ids)),
+    })
+
+
+def get_household_progress(event):
+    """Return only the authenticated profile's latest per-item progress rows."""
+    if events_table is None:
+        return response(503, {"state": "household_progress_storage_unavailable"})
+    source_profile, _, failure = _household_progress_authorized_source(event)
+    if failure:
+        return failure
+    profile_id = str(source_profile.get("profile_id") or "")
+    result = events_table.query(
+        KeyConditionExpression=(
+            Key("profile_id").eq(profile_id)
+            & Key("event_key").begins_with(f"{HOUSEHOLD_PROGRESS_EVENT_PREFIX}#")
+        ),
+        ScanIndexForward=False,
+        Limit=100,
+    )
+    items = []
+    for item in result.get("Items", []):
+        if item.get("event_type") != HOUSEHOLD_PROGRESS_EVENT_TYPE:
+            continue
+        metadata = parse_json_field(item.get("metadata_json"), {})
+        items.append({
+            "item_id": str(item.get("item_id") or ""),
+            "provider": "jellyfin",
+            "media_type": str(metadata.get("media_type") or "other"),
+            "position_seconds": metadata.get("position_seconds"),
+            "runtime_seconds": metadata.get("runtime_seconds"),
+            "viewer_profile_ids": metadata.get("viewer_profile_ids") or [],
+            "session_id": str(item.get("session_id") or ""),
+            "updated_at": str(item.get("received_at") or ""),
+        })
+    return response(200, {"profile_id": profile_id, "items": items})
+
+
 def extract_profile_id_from_settings_path(path):
     prefix = "/v1/profiles/"
     suffix = "/settings"
@@ -11320,6 +11593,7 @@ def lambda_handler(event, context):
                 "/v1/events",
                 "/v1/events/batch",
                 "/v1/events/recent",
+                "/v1/household-progress",
                 "/v1/entitlements",
                 "/v1/devices/register",
                 "/v1/devices",
@@ -11660,6 +11934,12 @@ def lambda_handler(event, context):
 
     if method == "POST" and path == "/v1/remote-commands":
         return create_remote_command(event)
+
+    if method == "POST" and path == "/v1/household-progress":
+        return save_household_progress(event)
+
+    if method == "GET" and path == "/v1/household-progress":
+        return get_household_progress(event)
 
     if method == "POST" and path == "/v1/playback/grants":
         return create_playback_grant(event)
