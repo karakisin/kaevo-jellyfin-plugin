@@ -472,22 +472,42 @@ def _completion_transaction_conflict(error, operations, now):
         return _error("server_error", 500)
     reasons = details.get("CancellationReasons")
     if not isinstance(reasons, list) or len(reasons) != len(operations):
+        print(json.dumps({
+            "event": "household_join_complete_transaction_conflict",
+            "safe_error_category": "transaction_canceled_unclassified",
+        }, separators=(",", ":")))
         return _error("transaction_wrong_state", 409)
     failed = []
     for index, reason in enumerate(reasons):
         if not isinstance(reason, dict) or not isinstance(reason.get("Code"), str):
+            print(json.dumps({
+                "event": "household_join_complete_transaction_conflict",
+                "safe_error_category": "transaction_canceled_unclassified",
+            }, separators=(",", ":")))
             return _error("transaction_wrong_state", 409)
         if reason["Code"] != "None":
             failed.append(index)
     if len(failed) != 1:
+        print(json.dumps({
+            "event": "household_join_complete_transaction_conflict",
+            "safe_error_category": "transaction_canceled_multiple",
+        }, separators=(",", ":")))
         return _error("transaction_wrong_state", 409)
     index = failed[0]
     if reasons[index]["Code"] != "ConditionalCheckFailed" or index >= len(operations):
+        print(json.dumps({
+            "event": "household_join_complete_transaction_conflict",
+            "safe_error_category": "transaction_canceled_unclassified",
+        }, separators=(",", ":")))
         return _error("transaction_wrong_state", 409)
     operation = operations[index]
     if not isinstance(operation, dict) or operation.get("label") not in {
         "account", "auth_identity", "normalized_membership", "pending_lookup", "invitation", "join_transaction",
     }:
+        print(json.dumps({
+            "event": "household_join_complete_transaction_conflict",
+            "safe_error_category": "transaction_canceled_unclassified",
+        }, separators=(",", ":")))
         return _error("transaction_wrong_state", 409)
     try:
         result = operation["table"].get_item(Key=operation["key"], ConsistentRead=True)
@@ -497,6 +517,11 @@ def _completion_transaction_conflict(error, operations, now):
         return _error("transaction_wrong_state", 409)
     record = result.get("Item") if isinstance(result, dict) else None
     label = operation["label"]
+    print(json.dumps({
+        "event": "household_join_complete_transaction_conflict",
+        "safe_error_category": "conditional_conflict",
+        "failed_transaction_operation": label,
+    }, separators=(",", ":")))
     if label == "invitation":
         if record is None:
             return _error("invitation_invalid", 409)
@@ -523,6 +548,23 @@ def _completion_transaction_conflict(error, operations, now):
             and str(record.get("status") or "") in {"pending_profile", "active"}
         ):
             return _error("already_member", 409)
+        if not hmac.compare_digest(
+            str(record.get("account_id") or ""), str(expected.get("account_id") or ""),
+        ):
+            membership_category = "different_account"
+        elif record.get("entity_type") != "HouseholdMembership":
+            membership_category = "same_account_malformed"
+        else:
+            safe_status = str(record.get("status") or "")
+            membership_category = (
+                f"same_account_{safe_status}"
+                if safe_status in {"revoked", "deletion_pending", "deleting"}
+                else "same_account_malformed"
+            )
+        print(json.dumps({
+            "event": "household_join_normalized_membership_conflict",
+            "safe_membership_category": membership_category,
+        }, separators=(",", ":")))
     return _error("manual_review_required", 409)
 
 
@@ -742,6 +784,50 @@ def _user_exists(email):
     return bool(result.get("Users") or [])
 
 
+def resolve_email(event):
+    """Choose the next native account form for one invitation-bound email.
+
+    This lookup is available only while a valid, device-bound invitation is
+    untouched. It returns no account or profile data and never changes the
+    transaction state, leaving native completion independently bound to the
+    original DPoP transaction.
+    """
+    if joins is None or not USER_POOL_ID:
+        return _error("household_join_unavailable", 503, True)
+    body = parse_json_body(event) or {}
+    handle_hash = _handle_hash(body.get("join_resume_handle"))
+    installation_hash = _installation_hash(body.get("installation_id"))
+    email = _email(body.get("email"))
+    if not all((handle_hash, installation_hash, email)):
+        return _error("transaction_invalid")
+    item = joins.get_item(Key={"join_resume_hash": handle_hash}, ConsistentRead=True).get("Item")
+    now = epoch_now()
+    if not item or int(item.get("expires_at") or 0) <= now:
+        return _error("transaction_expired", 410)
+    if (
+        not hmac.compare_digest(str(item.get("device_binding_hash") or ""), installation_hash)
+        or str(item.get("state") or "") != "initiated"
+    ):
+        return _error("transaction_wrong_state", 409)
+    if not _rate_ok(
+        event,
+        phase="route",
+        installation_hash=installation_hash,
+        invitation_hash=str(item.get("invitation_code_hash") or ""),
+        transaction_hash=handle_hash,
+        email_hash=_sha(email),
+        maximum=TRANSACTION_ROUTE_MAXIMUM,
+    ):
+        _safe_event(item, "resolve_email_throttled", "throttled", True, _network_bucket(event))
+        return _error("household_join_retry_later", 429, True)
+    try:
+        next_step = "sign_in" if _user_exists(email) else "create_account"
+    except ClientError:
+        return _error("household_join_unavailable", 503, True)
+    _safe_event(item, "resolve_email", "accepted", network_hash=_network_bucket(event))
+    return response(200, {"state": "household_join_email_resolved", "next": next_step})
+
+
 def route_auth(event):
     if joins is None or not all((USER_POOL_ID, AUTHORIZE_BASE_URL, NATIVE_CALLBACK_URI, NATIVE_AUTHORIZE_ENDPOINT, EXPECTED_CLIENT_ID)):
         return _error("household_join_unavailable", 503, True)
@@ -756,7 +842,8 @@ def route_auth(event):
     # only by this isolated, encrypted-at-rest transaction so authorize can
     # bind Cognito's ID token to the transaction that supplied the PKCE state.
     nonce = _valid(body.get("nonce"), r"[A-Za-z0-9_-]{16,128}")
-    if not all((handle_hash, installation_hash, email, state, challenge, nonce)):
+    provider = str(body.get("provider") or "emailSignIn")
+    if not all((handle_hash, installation_hash, email, state, challenge, nonce)) or provider not in {"emailSignIn", "apple", "google"}:
         return _error("transaction_invalid")
     item = joins.get_item(Key={"join_resume_hash": handle_hash}, ConsistentRead=True).get("Item")
     now = epoch_now()
@@ -774,6 +861,7 @@ def route_auth(event):
             hmac.compare_digest(str(item.get("code_challenge") or ""), challenge),
             hmac.compare_digest(str(item.get("oidc_nonce") or ""), nonce),
             hmac.compare_digest(str(item.get("email_hash") or ""), email_hash),
+            hmac.compare_digest(str(item.get("cognito_route") or ""), provider),
         )):
             continuation = f"{AUTHORIZE_BASE_URL}?{urlencode({'resume': handle, 'state': state})}"
             return response(200, {"state": "household_join_auth_ready", "authorization_continuation_url": continuation, "expires_at": int(item["expires_at"])})
@@ -798,7 +886,6 @@ def route_auth(event):
         # accept consent without Cognito returning an authorization code to
         # Kaevo.  Keep one opaque route value for transaction compatibility,
         # but do not perform an account-existence lookup or select /signup.
-        route = "authorize"
         absolute_expires_at = int(item.get("absolute_expires_at") or 0)
         auth_expires_at = min(now + JOIN_AUTH_COMPLETION_TTL_SECONDS, absolute_expires_at)
         if auth_expires_at <= now:
@@ -808,7 +895,7 @@ def route_auth(event):
             UpdateExpression="SET #state = :state, auth_state_hash = :state_hash, code_challenge = :challenge, oidc_nonce = :nonce, email_hash = :email_hash, cognito_route = :route, auth_expires_at = :auth_expires, expires_at = :auth_expires, routed_at = :updated, route_attempts = route_attempts + :one, updated_at = :updated",
             ConditionExpression="#state = :initiated AND expires_at > :now AND absolute_expires_at > :now",
             ExpressionAttributeNames={"#state": "state"},
-            ExpressionAttributeValues={":state": "awaiting_authorization", ":state_hash": _sha(state), ":challenge": challenge, ":nonce": nonce, ":email_hash": email_hash, ":route": route, ":auth_expires": auth_expires_at, ":one": 1, ":updated": utc_now_iso(), ":initiated": "initiated", ":now": now},
+            ExpressionAttributeValues={":state": "awaiting_authorization", ":state_hash": _sha(state), ":challenge": challenge, ":nonce": nonce, ":email_hash": email_hash, ":route": provider, ":auth_expires": auth_expires_at, ":one": 1, ":updated": utc_now_iso(), ":initiated": "initiated", ":now": now},
         )
     except ClientError:
         return _error("transaction_wrong_state", 409)
@@ -831,7 +918,13 @@ def authorize(event):
     nonce = _valid(item.get("oidc_nonce"), r"[A-Za-z0-9_-]{16,128}")
     if not nonce:
         return {"statusCode": 400, "body": "Unable to continue securely."}
-    location = NATIVE_AUTHORIZE_ENDPOINT + "?" + urlencode({"client_id": EXPECTED_CLIENT_ID, "response_type": "code", "scope": "openid", "redirect_uri": NATIVE_CALLBACK_URI, "code_challenge": str(item.get("code_challenge") or ""), "code_challenge_method": "S256", "state": state, "nonce": nonce})
+    query = {"client_id": EXPECTED_CLIENT_ID, "response_type": "code", "scope": "openid", "redirect_uri": NATIVE_CALLBACK_URI, "code_challenge": str(item.get("code_challenge") or ""), "code_challenge_method": "S256", "state": state, "nonce": nonce}
+    provider = str(item.get("cognito_route") or "emailSignIn")
+    if provider == "apple":
+        query["identity_provider"] = "SignInWithApple"
+    elif provider == "google":
+        query["identity_provider"] = "Google"
+    location = NATIVE_AUTHORIZE_ENDPOINT + "?" + urlencode(query)
     return {"statusCode": 302, "headers": {"Location": location, "Cache-Control": "no-store"}, "body": ""}
 
 
@@ -843,8 +936,67 @@ def _jwt_subject(event):
         return ""
 
 
-def _completion_url():
-    return f"{PUBLIC_API_BASE_URL}/v3/identity/household-joins/complete"
+def _completion_url(*, native_password=False):
+    suffix = "complete-native" if native_password else "complete"
+    return f"{PUBLIC_API_BASE_URL}/v3/identity/household-joins/{suffix}"
+
+
+def _is_terminal_rejoin_principal(principal, membership):
+    """Recognize only the revoked principal shell left by immediate deletion."""
+    return (
+        isinstance(principal, dict)
+        and str(principal.get("state") or "") == "revoked"
+        and principal.get("revoked") is True
+        and list(principal.get("profile_ids") or []) == []
+        and membership is None
+    )
+
+
+def _is_terminal_deleting_membership(membership, *, account_id, household_id):
+    """Recognize the exact non-authoritative membership left by deletion.
+
+    The caller has already proved a terminal principal shell: no active legacy
+    membership and no active profile IDs remain. A new Owner invitation can
+    therefore replace only this same-account, same-household ``deleting`` row.
+    The old profile identifier is retained solely as a deletion tombstone; it
+    is not authorization and must not be parsed as one. Earlier profile-ID
+    formats can be present on an otherwise exact terminal record, so requiring
+    a current-format identifier here would strand a completed deletion.
+    """
+    if not isinstance(membership, dict):
+        return False
+    if not (
+        membership.get("entity_type") == "HouseholdMembership"
+        and membership.get("status") == "deleting"
+        and hmac.compare_digest(str(membership.get("account_id") or ""), account_id)
+        and hmac.compare_digest(str(membership.get("household_id") or ""), household_id)
+    ):
+        return False
+    return True
+
+
+def _terminal_deleting_membership_has_no_live_profile(membership):
+    """Confirm that the retained membership row is only a deletion tombstone.
+
+    This is intentionally a direct-key check, never a name lookup or table
+    scan. A stale normalized membership can be released for a new invitation
+    only when its prior profile is absent from both canonical profile stores.
+    """
+    if profiles is None or cloud_profiles is None or not isinstance(membership, dict):
+        return False
+    profile_id = str(membership.get("profile_id") or "").strip()
+    # Profile identifiers written by older Kaevo releases may not have the
+    # current `profile_` prefix. This bounds a DynamoDB key without treating
+    # the identifier as an authorization claim.
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", profile_id):
+        return False
+    identity_profile = profiles.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    cloud_profile = cloud_profiles.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    return identity_profile is None and cloud_profile is None
 
 
 def _auth_result_url():
@@ -891,6 +1043,103 @@ def _invitation_switch_profile_ids(value):
             raise AccountFoundationError("invalid_switch_profile_grants")
         resolved.append(profile_id)
     return resolved
+
+
+def _invitation_watching_profile_ids(value):
+    """Validate Who's Watching grants without treating them as switch grants."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 64:
+        raise AccountFoundationError("invalid_watching_profile_grants")
+    resolved = []
+    for candidate in value:
+        profile_id = str(candidate or "").strip()
+        if (
+            not re.fullmatch(r"profile_[A-Za-z0-9_-]{16,128}", profile_id)
+            or profile_id in resolved
+        ):
+            raise AccountFoundationError("invalid_watching_profile_grants")
+        resolved.append(profile_id)
+    return resolved
+
+
+def _normalized_invitation_parental_controls(value, *, require_child_safe=False):
+    """Retain the invitation's exact viewing policy across device Join."""
+    if value is None:
+        if require_child_safe:
+            raise AccountFoundationError("missing_child_viewing_level")
+        return None
+    if not isinstance(value, dict):
+        raise AccountFoundationError("invalid_parental_controls")
+    if type(value.get("version", 1)) is not int or value.get("version", 1) != 1:
+        raise AccountFoundationError("invalid_parental_controls")
+    preset = str(value.get("preset") or "").strip()
+    enabled = value.get("is_enabled")
+    hide_unrated = value.get("hide_unrated_content")
+    if (
+        preset not in {"littleKids", "olderKids", "teens", "unrestricted"}
+        or not isinstance(enabled, bool)
+        or not isinstance(hide_unrated, bool)
+        or (require_child_safe and (not enabled or preset == "unrestricted"))
+    ):
+        raise AccountFoundationError("invalid_parental_controls")
+
+    def string_values(key, maximum):
+        raw = value.get(key) or []
+        if not isinstance(raw, list) or len(raw) > maximum:
+            raise AccountFoundationError("invalid_parental_controls")
+        cleaned = []
+        for candidate in raw:
+            if not isinstance(candidate, str):
+                raise AccountFoundationError("invalid_parental_controls")
+            text = str(candidate or "").strip()
+            if not text or len(text) > 120 or text in cleaned:
+                raise AccountFoundationError("invalid_parental_controls")
+            cleaned.append(text)
+        return cleaned
+
+    exceptions = value.get("exceptions") or []
+    if not isinstance(exceptions, list) or len(exceptions) > 64:
+        raise AccountFoundationError("invalid_parental_controls")
+    normalized_exceptions = []
+    for exception in exceptions:
+        if not isinstance(exception, dict):
+            raise AccountFoundationError("invalid_parental_controls")
+        if not all(isinstance(exception.get(key), str) for key in ("id", "title", "scope")):
+            raise AccountFoundationError("invalid_parental_controls")
+        identifier = exception["id"].strip()
+        if not identifier or len(identifier) > 160:
+            raise AccountFoundationError("invalid_parental_controls")
+        scope = str(exception.get("scope") or "").strip()
+        provider_item_ids = exception.get("provider_item_ids") or []
+        if scope not in {"title", "collection"} or not isinstance(provider_item_ids, list):
+            raise AccountFoundationError("invalid_parental_controls")
+        cleaned_item_ids = []
+        for provider_item_id in provider_item_ids:
+            if not isinstance(provider_item_id, str):
+                raise AccountFoundationError("invalid_parental_controls")
+            item_id = str(provider_item_id or "").strip()
+            if not item_id or len(item_id) > 160 or item_id in cleaned_item_ids:
+                raise AccountFoundationError("invalid_parental_controls")
+            cleaned_item_ids.append(item_id)
+        if not cleaned_item_ids:
+            raise AccountFoundationError("invalid_parental_controls")
+        normalized_exceptions.append({
+            "id": identifier,
+            "title": str(exception.get("title") or "").strip()[:160],
+            "scope": scope,
+            "provider_item_ids": cleaned_item_ids,
+        })
+    return {
+        "version": 1,
+        "is_enabled": enabled,
+        "preset": preset,
+        "allowed_tags": string_values("allowed_tags", 64),
+        "blocked_genres": string_values("blocked_genres", 64),
+        "blocked_tags": string_values("blocked_tags", 64),
+        "exceptions": normalized_exceptions,
+        "hide_unrated_content": hide_unrated,
+    }
 
 
 def _stored_policy_bool(value, *, default, field):
@@ -1074,10 +1323,10 @@ def _resume_context(event, *, method, url, onboarding_status_diagnostic=False):
     return subject, item, source, None
 
 
-def complete(event):
+def complete(event, *, native_password=False):
     if not all((
         joins, invitations, principals, accounts, auth_identities,
-        household_memberships, USER_POOL_ID, PUBLIC_API_BASE_URL,
+        household_memberships, memberships, USER_POOL_ID, PUBLIC_API_BASE_URL,
     )):
         return _completion_rejection(
             event, "household_join_unavailable", 503,
@@ -1087,8 +1336,8 @@ def complete(event):
     body = parse_json_body(event) or {}
     handle_hash = _handle_hash(body.get("join_resume_handle"))
     installation_hash = _installation_hash(body.get("installation_id"))
-    state = _valid(body.get("oauth_state"), r"[A-Za-z0-9_-]{16,256}")
-    if not subject or not handle_hash or not installation_hash or not state:
+    state = None if native_password else _valid(body.get("oauth_state"), r"[A-Za-z0-9_-]{16,256}")
+    if not subject or not handle_hash or not installation_hash or (not native_password and not state):
         return _completion_rejection(
             event, "transaction_invalid", 401,
             outcome="missing_completion_binding", subject=subject,
@@ -1114,13 +1363,15 @@ def complete(event):
             outcome="device_binding_mismatch", item=item, subject=subject,
             installation_hash=installation_hash,
         )
-    if not hmac.compare_digest(str(item.get("auth_state_hash") or ""), _sha(state)):
+    if not native_password and not hmac.compare_digest(str(item.get("auth_state_hash") or ""), _sha(state)):
         return _completion_rejection(
             event, "callback_mismatch", 409,
             outcome="callback_state_mismatch", item=item, subject=subject,
             installation_hash=installation_hash,
         )
-    if str(item.get("state") or "") not in {"awaiting_authorization", "membership_accepted"}:
+    expected_state = "initiated" if native_password else "awaiting_authorization"
+    completion_mode = "native_password" if native_password else "managed_login"
+    if str(item.get("state") or "") not in {expected_state, "membership_accepted"}:
         return _completion_rejection(
             event, "transaction_wrong_state", 409,
             outcome="transaction_wrong_state", item=item, subject=subject,
@@ -1139,7 +1390,12 @@ def complete(event):
             outcome="completion_rate_limited", item=item, subject=subject,
             installation_hash=installation_hash, retryable=True,
         )
-    if not _verify_join_proof(event, item, method="POST", url=_completion_url()):
+    if not _verify_join_proof(
+        event,
+        item,
+        method="POST",
+        url=_completion_url(native_password=native_password),
+    ):
         _safe_event(item, "completion_mismatch", "denied", network_hash=_network_bucket(event))
         _completion_outcome(
             event, "proof_binding_mismatch", 401, item=item,
@@ -1147,6 +1403,13 @@ def complete(event):
         )
         return _error("authentication_mismatch", 401)
     if str(item.get("state") or "") == "membership_accepted":
+        accepted_mode = str(item.get("auth_completion_mode") or "managed_login")
+        if not hmac.compare_digest(accepted_mode, completion_mode):
+            _completion_outcome(
+                event, "accepted_authentication_mode_mismatch", 409, item=item,
+                subject=subject, installation_hash=installation_hash,
+            )
+            return _error("transaction_wrong_state", 409)
         if not hmac.compare_digest(str(item.get("member_principal_id") or ""), subject):
             _completion_outcome(
                 event, "accepted_subject_mismatch", 401, item=item,
@@ -1195,10 +1458,16 @@ def complete(event):
         )
     household_id = str(invitation.get("household_id") or "")
     existing = principals.get_item(Key={"principal_id": subject}, ConsistentRead=True).get("Item")
-    if existing:
+    existing_membership = memberships.get_item(Key={"principal_id": subject}, ConsistentRead=True).get("Item")
+    terminal_rejoin_principal = _is_terminal_rejoin_principal(existing, existing_membership)
+    if existing and not terminal_rejoin_principal:
         if hmac.compare_digest(str(existing.get("household_id") or ""), household_id):
             return response(200, {"state": "already_member", "next": "installation_setup_required"})
-        return _error("manual_review_required", 409)
+        return _completion_rejection(
+            event, "manual_review_required", 409,
+            outcome="existing_principal_other_household", item=item,
+            subject=subject, installation_hash=installation_hash,
+        )
     created = utc_now_iso()
     try:
         age_role = canonical_role(
@@ -1211,9 +1480,17 @@ def complete(event):
             invitation.get("switch_profile_ids")
         )
     except AccountFoundationError:
-        return _error("manual_review_required", 409)
+        return _completion_rejection(
+            event, "manual_review_required", 409,
+            outcome="invitation_role_policy_invalid", item=item,
+            subject=subject, installation_hash=installation_hash,
+        )
     if not household_id:
-        return _error("manual_review_required", 409)
+        return _completion_rejection(
+            event, "manual_review_required", 409,
+            outcome="invitation_household_missing", item=item,
+            subject=subject, installation_hash=installation_hash,
+        )
     role = age_role.value
     household_access = access_role.value
     reserved_profile_id = str(invitation.get("profile_id") or "").strip()
@@ -1226,7 +1503,11 @@ def complete(event):
         or reserved_profile_type not in {"adult", "kid"}
         or (reserved_profile_type == "kid") != (role in {"teen", "child"})
     ):
-        return _error("manual_review_required", 409)
+        return _completion_rejection(
+            event, "manual_review_required", 409,
+            outcome="invitation_profile_reservation_invalid", item=item,
+            subject=subject, installation_hash=installation_hash,
+        )
     try:
         cloud_access_enabled = _stored_policy_bool(
             invitation.get("cloud_access_enabled"),
@@ -1238,8 +1519,22 @@ def complete(event):
             default=False,
             field="request_access_policy",
         )
+        parental_controls = _normalized_invitation_parental_controls(
+            invitation.get("parental_controls"),
+            require_child_safe=(
+                reserved_profile_type == "kid"
+                and "parental_controls" in invitation
+            ),
+        )
+        watching_profile_ids = _invitation_watching_profile_ids(
+            invitation.get("watching_profile_ids")
+        )
     except AccountFoundationError:
-        return _error("manual_review_required", 409)
+        return _completion_rejection(
+            event, "manual_review_required", 409,
+            outcome="invitation_access_policy_invalid", item=item,
+            subject=subject, installation_hash=installation_hash,
+        )
     try:
         identity_key = provider_subject_key("cognito", subject)
         auth_identity = auth_identities.get_item(Key={"auth_identity_key": identity_key}, ConsistentRead=True).get("Item")
@@ -1251,7 +1546,11 @@ def complete(event):
             assert_auth_identity_binding(auth_identity, account_id=account_id, provider="cognito", provider_subject=subject)
             account = accounts.get_item(Key={"account_id": account_id}, ConsistentRead=True).get("Item")
             if not isinstance(account, dict) or account.get("entity_type") != "Account" or account.get("status") != "active":
-                return _error("manual_review_required", 409)
+                return _completion_rejection(
+                    event, "manual_review_required", 409,
+                    outcome="auth_identity_account_inactive", item=item,
+                    subject=subject, installation_hash=installation_hash,
+                )
         else:
             account_id = "acct_" + secrets.token_urlsafe(24)
             account = build_account_record(account_id, now_iso=created, now_epoch=now)
@@ -1260,15 +1559,56 @@ def complete(event):
                 now_iso=created, now_epoch=now,
                 email=attributes.get("email"), email_verified=str(attributes.get("email_verified") or "").lower() == "true",
             )
+        if terminal_rejoin_principal and not hmac.compare_digest(
+            str(existing.get("account_id") or ""), account_id,
+        ):
+            return _completion_rejection(
+                event, "manual_review_required", 409,
+                outcome="terminal_rejoin_account_mismatch", item=item,
+                subject=subject, installation_hash=installation_hash,
+            )
     except AccountFoundationError:
-        return _error("manual_review_required", 409)
+        return _completion_rejection(
+            event, "manual_review_required", 409,
+            outcome="auth_identity_binding_invalid", item=item,
+            subject=subject, installation_hash=installation_hash,
+        )
     membership_id = household_membership_id(account_id, household_id)
+    existing_normalized_membership = household_memberships.get_item(
+        Key={"household_id": household_id, "membership_id": membership_id},
+        ConsistentRead=True,
+    ).get("Item")
+    terminal_deleting_membership = (
+        terminal_rejoin_principal
+        and _is_terminal_deleting_membership(
+            existing_normalized_membership,
+            account_id=account_id,
+            household_id=household_id,
+        )
+        and _terminal_deleting_membership_has_no_live_profile(
+            existing_normalized_membership,
+        )
+    )
+    permitted_membership_status_expression = "= :revoked"
+    normalized_membership_expression_values = {
+        ":entity_type": "HouseholdMembership",
+        ":account_id": account_id,
+        ":household_id": household_id,
+        ":revoked": "revoked",
+    }
+    if terminal_deleting_membership:
+        permitted_membership_status_expression = "IN (:revoked, :deleting)"
+        normalized_membership_expression_values[":deleting"] = "deleting"
     pending_lookup_key = _pending_lookup_key(subject, installation_hash)
     existing_lookup = joins.get_item(Key={"join_resume_hash": pending_lookup_key}, ConsistentRead=True).get("Item")
     if existing_lookup:
         # Never choose among multiple or stale pending continuations.  The
         # caller receives a safe manual-review result instead of a lookup.
-        return _error("manual_review_required", 409)
+        return _completion_rejection(
+            event, "manual_review_required", 409,
+            outcome="pending_lookup_already_exists", item=item,
+            subject=subject, installation_hash=installation_hash,
+        )
     normalized_membership = {
         "household_id": household_id,
         "membership_id": membership_id,
@@ -1278,7 +1618,9 @@ def complete(event):
         "household_access_role": household_access,
         "cloud_access_enabled": cloud_access_enabled,
         "request_access_enabled": request_access_enabled,
+        "parental_controls": parental_controls,
         "switch_profile_ids": switch_profile_ids,
+        "watching_profile_ids": watching_profile_ids,
         "reserved_profile_id": reserved_profile_id,
         "reserved_display_name": reserved_display_name,
         "reserved_profile_type": reserved_profile_type,
@@ -1300,7 +1642,9 @@ def complete(event):
         "household_access_role": household_access,
         "cloud_access_enabled": cloud_access_enabled,
         "request_access_enabled": request_access_enabled,
+        "parental_controls": parental_controls,
         "switch_profile_ids": switch_profile_ids,
+        "watching_profile_ids": watching_profile_ids,
         "reserved_profile_id": reserved_profile_id,
         "reserved_display_name": reserved_display_name,
         "reserved_profile_type": reserved_profile_type,
@@ -1323,7 +1667,24 @@ def complete(event):
             "label": "normalized_membership", "table": household_memberships,
             "key": {"household_id": household_id, "membership_id": membership_id},
             "expected": {"account_id": account_id},
-            "transaction": {"Put": {"TableName": HOUSEHOLD_MEMBERSHIPS_TABLE, "Item": normalized_membership, "ConditionExpression": "attribute_not_exists(household_id) AND attribute_not_exists(membership_id)"}},
+            # Immediate profile deletion retains a revoked membership row so
+            # canonical history and external cleanup remain attributable. A
+            # fresh, proof-bound invitation may replace only that exact row
+            # for the same account and household; it can never take over an
+            # active, pending, malformed, or differently owned membership.
+            "transaction": {"Put": {
+                "TableName": HOUSEHOLD_MEMBERSHIPS_TABLE,
+                "Item": normalized_membership,
+                "ConditionExpression": (
+                    "(attribute_not_exists(household_id) AND attribute_not_exists(membership_id)) OR "
+                    "(entity_type = :entity_type AND account_id = :account_id "
+                    "AND household_id = :household_id AND #status "
+                    + permitted_membership_status_expression
+                    + ")"
+                ),
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": normalized_membership_expression_values,
+            }},
         },
         {
             "label": "pending_lookup", "table": joins, "key": {"join_resume_hash": pending_lookup_key},
@@ -1345,7 +1706,10 @@ def complete(event):
                     "household_access_role = :access_role, "
                     "cloud_access_enabled = :cloud_access, "
                     "request_access_enabled = :request_access, "
+                    "parental_controls = :parental_controls, "
                     "switch_profile_ids = :switch_profiles, "
+                    "watching_profile_ids = :watching_profiles, "
+                    "auth_completion_mode = :auth_completion_mode, "
                     "owner_profile_id = :owner_profile, "
                     "reserved_profile_id = :reserved_profile, "
                     "reserved_display_name = :reserved_name, "
@@ -1356,7 +1720,8 @@ def complete(event):
                 "ExpressionAttributeNames": {"#state": "state"},
                 "ExpressionAttributeValues": {
                     ":accepted": "membership_accepted",
-                    ":awaiting": "awaiting_authorization",
+                    ":awaiting": expected_state,
+                    ":auth_completion_mode": completion_mode,
                     ":completed": created,
                     ":subject": subject,
                     ":account": account_id,
@@ -1365,7 +1730,9 @@ def complete(event):
                     ":access_role": household_access,
                     ":cloud_access": cloud_access_enabled,
                     ":request_access": request_access_enabled,
+                    ":parental_controls": parental_controls,
                     ":switch_profiles": switch_profile_ids,
+                    ":watching_profiles": watching_profile_ids,
                     ":owner_profile": str(invitation.get("owner_profile_id") or ""),
                     ":reserved_profile": reserved_profile_id,
                     ":reserved_name": reserved_display_name,
@@ -1390,6 +1757,16 @@ def complete(event):
         "display_name": reserved_display_name,
         "profile_type": reserved_profile_type,
     })
+
+
+def complete_native(event):
+    """Complete only an untouched QR transaction using native credentials.
+
+    This route never accepts an OAuth state and only permits the transaction's
+    initial state. A transaction already routed to managed login must complete
+    on the PKCE route it was bound to; it cannot be switched into native auth.
+    """
+    return complete(event, native_password=True)
 
 
 def _profile_setup_required_response(*, state, membership):
@@ -1522,6 +1899,16 @@ def profile_setup(event):
             default=False,
             field="request_access_policy",
         )
+        parental_controls = _normalized_invitation_parental_controls(
+            membership.get("parental_controls"),
+            require_child_safe=(
+                age_role.value in {"teen", "child"}
+                and "parental_controls" in membership
+            ),
+        )
+        watching_profile_ids = _invitation_watching_profile_ids(
+            membership.get("watching_profile_ids")
+        )
     except AccountFoundationError:
         return _error("manual_review_required", 409)
     role = age_role.value
@@ -1570,7 +1957,9 @@ def profile_setup(event):
                 "household_access_role": household_access,
                 "cloud_access_enabled": cloud_access_enabled,
                 "request_access_enabled": request_access_enabled,
+                "parental_controls": parental_controls,
                 "switch_profile_ids": switch_profile_ids,
+                "watching_profile_ids": watching_profile_ids,
             }
             legacy_profile = {
                 "profile_id": profile_id,
@@ -1625,7 +2014,9 @@ def profile_setup(event):
         "household_access_role": household_access,
         "cloud_access_enabled": cloud_access_enabled,
         "request_access_enabled": request_access_enabled,
+        "parental_controls": parental_controls,
         "switch_profile_ids": switch_profile_ids,
+        "watching_profile_ids": watching_profile_ids,
     }
     active_principal = {
         "principal_id": subject,
@@ -1654,7 +2045,22 @@ def profile_setup(event):
         {"label": "profile_binding", "transaction": {"Put": {"TableName": PROFILE_BINDINGS_TABLE, "Item": binding, "ConditionExpression": "attribute_not_exists(account_id) AND attribute_not_exists(profile_id)"}}} if binding else None,
         {"label": "profile_mapping", "transaction": {"Put": {"TableName": PROFILE_MAPPINGS_TABLE, "Item": mapping, "ConditionExpression": "attribute_not_exists(installation_id) AND attribute_not_exists(local_profile_source_id)"}}},
         {"label": "copied_entitlement", "transaction": {"Put": {"TableName": ENTITLEMENTS_TABLE, "Item": entitlement, "ConditionExpression": "attribute_not_exists(profile_id)"}}} if entitlement else None,
-        {"label": "principal", "transaction": {"Put": {"TableName": PRINCIPALS_TABLE, "Item": active_principal, "ConditionExpression": "attribute_not_exists(principal_id)"}}},
+        {"label": "principal", "transaction": {"Put": {
+            "TableName": PRINCIPALS_TABLE,
+            "Item": active_principal,
+            "ConditionExpression": (
+                "attribute_not_exists(principal_id) OR "
+                "(#state = :revoked AND revoked = :revoked_flag "
+                "AND account_id = :account_id AND profile_ids = :empty_profile_ids)"
+            ),
+            "ExpressionAttributeNames": {"#state": "state"},
+            "ExpressionAttributeValues": {
+                ":revoked": "revoked",
+                ":revoked_flag": True,
+                ":account_id": account_id,
+                ":empty_profile_ids": [],
+            },
+        }}},
         {"label": "identity_membership", "transaction": {"Put": {"TableName": MEMBERSHIPS_TABLE, "Item": active_membership, "ConditionExpression": "attribute_not_exists(principal_id)"}}},
         {"label": "normalized_membership", "transaction": {"Update": {
             "TableName": HOUSEHOLD_MEMBERSHIPS_TABLE,
@@ -1668,7 +2074,9 @@ def profile_setup(event):
                 "AND household_access_role = :access_role "
                 "AND cloud_access_enabled = :cloud_access "
                 "AND request_access_enabled = :request_access "
-                "AND switch_profile_ids = :switch_profiles"
+                "AND parental_controls = :parental_controls "
+                "AND switch_profile_ids = :switch_profiles "
+                "AND watching_profile_ids = :watching_profiles"
             ),
             "ExpressionAttributeNames": {"#status": "status"},
             "ExpressionAttributeValues": {
@@ -1679,7 +2087,9 @@ def profile_setup(event):
                 ":access_role": household_access,
                 ":cloud_access": cloud_access_enabled,
                 ":request_access": request_access_enabled,
+                ":parental_controls": parental_controls,
                 ":switch_profiles": switch_profile_ids,
+                ":watching_profiles": watching_profile_ids,
                 ":updated": created,
                 ":epoch": now,
             },
@@ -1722,12 +2132,16 @@ def lambda_handler(event, _context):
         return begin(event)
     if method == "POST" and path == "/v3/identity/household-joins/route-auth":
         return route_auth(event)
+    if method == "POST" and path == "/v3/identity/household-joins/resolve-email":
+        return resolve_email(event)
     if method == "GET" and path == "/v3/identity/household-joins/authorize":
         return authorize(event)
     if method == "POST" and path == "/v3/identity/household-joins/auth-result":
         return auth_result(event)
     if method == "POST" and path == "/v3/identity/household-joins/complete":
         return complete(event)
+    if method == "POST" and path == "/v3/identity/household-joins/complete-native":
+        return complete_native(event)
     if method == "GET" and path == "/v3/identity/household-joins/onboarding-status":
         return onboarding_status(event)
     if method == "POST" and path == "/v3/identity/household-joins/profile-setup":

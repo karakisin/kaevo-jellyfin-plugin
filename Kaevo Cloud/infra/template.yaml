@@ -1907,12 +1907,28 @@ Resources:
       RouteKey: PUT /v3/identity/profiles/{profileId}/switch-targets
       Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
 
+  KaevoIdentityV3UpdateProfileWatchingTargetsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: PUT /v3/identity/profiles/{profileId}/watching-targets
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
   KaevoIdentityV3SaveProfileJellyfinBindingRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref KaevoCloudHttpApi
       AuthorizationType: NONE
       RouteKey: PUT /v3/identity/profiles/{profileId}/jellyfin-binding
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3SaveProfileSeerrBindingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: PUT /v3/identity/profiles/{profileId}/seerr-binding
       Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
 
   KaevoIdentityV3DeleteProfileRoute:
@@ -2187,6 +2203,16 @@ Resources:
       RouteKey: POST /v3/identity/household-joins/route-auth
       Target: !Join ["/", [integrations, !Ref KaevoHouseholdJoinIntegration]]
 
+  # An invitation-bound, rate-limited account route lookup. It returns only
+  # the next native form and never changes household, account, or join state.
+  KaevoHouseholdJoinResolveEmailRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/household-joins/resolve-email
+      Target: !Join ["/", [integrations, !Ref KaevoHouseholdJoinIntegration]]
+
   KaevoHouseholdJoinAuthorizeRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:
@@ -2213,6 +2239,19 @@ Resources:
       AuthorizationType: JWT
       AuthorizerId: !Ref KaevoHouseholdJoinAuthorizer
       RouteKey: POST /v3/identity/household-joins/complete
+      Target: !Join ["/", [integrations, !Ref KaevoHouseholdJoinIntegration]]
+
+  # Native email/password authentication presents a JWT directly to this
+  # route. The Lambda still requires the exact invitation, installation, and
+  # DPoP binding, and it accepts only a transaction that has not entered the
+  # managed-login PKCE route.
+  KaevoHouseholdJoinCompleteNativeRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: JWT
+      AuthorizerId: !Ref KaevoHouseholdJoinAuthorizer
+      RouteKey: POST /v3/identity/household-joins/complete-native
       Target: !Join ["/", [integrations, !Ref KaevoHouseholdJoinIntegration]]
 
   KaevoHouseholdJoinOnboardingStatusRoute:

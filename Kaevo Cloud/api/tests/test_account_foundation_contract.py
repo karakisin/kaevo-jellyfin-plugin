@@ -112,6 +112,12 @@ class Table:
             item["updated_at"] = values[":updated_at"]
         if ":owner_principal_id" in values:
             item["owner_principal_id"] = values[":owner_principal_id"]
+        if ":targets" in values:
+            item["watching_profile_ids"] = list(values[":targets"])
+        if ":updated" in values:
+            item["updated_at"] = values[":updated"]
+        if ":epoch" in values:
+            item["updated_at_epoch"] = values[":epoch"]
         self.items[key] = item
         if ":updated_epoch" in values:
             item["updated_at_epoch"] = values[":updated_epoch"]
@@ -447,6 +453,8 @@ def test_template_declares_additive_account_foundation_storage_and_route():
     # path-scoped invoke permission for the shared API function.
     assert "RouteKey: GET /v3/identity/me" in template
     assert "RouteKey: POST /v3/identity/migrate-household-membership" in template
+    assert "RouteKey: PUT /v3/identity/profiles/{profileId}/watching-targets" in template
+    assert "RouteKey: PUT /v3/identity/profiles/{profileId}/seerr-binding" in template
     assert "RouteKey: POST /v3/identity/profiles/{profileId}/deletion" in template
     assert "ACCOUNTS_TABLE: !Ref KaevoAccountsTable" in template
     assert "AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable" in template
@@ -898,7 +906,10 @@ def test_identity_me_exposes_only_the_exact_normalized_self_profile_for_replacem
         "access_level": "manage",
         "status": "active",
         "is_self": True,
+        "request_access_enabled": True,
+        "parental_controls": None,
         "switch_protection": "not_configured",
+        "allowed_viewing_profile_ids": ["profile-1"],
     }]
 
     # The exact profile edge is mandatory: a stale or unrelated pointer is
@@ -906,6 +917,135 @@ def test_identity_me_exposes_only_the_exact_normalized_self_profile_for_replacem
     membership["profile_id"] = "another-profile"
     assert json.loads(handler.identity_me_v3({}, verified_session=session)["body"])["profile_access"] == []
 
+
+def test_identity_me_prefers_exact_profile_request_policy_over_stale_membership_projection(monkeypatch):
+    tables, _transaction_client, session = install_normalized_profile_context(monkeypatch)
+    membership_id = household_membership_id("acct_1", "household-1")
+    membership = tables["household-memberships"].items[("household-1", membership_id)]
+    membership["profile_id"] = "profile-1"
+    membership["request_access_enabled"] = False
+    identity_profile = handler.identity_profiles_table.items["profile-1"]
+    identity_profile["display_name"] = "Member"
+    identity_profile["request_access_enabled"] = True
+
+    response = handler.identity_me_v3({}, verified_session=session)
+
+    assert response["statusCode"] == 200
+    assert json.loads(response["body"])["profile_access"][0]["request_access_enabled"] is True
+
+
+def test_owner_updates_exact_watching_targets_without_changing_switch_authority(monkeypatch):
+    tables, _transaction_client, _session = install_normalized_profile_context(monkeypatch)
+    source = handler.identity_profiles_table.items["profile-1"]
+    source["switch_profile_ids"] = ["profile-switch-only"]
+    source["watching_profile_ids"] = []
+    handler.identity_profiles_table.put_item(Item={
+        "profile_id": "profile-viewer-2",
+        "account_id": "acct_2",
+        "household_id": "household-1",
+        "profile_type": "kid",
+        "state": "active",
+    })
+
+    result = handler.update_profile_watching_targets_v3(
+        {"body": json.dumps({"profile_ids": ["profile-viewer-2"]})},
+        "/v3/identity/profiles/profile-1/watching-targets",
+    )
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert body == {
+        "state": "watching_targets_updated",
+        "profile_ids": ["profile-viewer-2"],
+    }
+    stored = handler.identity_profiles_table.items["profile-1"]
+    assert stored["watching_profile_ids"] == ["profile-viewer-2"]
+    assert stored["switch_profile_ids"] == ["profile-switch-only"]
+
+
+def test_parental_controls_wire_contract_matches_ios_and_rejects_coerced_ids():
+    policy = {
+        "version": 1,
+        "is_enabled": True,
+        "preset": "olderKids",
+        "hide_unrated_content": True,
+        "blocked_genres": ["horror"],
+        "blocked_tags": ["mature"],
+        "allowed_tags": ["kaevo-kids-approved"],
+        "exceptions": [{
+            "id": "exception-1",
+            "title": "Approved title",
+            "scope": "title",
+            "provider_item_ids": ["jellyfin-item-1"],
+        }],
+    }
+    assert handler._normalized_parental_controls(
+        policy, require_child_safe=True,
+    ) == policy
+    with pytest.raises(ValueError):
+        handler._normalized_parental_controls(
+            {**policy, "allowed_tags": [123]}, require_child_safe=True,
+        )
+
+
+def test_watching_targets_are_owner_only_and_resolve_exact_same_household_ids(monkeypatch):
+    tables, _transaction_client, owner_session = install_normalized_profile_context(monkeypatch)
+    membership_id = household_membership_id("acct_1", "household-1")
+    tables["household-memberships"].items[("household-1", membership_id)]["profile_id"] = "profile-1"
+    source = handler.identity_profiles_table.items["profile-1"]
+    source["display_name"] = "Owner"
+    source["watching_profile_ids"] = ["profile-viewer-2", "profile-cross-household"]
+    for profile_id, household_id in (
+        ("profile-viewer-2", "household-1"),
+        ("profile-cross-household", "other-household"),
+    ):
+        handler.identity_profiles_table.put_item(Item={
+            "profile_id": profile_id,
+            "account_id": "acct_2",
+            "household_id": household_id,
+            "profile_type": "kid",
+            "display_name": "Exact Viewer" if profile_id == "profile-viewer-2" else "Other Household",
+            "state": "active",
+        })
+
+    identity = handler.identity_me_v3({}, verified_session=owner_session)
+    profile_access = json.loads(identity["body"])["profile_access"]
+    self_access = next(
+        item for item in profile_access
+        if item.get("is_self") is True
+    )
+    assert self_access["allowed_viewing_profile_ids"] == [
+        "profile-1", "profile-viewer-2",
+    ]
+    assert next(item for item in profile_access if item["profile_id"] == "profile-viewer-2") == {
+        "profile_id": "profile-viewer-2",
+        "profile_type": "kid",
+        "display_name": "Exact Viewer",
+        "access_level": "view",
+        "status": "active",
+        "parental_controls": None,
+        "switch_protection": "not_configured",
+    }
+
+    _tables, _transaction_client, _member_session = install_normalized_profile_context(
+        monkeypatch,
+        account_id="member-account",
+        subject="member-subject",
+        role="adult",
+    )
+    handler.identity_profiles_table.put_item(Item={
+        "profile_id": "profile-viewer-2",
+        "account_id": "acct_2",
+        "household_id": "household-1",
+        "profile_type": "kid",
+        "state": "active",
+    })
+    rejected = handler.update_profile_watching_targets_v3(
+        {"body": json.dumps({"profile_ids": ["profile-viewer-2"]})},
+        "/v3/identity/profiles/profile-1/watching-targets",
+    )
+    assert rejected["statusCode"] == 403
+    assert json.loads(rejected["body"])["state"] == "watching_targets_owner_required"
 
 def test_profile_binding_offline_planner_is_fixture_only_and_never_writes(tmp_path):
     script = Path(__file__).resolve().parents[2] / "scripts" / "plan-profile-binding-migration.py"
@@ -1312,6 +1452,33 @@ def test_canonical_member_immediate_deletion_removes_exact_graph_and_never_cogni
     assert tables["profile-settings"].items == {}
     assert tables["entitlements"].items == {}
     assert tables["devices"].items == {}
+
+
+def test_canonical_member_deletion_does_not_leave_authority_stuck_when_avatar_cleanup_is_unavailable(monkeypatch):
+    tables, _session, profile_id, _account_id, subject, _source = (
+        install_canonical_member_deletion_graph(monkeypatch)
+    )
+
+    class FailingAvatarStorage:
+        def delete_object(self, **_kwargs):
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "DeleteObject")
+
+    monkeypatch.setattr(handler, "PROFILE_AVATARS_BUCKET", "private-profile-avatars")
+    monkeypatch.setattr(handler, "s3_client", FailingAvatarStorage())
+
+    result = handler.delete_profile_v3(
+        {"body": json.dumps({
+            "mode": "immediate",
+            "explicit_confirmation": True,
+        })},
+        f"/v3/identity/profiles/{profile_id}/deletion",
+    )
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert body["state"] == "profile_deleted"
+    assert profile_id not in tables["identity-profiles"].items
+    assert tables["principals"].items[subject]["state"] == "revoked"
 
 
 def test_canonical_member_retention_revokes_access_and_preserves_exact_recovery_graph(monkeypatch):

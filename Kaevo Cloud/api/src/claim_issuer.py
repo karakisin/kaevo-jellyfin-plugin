@@ -40,6 +40,29 @@ KAEVO_CLAIMS = [
 ]
 
 
+def _is_terminal_rejoin_shell(
+    principal: Mapping[str, Any] | None,
+    membership: Mapping[str, Any] | None,
+    profile: Mapping[str, Any] | None,
+) -> bool:
+    """Recognize only the exact residual left by immediate profile deletion.
+
+    A profile deletion deliberately revokes its principal but retains the
+    Cognito account and identity edge.  A subsequent invitation for that same
+    subject needs a temporary, non-authoritative token to complete its
+    invitation-bound rejoin.  Do not treat arbitrary partial authority data as
+    unenrolled: the residual has a very specific shape.
+    """
+    return (
+        isinstance(principal, Mapping)
+        and str(principal.get("state") or "") == "revoked"
+        and principal.get("revoked") is True
+        and list(principal.get("profile_ids") or []) == []
+        and membership is None
+        and profile is None
+    )
+
+
 @dataclass(frozen=True)
 class ClientPolicy:
     kind: str
@@ -205,7 +228,10 @@ def issue_claims(event: Mapping[str, Any], *, dynamodb: Any, cognito: Any) -> di
     profile_id = str((membership or {}).get("profile_id") or "")
     household = households.get_item(Key={"household_id": household_id}, ConsistentRead=True).get("Item") if household_id else None
     profile = profiles.get_item(Key={"profile_id": profile_id}, ConsistentRead=True).get("Item") if profile_id else None
-    if policy.kind == "native" and not any((principal, membership, household, profile)):
+    if policy.kind == "native" and (
+        not any((principal, membership, household, profile))
+        or _is_terminal_rejoin_shell(principal, membership, profile)
+    ):
         overrides["accessTokenGeneration"] = {
             "claimsToAddOrOverride": {"kaevo_enrollment_required": "true"},
             "claimsToSuppress": [claim for claim in KAEVO_CLAIMS if claim != "kaevo_enrollment_required"],

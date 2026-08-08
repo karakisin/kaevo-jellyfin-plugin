@@ -429,10 +429,11 @@ def test_new_account_authorization_always_originates_at_oauth_authorize(monkeypa
         "oauth_state": state,
         "code_challenge": challenge,
         "nonce": nonce,
+        "provider": "emailSignIn",
     })})
 
     assert result["statusCode"] == 200
-    assert table.items[join._sha(handle)]["cognito_route"] == "authorize"
+    assert table.items[join._sha(handle)]["cognito_route"] == "emailSignIn"
     redirect = join.authorize({"queryStringParameters": {"resume": handle, "state": state}})
     assert redirect["statusCode"] == 302
     assert redirect["headers"]["Location"].startswith("https://auth.example/oauth2/authorize?")
@@ -526,12 +527,15 @@ def test_isolated_template_uses_explicit_routes_without_shared_api_events():
     text = template.read_text()
     for logical_id in (
         "KaevoHouseholdJoinFunction:", "KaevoHouseholdJoinIntegration:",
-        "KaevoHouseholdJoinBeginRoute:", "KaevoHouseholdJoinRouteAuthRoute:",
+        "KaevoHouseholdJoinBeginRoute:", "KaevoHouseholdJoinRouteAuthRoute:", "KaevoHouseholdJoinResolveEmailRoute:",
         "KaevoHouseholdJoinAuthorizeRoute:", "KaevoHouseholdJoinAuthResultRoute:", "KaevoHouseholdJoinCompleteRoute:",
+        "KaevoHouseholdJoinCompleteNativeRoute:",
         "KaevoHouseholdJoinOnboardingStatusRoute:", "KaevoHouseholdJoinProfileSetupRoute:",
     ):
         assert logical_id in text
     assert "RouteKey: POST /v3/identity/household-joins/complete" in text
+    assert "RouteKey: POST /v3/identity/household-joins/complete-native" in text
+    assert "RouteKey: POST /v3/identity/household-joins/resolve-email" in text
     assert "DeletionPolicy: Retain" in text
     shared = text[text.index("KaevoCloudApiFunction:"):text.index("KaevoIdentityV3ApiIntegration:")]
     assert "household-joins/begin" not in shared
@@ -595,17 +599,18 @@ def test_profile_setup_iam_allows_only_its_transactional_record_writes():
     assert "Resource: '*'" not in statement
 
 
-def test_intent_first_client_targets_only_v3_completion():
+def test_intent_first_client_targets_only_v3_completion_contracts():
     client = (Path(__file__).parents[4] / "iOS" / "iOS Kaevo v2" / "Cloud" / "KaevoCloudClient.swift").read_text()
     start = client.index("func completeHouseholdJoin(")
     section = client[start:client.index("func listOwnerDevices", start)]
     assert 'appendingPathComponent("v3/identity/household-joins/complete")' in section
+    assert 'appendingPathComponent("v3/identity/household-joins/complete-native")' in section
     assert 'path: "/v2/identity/join-household"' not in section
 
 
 def test_complete_creates_only_normalized_pending_membership_and_defers_profile_authority():
     source = (Path(__file__).parents[2] / "api" / "src" / "household_join_handler.py").read_text()
-    complete_source = source[source.index("def complete(event):"):source.index("def onboarding_status(event):")]
+    complete_source = source[source.index("def complete(event, *, native_password=False):"):source.index("def onboarding_status(event):")]
     assert '"status": "pending_profile"' in complete_source
     assert '"entity_type": "HouseholdJoinPendingLookup"' in complete_source
     assert '"TableName": PRINCIPALS_TABLE' not in complete_source
@@ -616,9 +621,170 @@ def test_complete_creates_only_normalized_pending_membership_and_defers_profile_
     assert "_serialize_transact_items" not in complete_source
 
 
+def test_join_policy_normalizers_keep_watching_separate_and_fail_closed_for_kids():
+    watching = ["profile_viewer_1234567890"]
+    parental = {
+        "version": 1,
+        "is_enabled": True,
+        "preset": "olderKids",
+        "allowed_tags": ["Family"],
+        "blocked_genres": ["Horror"],
+        "blocked_tags": ["Horror"],
+        "exceptions": [{
+            "id": "movie-123",
+            "title": "Approved Movie",
+            "scope": "title",
+            "provider_item_ids": ["jellyfin-item-123"],
+        }],
+        "hide_unrated_content": True,
+    }
+
+    assert join._invitation_watching_profile_ids(watching) == watching
+    assert join._normalized_invitation_parental_controls(
+        parental, require_child_safe=True,
+    ) == parental
+    with pytest.raises(join.AccountFoundationError):
+        join._normalized_invitation_parental_controls(
+            {**parental, "is_enabled": False}, require_child_safe=True,
+        )
+    with pytest.raises(join.AccountFoundationError):
+        join._invitation_watching_profile_ids(["profile-name-is-not-an-id"])
+
+
+def test_complete_and_profile_setup_carry_exact_invitation_policy_into_active_authority():
+    source = (Path(__file__).parents[2] / "api" / "src" / "household_join_handler.py").read_text()
+    complete_source = source[source.index("def complete(event, *, native_password=False):"):source.index("def onboarding_status(event):")]
+    profile_setup_source = source[
+        source.index("def profile_setup(event):"):
+        source.index("def _canonical_route_path", source.index("def profile_setup(event):"))
+    ]
+
+    for field in (
+        '"request_access_enabled": request_access_enabled',
+        '"parental_controls": parental_controls',
+        '"switch_profile_ids": switch_profile_ids',
+        '"watching_profile_ids": watching_profile_ids',
+    ):
+        assert field in complete_source
+        assert field in profile_setup_source
+    assert "parental_controls = :parental_controls" in complete_source
+    assert "watching_profile_ids = :watching_profiles" in complete_source
+    assert "AND parental_controls = :parental_controls" in profile_setup_source
+    assert "AND watching_profile_ids = :watching_profiles" in profile_setup_source
+
+
+def test_immediately_deleted_principal_can_rejoin_only_through_the_exact_terminal_shape():
+    source = (Path(__file__).parents[2] / "api" / "src" / "household_join_handler.py").read_text()
+    complete_source = source[source.index("def complete(event, *, native_password=False):"):source.index("def onboarding_status(event):")]
+    profile_setup_source = source[
+        source.index("def profile_setup(event):"):
+        source.index("def _canonical_route_path", source.index("def profile_setup(event):"))
+    ]
+
+    assert "_is_terminal_rejoin_principal(existing, existing_membership)" in complete_source
+    assert 'str(principal.get("state") or "") == "revoked"' in source
+    assert "principal.get(\"revoked\") is True" in source
+    assert "list(principal.get(\"profile_ids\") or []) == []" in source
+    assert "account_id = :account_id AND profile_ids = :empty_profile_ids" in profile_setup_source
+
+
+def test_completion_conflicts_emit_only_bounded_diagnostic_categories():
+    source = (Path(__file__).parents[2] / "api" / "src" / "household_join_handler.py").read_text()
+    for category in (
+        "existing_principal_other_household",
+        "auth_identity_account_inactive",
+        "terminal_rejoin_account_mismatch",
+        "pending_lookup_already_exists",
+        "invitation_role_policy_invalid",
+        "invitation_household_missing",
+        "invitation_profile_reservation_invalid",
+        "invitation_access_policy_invalid",
+        "auth_identity_binding_invalid",
+    ):
+        assert f'outcome="{category}"' in source
+
+
+def test_completion_transaction_conflicts_emit_only_the_operation_label():
+    source = (Path(__file__).parents[2] / "api" / "src" / "household_join_handler.py").read_text()
+    assert '"event": "household_join_complete_transaction_conflict"' in source
+    assert '"failed_transaction_operation": label' in source
+    assert "record.items()" not in source
+
+
+def test_normalized_membership_conflict_does_not_log_identity_material():
+    source = (Path(__file__).parents[2] / "api" / "src" / "household_join_handler.py").read_text()
+    assert '"event": "household_join_normalized_membership_conflict"' in source
+    assert '"safe_membership_category": membership_category' in source
+    assert 'safe_status in {"revoked", "deletion_pending", "deleting"}' in source
+
+
+def test_rejoin_can_replace_only_the_same_account_revoked_membership():
+    source = (Path(__file__).parents[2] / "api" / "src" / "household_join_handler.py").read_text()
+    complete_source = source[source.index("def complete(event, *, native_password=False):"):source.index("def complete_native(event):")]
+    assert "entity_type = :entity_type AND account_id = :account_id" in complete_source
+    assert 'permitted_membership_status_expression = "= :revoked"' in complete_source
+    assert '":revoked": "revoked"' in complete_source
+
+
+def test_deleting_membership_rejoin_requires_terminal_exact_authority():
+    source = (Path(__file__).parents[2] / "api" / "src" / "household_join_handler.py").read_text()
+    complete_source = source[source.index("def complete(event, *, native_password=False):"):source.index("def complete_native(event):")]
+    deleting_helper_source = source[
+        source.index("def _is_terminal_deleting_membership"):
+        source.index("def _auth_result_url")
+    ]
+    assert "def _is_terminal_deleting_membership" in source
+    assert 'membership.get("status") == "deleting"' in source
+    assert 'hmac.compare_digest(str(membership.get("account_id") or ""), account_id)' in source
+    assert 'hmac.compare_digest(str(membership.get("household_id") or ""), household_id)' in source
+    assert 're.fullmatch(r"profile_[A-Za-z0-9_-]{16,128}", profile_id)' not in deleting_helper_source
+    assert "def _terminal_deleting_membership_has_no_live_profile" in deleting_helper_source
+    assert 'Key={"profile_id": profile_id}' in deleting_helper_source
+    assert ".scan(" not in deleting_helper_source
+    assert 'if terminal_deleting_membership:' in complete_source
+    assert "and _terminal_deleting_membership_has_no_live_profile(" in complete_source
+    assert 'normalized_membership_expression_values[":deleting"] = "deleting"' in complete_source
+
+
+def test_terminal_deleting_membership_accepts_legacy_tombstone_only_after_exact_profile_absence(monkeypatch):
+    class Profiles:
+        def __init__(self, items=()):
+            self.items = {item["profile_id"]: dict(item) for item in items}
+            self.keys = []
+
+        def get_item(self, *, Key, **_kwargs):
+            self.keys.append(dict(Key))
+            item = self.items.get(Key["profile_id"])
+            return {"Item": dict(item)} if item else {}
+
+    membership = {
+        "entity_type": "HouseholdMembership",
+        "status": "deleting",
+        "account_id": "acct-terminal",
+        "household_id": "household-terminal",
+        # This is an intentionally supported legacy shape, not an authority
+        # claim. The account/household rows above remain the authorization.
+        "profile_id": "legacy-profile-17",
+    }
+    identity_profiles = Profiles()
+    cloud_profiles = Profiles()
+    monkeypatch.setattr(join, "profiles", identity_profiles)
+    monkeypatch.setattr(join, "cloud_profiles", cloud_profiles)
+
+    assert join._is_terminal_deleting_membership(
+        membership, account_id="acct-terminal", household_id="household-terminal",
+    )
+    assert join._terminal_deleting_membership_has_no_live_profile(membership)
+    assert identity_profiles.keys == [{"profile_id": "legacy-profile-17"}]
+    assert cloud_profiles.keys == [{"profile_id": "legacy-profile-17"}]
+
+    cloud_profiles.items["legacy-profile-17"] = {"profile_id": "legacy-profile-17"}
+    assert not join._terminal_deleting_membership_has_no_live_profile(membership)
+
+
 def test_complete_binds_the_authenticated_subject_not_the_pre_login_email_hash():
     source = (Path(__file__).parents[2] / "api" / "src" / "household_join_handler.py").read_text()
-    complete_source = source[source.index("def complete(event):"):source.index("def onboarding_status(event):")]
+    complete_source = source[source.index("def complete(event, *, native_password=False):"):source.index("def onboarding_status(event):")]
     assert "authenticated_subject_lookup_invalid" in complete_source
     assert "item.get(\"email_hash\")" not in complete_source
     assert "hmac.compare_digest(_sha(_email(attributes.get(\"email\")))" not in complete_source
@@ -674,7 +840,7 @@ def test_profile_setup_binding_promotion_is_exact_get_item_only_without_scan():
 
 def test_pending_recovery_is_a_direct_subject_and_device_pointer_without_scan():
     source = (Path(__file__).parents[2] / "api" / "src" / "household_join_handler.py").read_text()
-    recovery = source[source.index("def _pending_lookup_key"):source.index("def complete(event):")]
+    recovery = source[source.index("def _pending_lookup_key"):source.index("def complete(event, *, native_password=False):")]
     assert "HouseholdJoinPendingLookup" in recovery
     assert "_pending_lookup_key(subject, installation_hash)" in recovery
     assert ".scan(" not in recovery

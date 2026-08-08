@@ -743,6 +743,28 @@ def identity_me_v3(event, *, verified_session=None):
             household_id=claims.household_id,
         ):
             profile_access_by_id.setdefault(str(item["profile_id"]), item)
+        # Viewer selection is intentionally narrower than profile switching.
+        # It is only a presentation/playback audience grant and never lets a
+        # member enter, edit, or otherwise assume another profile.
+        viewing_access = _authorized_viewing_profile_access(
+            source_profile=profile,
+            household_id=claims.household_id,
+        )
+        self_profile_id = str(profile.get("profile_id") or "").strip()
+        viewing_profile_ids = [self_profile_id] if self_profile_id else []
+        viewing_profile_ids.extend(
+            item["profile_id"] for item in viewing_access
+            if item["profile_id"] not in viewing_profile_ids
+        )
+        for item in profile_access_by_id.values():
+            if item.get("is_self") is True:
+                item["allowed_viewing_profile_ids"] = viewing_profile_ids
+        # The member receives only the exact, pre-authorized viewer records.
+        # A view entry deliberately remains non-switchable; it provides the
+        # presentation metadata required for Who's Watching without exposing
+        # an account-entry path or the broader household roster.
+        for item in viewing_access:
+            profile_access_by_id.setdefault(str(item["profile_id"]), item)
         profile_access = sorted(profile_access_by_id.values(), key=lambda item: item["profile_id"])
         profile_access = _decorate_profile_access_with_switch_protection(
             profile_access,
@@ -821,7 +843,11 @@ def _normalized_self_profile_access(*, claims, resolved_role, normalized_members
     if profile.get("state") != "active" or not display_name or profile_type not in {"adult", "teen", "child", "kid"}:
         return []
     access_role = str(normalized_membership.get("household_access_role") or "").strip().lower()
-    access_level = "manage" if str(getattr(resolved_role, "value", resolved_role)) == "owner" or access_role == "admin" else "switch"
+    is_household_owner = (
+        str(getattr(resolved_role, "value", resolved_role)) == CanonicalRole.OWNER.value
+        or access_role == HouseholdAccessRole.OWNER.value
+    )
+    access_level = "manage" if is_household_owner or access_role == "admin" else "switch"
     return [{
         "profile_id": profile_id,
         "profile_type": profile_type,
@@ -829,6 +855,31 @@ def _normalized_self_profile_access(*, claims, resolved_role, normalized_members
         "access_level": access_level,
         "status": "active",
         "is_self": True,
+        # Household Owners always retain video-request access. This governs
+        # Kaevo policy only; an exact Seerr identity still requires the paired
+        # plugin's canonical provisioning flow.
+        # Request access is a profile-scoped policy.  The normalized
+        # membership establishes the caller's household authority and exact
+        # profile pointer, but can be an older projection after an Owner edits
+        # a member's request grant.  Prefer the strongly-read canonical
+        # profile whenever it carries an explicit value; retain the membership
+        # field only for legacy profiles that have not yet stored the policy.
+        # This does not broaden access: both records were read by exact key
+        # and already proved the same active account, household, and profile.
+        "request_access_enabled": is_household_owner or bool_value(
+            profile.get(
+                "request_access_enabled",
+                normalized_membership.get("request_access_enabled"),
+            ),
+            False,
+        ),
+        "parental_controls": normalized_membership.get(
+            "parental_controls",
+            profile.get("parental_controls"),
+        ),
+        # Self is always a valid viewer. Explicit household audience grants
+        # are added later after exact, same-household records are read back.
+        "allowed_viewing_profile_ids": [profile_id],
     }]
 
 
@@ -891,6 +942,50 @@ def _authorized_switch_target_access(*, source_profile, household_id):
             "access_level": "switch",
             "status": "active",
             "switch_protection": _profile_switch_protection(target),
+        })
+    return resolved
+
+
+def _authorized_viewing_profile_access(*, source_profile, household_id):
+    """Resolve the caller's exact, owner-configured Who's Watching audience.
+
+    This returns minimal, exact target metadata rather than a household roster.
+    ``access_level=view`` is presentation/playback-only and is never accepted
+    by Profile Switching or profile-mapping routes.
+    """
+    if not isinstance(source_profile, dict):
+        return []
+    candidates = source_profile.get("watching_profile_ids") or []
+    if not isinstance(candidates, list) or len(candidates) > 64:
+        candidates = []
+    resolved = []
+    seen = set()
+    for value in candidates:
+        profile_id = str(value or "").strip()
+        if not profile_id or profile_id in seen:
+            continue
+        seen.add(profile_id)
+        target = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+        if not (
+            isinstance(target, dict)
+            and target.get("state") == "active"
+            and str(target.get("profile_id") or "") == profile_id
+            and str(target.get("household_id") or "") == household_id
+        ):
+            continue
+        display_name = str(target.get("display_name") or "").strip()
+        profile_type = str(target.get("profile_type") or "").strip().lower()
+        if not display_name or profile_type not in {"adult", "teen", "child", "kid"}:
+            continue
+        resolved.append({
+            "profile_id": profile_id,
+            "profile_type": profile_type,
+            "display_name": display_name,
+            "access_level": "view",
+            "status": "active",
+            "parental_controls": target.get("parental_controls"),
         })
     return resolved
 
@@ -1760,9 +1855,17 @@ def _public_household_profile_roster_item(profile, *, canonical_role, household_
         "profile_type": profile_type,
         "canonical_role": canonical_role,
         "household_access_role": household_access_role,
-        "request_access_enabled": bool_value(profile.get("request_access_enabled"), False),
+        # An Owner is never eligible for an accidental request-access denial.
+        # Other roles retain the explicit stored value, including legacy false.
+        "request_access_enabled": (
+            str(household_access_role or "").lower() == HouseholdAccessRole.OWNER.value
+            or str(canonical_role or "").lower() == CanonicalRole.OWNER.value
+            or bool_value(profile.get("request_access_enabled"), False)
+        ),
+        "parental_controls": profile.get("parental_controls"),
         "cloud_access_enabled": bool_value(profile.get("cloud_access_enabled"), True),
         "allowed_profile_switch_targets": list(profile.get("switch_profile_ids") or []),
+        "allowed_watching_targets": list(profile.get("watching_profile_ids") or []),
         "status": "active",
     }
 
@@ -1797,8 +1900,12 @@ def list_household_profiles_v3(event):
         return response(409, {"state": "household_profile_roster_unavailable"})
 
     # A 30-day deletion is revoked immediately and finalized on the first
-    # authoritative Owner refresh at or after its execute time. Every cleanup
-    # path remains exact-key/household-query based; no DynamoDB Scan is used.
+    # authoritative Owner refresh at or after its execute time. An immediate
+    # deletion can also be interrupted after its authority cutover, leaving an
+    # exact ``deleting`` row. Continue that already-authorized cleanup on the
+    # next Owner refresh rather than leaving an unusable terminal membership.
+    # Every cleanup path remains exact-key/household-query based; no DynamoDB
+    # Scan is used.
     if (
         str((context.get("household") or {}).get("canonical_role") or "")
         == CanonicalRole.OWNER.value
@@ -1823,7 +1930,7 @@ def list_household_profiles_v3(event):
             if (
                 not isinstance(membership, dict)
                 or membership.get("entity_type") != "HouseholdMembership"
-                or membership.get("status") != "deletion_pending"
+                or membership.get("status") not in {"deletion_pending", "deleting"}
                 or int(membership.get("deletion_execute_at_epoch") or 0) > epoch_now()
             ):
                 continue
@@ -2470,6 +2577,11 @@ def profile_switch_targets_path_id(path):
     return match.group(1) if match else ""
 
 
+def profile_watching_targets_path_id(path):
+    match = re.fullmatch(r"/v3/identity/profiles/([^/]+)/watching-targets", str(path or ""))
+    return match.group(1) if match else ""
+
+
 def profile_deletion_path_id(path):
     match = re.fullmatch(r"/v3/identity/profiles/([^/]+)/deletion", str(path or ""))
     return match.group(1) if match else ""
@@ -2482,9 +2594,30 @@ def profile_jellyfin_binding_path_id(path):
     return match.group(1) if match else ""
 
 
+def profile_seerr_binding_path_id(path):
+    match = re.fullmatch(
+        r"/v3/identity/profiles/([^/]+)/seerr-binding", str(path or ""),
+    )
+    return match.group(1) if match else ""
+
+
 def _normalized_jellyfin_user_id(value):
     compact = str(value or "").strip().replace("-", "")
     return compact.lower() if re.fullmatch(r"[0-9a-fA-F]{32}", compact) else ""
+
+
+def _normalized_seerr_user_id(value):
+    """Return a canonical positive Seerr user id without accepting aliases."""
+    if isinstance(value, bool):
+        return ""
+    compact = str(value or "").strip()
+    if not re.fullmatch(r"[1-9][0-9]{0,9}", compact):
+        return ""
+    try:
+        parsed = int(compact)
+    except (TypeError, ValueError):
+        return ""
+    return str(parsed) if parsed <= 2147483647 else ""
 
 
 def _profile_jellyfin_binding_for_connector(profile_id, connector_id):
@@ -3589,6 +3722,98 @@ def save_profile_jellyfin_binding_v3(event, path):
     })
 
 
+def save_profile_seerr_binding_v3(event, path):
+    """Persist a plugin-proven Seerr edge for an already-bound exact profile.
+
+    Seerr discovery is deliberately not performed here. The Owner authorizes
+    the write, the paired plugin returns one Seerr account for one immutable
+    Jellyfin user, and this endpoint persists only that exact tuple.
+    """
+    if any(table is None for table in (identity_profiles_table, security_audit_table)):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return failure
+    profile_id = profile_seerr_binding_path_id(path)
+    body = parse_json_body(event)
+    if not (
+        re.fullmatch(r"profile_[A-Za-z0-9_-]{16,128}", profile_id)
+        and isinstance(body, dict)
+        and body.get("explicit_confirmation") is True
+    ):
+        return _profile_switch_failure(event, session, "profile_seerr_binding_invalid", profile_id=profile_id)
+    if str((context.get("household") or {}).get("role") or "").lower() != CanonicalRole.OWNER.value:
+        return _profile_switch_failure(event, session, "profile_seerr_binding_owner_required", profile_id=profile_id)
+    supplied_jellyfin_user_id = _normalized_jellyfin_user_id(body.get("jellyfin_user_id"))
+    seerr_user_id = _normalized_seerr_user_id(body.get("seerr_user_id"))
+    if not supplied_jellyfin_user_id or not seerr_user_id:
+        return _profile_switch_failure(event, session, "profile_seerr_binding_invalid", profile_id=profile_id)
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    try:
+        canonical = _exact_identity_profile(profile_id, household_id=household_id)
+        bound_jellyfin_user_id = _normalized_jellyfin_user_id(canonical.get("jellyfin_user_id"))
+        connector_id = str(canonical.get("jellyfin_connector_id") or "")
+        if not (
+            str(canonical.get("jellyfin_binding_state") or "") == "active"
+            and connector_id
+            and hmac.compare_digest(bound_jellyfin_user_id, supplied_jellyfin_user_id)
+        ):
+            raise AccountFoundationError("profile_seerr_binding_jellyfin_mismatch")
+        existing_state = str(canonical.get("seerr_binding_state") or "")
+        existing_connector_id = str(canonical.get("seerr_connector_id") or "")
+        existing_jellyfin_user_id = _normalized_jellyfin_user_id(
+            canonical.get("seerr_jellyfin_user_id")
+        )
+        existing_seerr_user_id = _normalized_seerr_user_id(canonical.get("seerr_user_id"))
+        if existing_state == "active" and not (
+            hmac.compare_digest(existing_connector_id, connector_id)
+            and hmac.compare_digest(existing_jellyfin_user_id, supplied_jellyfin_user_id)
+            and hmac.compare_digest(existing_seerr_user_id, seerr_user_id)
+        ):
+            raise AccountFoundationError("profile_seerr_binding_conflict")
+        if existing_state == "active":
+            return response(200, {"state": "profile_seerr_binding_saved"})
+        identity_profiles_table.update_item(
+            Key={"profile_id": profile_id},
+            UpdateExpression=(
+                "SET seerr_connector_id = :connector_id, "
+                "seerr_jellyfin_user_id = :jellyfin_user_id, "
+                "seerr_user_id = :seerr_user_id, "
+                "seerr_binding_state = :binding_state, "
+                "request_access_enabled = :request_access_enabled, "
+                "seerr_binding_updated_at = :updated_at"
+            ),
+            ConditionExpression=(
+                "#state = :active AND household_id = :household_id "
+                "AND jellyfin_binding_state = :binding_state "
+                "AND jellyfin_connector_id = :connector_id "
+                "AND jellyfin_user_id = :jellyfin_user_id"
+            ),
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":active": "active", ":household_id": household_id,
+                ":connector_id": connector_id,
+                ":jellyfin_user_id": supplied_jellyfin_user_id,
+                ":seerr_user_id": seerr_user_id,
+                ":binding_state": "active", ":updated_at": utc_now_iso(),
+                ":request_access_enabled": True,
+            },
+        )
+        commit_security_audit(_profile_binding_audit(
+            event, session, "profile_seerr_binding_saved", "success", target_id=profile_id,
+        ))
+    except AccountFoundationError as error:
+        return _profile_switch_failure(event, session, error.reason, profile_id=profile_id)
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError:
+        return _profile_switch_failure(event, session, "profile_seerr_binding_conflict", profile_id=profile_id)
+    return response(200, {"state": "profile_seerr_binding_saved"})
+
+
 def create_profile_binding_v3(event, path, *, verified_session=None, retry_on_conflict=True):
     """Grant one explicit view/switch binding to an active household member."""
     if any(table is None for table in (
@@ -3732,6 +3957,7 @@ def _profile_switch_failure(event, session, state, *, profile_id=""):
     status = 403 if state in {
         "profile_switch_not_authorized", "profile_switch_target_not_authorized",
         "profile_switch_pin_configuration_not_authorized",
+        "watching_targets_owner_required",
     } else 409
     return response(status, {"state": state})
 
@@ -3885,6 +4111,58 @@ def update_profile_switch_targets_v3(event, path):
     except ClientError:
         return _profile_switch_failure(event, session, "profile_switch_targets_conflict", profile_id=profile_id)
     return response(200, {"state": "profile_switch_targets_updated", "profile_ids": profile_ids})
+
+
+def update_profile_watching_targets_v3(event, path):
+    """Owner-only update for one profile's explicit Who's Watching audience."""
+    if any(table is None for table in (identity_profiles_table, security_audit_table)):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return failure
+    profile_id = profile_watching_targets_path_id(path)
+    body = parse_json_body(event)
+    if not profile_id or not isinstance(body, dict) or not isinstance(body.get("profile_ids"), list):
+        return _profile_switch_failure(event, session, "invalid_watching_targets_request", profile_id=profile_id)
+    if str((context.get("household") or {}).get("role") or "").lower() != CanonicalRole.OWNER.value:
+        return _profile_switch_failure(event, session, "watching_targets_owner_required", profile_id=profile_id)
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    requested = body.get("profile_ids")
+    if len(requested) > 32:
+        return _profile_switch_failure(event, session, "invalid_watching_targets_request", profile_id=profile_id)
+    try:
+        _exact_identity_profile(profile_id, household_id=household_id)
+        profile_ids = []
+        for candidate in requested:
+            target_id = str(candidate or "").strip()
+            if not target_id or target_id == profile_id or target_id in profile_ids:
+                raise AccountFoundationError("invalid_watching_targets_request")
+            _exact_identity_profile(target_id, household_id=household_id)
+            profile_ids.append(target_id)
+        now = utc_now_iso()
+        identity_profiles_table.update_item(
+            Key={"profile_id": profile_id},
+            UpdateExpression="SET watching_profile_ids = :targets, updated_at = :updated, updated_at_epoch = :epoch",
+            ConditionExpression="#state = :active AND household_id = :household",
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":targets": profile_ids, ":updated": now, ":epoch": epoch_now(),
+                ":active": "active", ":household": household_id,
+            },
+        )
+        commit_security_audit(_profile_binding_audit(
+            event, session, "watching_targets_updated", "success", target_id=profile_id,
+        ))
+    except AccountFoundationError as error:
+        return _profile_switch_failure(event, session, error.reason, profile_id=profile_id)
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError:
+        return _profile_switch_failure(event, session, "watching_targets_conflict", profile_id=profile_id)
+    return response(200, {"state": "watching_targets_updated", "profile_ids": profile_ids})
 
 
 def _mapping_context(event, *, verified_session=None):
@@ -4534,7 +4812,21 @@ def _execute_canonical_profile_deletion(
             # absent.  Do not follow it with HeadObject: without ListBucket,
             # S3 deliberately returns 403 for an absent key, which used to
             # turn a completed provider cleanup into a false Cloud failure.
-            s3_client.delete_object(Bucket=PROFILE_AVATARS_BUCKET, Key=avatar_key)
+            # An avatar is not an identity or provider authority edge.  Once
+            # the canonical profile graph has been revoked, its private
+            # object cannot be requested through Kaevo.  Do not leave a
+            # household member permanently in `deleting` because a later,
+            # idempotent storage cleanup is temporarily unavailable.  Keep
+            # the failure private and observable, without logging the raw
+            # profile ID or broadening S3 permissions.
+            try:
+                s3_client.delete_object(Bucket=PROFILE_AVATARS_BUCKET, Key=avatar_key)
+            except ClientError as error:
+                LOGGER.warning(
+                    "profile_avatar_cleanup_deferred profile=%s code=%s",
+                    _protected_identity_fingerprint(profile_id),
+                    str((error.response or {}).get("Error", {}).get("Code") or "unknown"),
+                )
 
         if isinstance(membership, dict):
             household_memberships_table.delete_item(Key={
@@ -7953,7 +8245,7 @@ def household_invitation_code_expiration(invitation):
 
 
 def household_invitation_response(invitation, join_code, *, state):
-    return response(201, {
+    payload = {
         "state": state,
         "invitation_id": str(invitation.get("invitation_id") or ""),
         "profile_id": str(invitation.get("profile_id") or ""),
@@ -7966,14 +8258,21 @@ def household_invitation_response(invitation, join_code, *, state):
         "cloud_access_enabled": bool_value(
             invitation.get("cloud_access_enabled"), True
         ),
-        "request_access_enabled": bool_value(
-            invitation.get("request_access_enabled"), False
-        ),
         "switch_profile_ids": list(invitation.get("switch_profile_ids") or []),
         "join_code": join_code,
         "join_url": f"kaevo://join?code={join_code}",
         "expires_at": household_invitation_code_expiration(invitation),
-    })
+    }
+    # Keep the public contract compatible for invitations created before the
+    # policy fields existed.  Modern callers always receive their explicit
+    # values; a missing legacy field is not reinterpreted as a new default.
+    if "request_access_enabled" in invitation:
+        payload["request_access_enabled"] = bool_value(
+            invitation.get("request_access_enabled"), False
+        )
+    if "parental_controls" in invitation:
+        payload["parental_controls"] = invitation.get("parental_controls")
+    return response(201, payload)
 
 
 def _invitation_switch_profile_ids(value):
@@ -7993,8 +8292,110 @@ def _invitation_switch_profile_ids(value):
     return resolved
 
 
+def _invitation_watching_profile_ids(value):
+    """Validate only explicit immutable Who's Watching target IDs."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 64:
+        raise ValueError("invalid_watching_targets")
+    resolved = []
+    for candidate in value:
+        profile_id = str(candidate or "").strip()
+        if (
+            not re.fullmatch(r"profile_[A-Za-z0-9_-]{16,128}", profile_id)
+            or profile_id in resolved
+        ):
+            raise ValueError("invalid_watching_targets")
+        resolved.append(profile_id)
+    return resolved
+
+
+def _normalized_parental_controls(value, *, require_child_safe=False):
+    """Validate and retain the owner-selected viewing policy exactly.
+
+    This is policy data, not an entitlement.  Keeping it on the canonical
+    profile/invitation prevents a device-local default from silently changing
+    what a child can watch after joining on another device.
+    """
+    if value is None:
+        if require_child_safe:
+            raise ValueError("missing_child_viewing_level")
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("invalid_parental_controls")
+    if type(value.get("version", 1)) is not int or value.get("version", 1) != 1:
+        raise ValueError("invalid_parental_controls")
+    preset = str(value.get("preset") or "").strip()
+    if preset not in {"littleKids", "olderKids", "teens", "unrestricted"}:
+        raise ValueError("invalid_parental_controls")
+    enabled = value.get("is_enabled")
+    hide_unrated = value.get("hide_unrated_content")
+    if not isinstance(enabled, bool) or not isinstance(hide_unrated, bool):
+        raise ValueError("invalid_parental_controls")
+    if require_child_safe and (not enabled or preset == "unrestricted"):
+        raise ValueError("invalid_child_viewing_level")
+
+    def string_values(key, maximum):
+        raw = value.get(key) or []
+        if not isinstance(raw, list) or len(raw) > maximum:
+            raise ValueError("invalid_parental_controls")
+        cleaned = []
+        for candidate in raw:
+            if not isinstance(candidate, str):
+                raise ValueError("invalid_parental_controls")
+            text = str(candidate or "").strip()
+            if not text or len(text) > 120 or text in cleaned:
+                raise ValueError("invalid_parental_controls")
+            cleaned.append(text)
+        return cleaned
+
+    exceptions = value.get("exceptions") or []
+    if not isinstance(exceptions, list) or len(exceptions) > 64:
+        raise ValueError("invalid_parental_controls")
+    normalized_exceptions = []
+    for exception in exceptions:
+        if not isinstance(exception, dict):
+            raise ValueError("invalid_parental_controls")
+        if not all(isinstance(exception.get(key), str) for key in ("id", "title", "scope")):
+            raise ValueError("invalid_parental_controls")
+        identifier = exception["id"].strip()
+        if not identifier or len(identifier) > 160:
+            raise ValueError("invalid_parental_controls")
+        scope = str(exception.get("scope") or "").strip()
+        provider_item_ids = exception.get("provider_item_ids") or []
+        if scope not in {"title", "collection"} or not isinstance(provider_item_ids, list):
+            raise ValueError("invalid_parental_controls")
+        cleaned_item_ids = []
+        for provider_item_id in provider_item_ids:
+            if not isinstance(provider_item_id, str):
+                raise ValueError("invalid_parental_controls")
+            item_id = str(provider_item_id or "").strip()
+            if not item_id or len(item_id) > 160 or item_id in cleaned_item_ids:
+                raise ValueError("invalid_parental_controls")
+            cleaned_item_ids.append(item_id)
+        if not cleaned_item_ids:
+            raise ValueError("invalid_parental_controls")
+        normalized_exceptions.append({
+            "id": identifier,
+            "title": str(exception.get("title") or "").strip()[:160],
+            "scope": scope,
+            "provider_item_ids": cleaned_item_ids,
+        })
+    return {
+        "version": 1,
+        "is_enabled": enabled,
+        "preset": preset,
+        "allowed_tags": string_values("allowed_tags", 64),
+        "blocked_genres": string_values("blocked_genres", 64),
+        "blocked_tags": string_values("blocked_tags", 64),
+        "exceptions": normalized_exceptions,
+        "hide_unrated_content": hide_unrated,
+    }
+
+
 def create_parent_managed_kid_profile(
     session, display_name, owner_entitlement, *, request_access_enabled=False,
+    parental_controls=None, watching_profile_ids=None,
 ):
     """Create a household kid profile without creating a child identity.
 
@@ -8018,7 +8419,9 @@ def create_parent_managed_kid_profile(
         "household_access_role": HouseholdAccessRole.MEMBER.value,
         "cloud_access_enabled": False,
         "request_access_enabled": bool(request_access_enabled),
+        "parental_controls": parental_controls,
         "switch_profile_ids": [],
+        "watching_profile_ids": list(watching_profile_ids or []),
         "state": "active",
         "managed_by_owner": True,
         "created_at": created_at,
@@ -8068,7 +8471,9 @@ def create_parent_managed_kid_profile(
         "household_access_role": HouseholdAccessRole.MEMBER.value,
         "cloud_access_enabled": False,
         "request_access_enabled": bool(request_access_enabled),
+        "parental_controls": parental_controls,
         "switch_profile_ids": [],
+        "watching_profile_ids": list(watching_profile_ids or []),
     })
 
 
@@ -8109,6 +8514,18 @@ def create_household_invitation(event):
         switch_profile_ids = _invitation_switch_profile_ids(
             body.get("switch_profile_ids")
         )
+        watching_profile_ids = _invitation_watching_profile_ids(
+            body.get("watching_profile_ids")
+        )
+        # A current client must make a deliberate Kid viewing-level choice.
+        # Preserve already-issued invitations that predate this field rather
+        # than inventing an Older Kids default on the server.
+        parental_controls = _normalized_parental_controls(
+            body.get("parental_controls"),
+            require_child_safe=(
+                profile_type == "kid" and "parental_controls" in body
+            ),
+        )
     except (AccountFoundationError, ValueError):
         return response(400, {"state": "invalid_invitation_authority"})
     if (
@@ -8129,6 +8546,32 @@ def create_household_invitation(event):
         return response(403, {"state": "owner_required_for_authority_grant"})
     if access_role is HouseholdAccessRole.ADMIN and age_classification != "adult":
         return response(400, {"state": "admin_requires_adult_profile"})
+    if (
+        watching_profile_ids
+        and issuer_access_role != HouseholdAccessRole.OWNER.value
+    ):
+        return response(403, {"state": "watching_targets_owner_required"})
+    if watching_profile_ids:
+        if identity_profiles_table is None:
+            return response(503, {"state": "identity_storage_unavailable"})
+        for watching_profile_id in watching_profile_ids:
+            watching_profile = identity_profiles_table.get_item(
+                Key={"profile_id": watching_profile_id},
+                ConsistentRead=True,
+            ).get("Item")
+            if (
+                not isinstance(watching_profile, dict)
+                or watching_profile.get("state") != "active"
+                or not hmac.compare_digest(
+                    str(watching_profile.get("account_id") or ""),
+                    str(session.get("account_id") or ""),
+                )
+                or not hmac.compare_digest(
+                    str(watching_profile.get("household_id") or ""),
+                    str(session.get("household_id") or ""),
+                )
+            ):
+                return response(400, {"state": "invalid_watching_targets"})
     if access_mode == "parent_managed":
         if (
             profile_type != "kid"
@@ -8142,6 +8585,8 @@ def create_household_invitation(event):
             display_name,
             entitlement,
             request_access_enabled=request_access_enabled,
+            parental_controls=parental_controls,
+            watching_profile_ids=watching_profile_ids,
         )
     if access_mode != "device_invitation":
         return response(400, {"state": "invalid_invitation_access_mode"})
@@ -8209,7 +8654,9 @@ def create_household_invitation(event):
         "household_access_role": access_role.value,
         "cloud_access_enabled": cloud_access_enabled,
         "request_access_enabled": request_access_enabled,
+        "parental_controls": parental_controls,
         "switch_profile_ids": switch_profile_ids,
+        "watching_profile_ids": watching_profile_ids,
         "state": "pending",
         "managed_profile": bool(managed_profile),
         "created_at": utc_now_iso(),
@@ -8382,7 +8829,7 @@ def list_household_invitations(event):
             ).value
         except AccountFoundationError:
             age_classification = ""
-        public.append({
+        projected = {
             "invitation_id": str(item.get("invitation_id") or ""),
             "profile_id": str(item.get("profile_id") or ""),
             "display_name": str(item.get("display_name") or "Household member"),
@@ -8390,11 +8837,20 @@ def list_household_invitations(event):
             "canonical_role": age_classification,
             "household_access_role": str(item.get("household_access_role") or "member"),
             "cloud_access_enabled": bool_value(item.get("cloud_access_enabled"), True),
-            "request_access_enabled": bool_value(item.get("request_access_enabled"), False),
+            "request_access_enabled": bool_value(
+                item.get("request_access_enabled"), False
+            ),
             "switch_profile_ids": list(item.get("switch_profile_ids") or []),
             "state": state,
             "expires_at": code_expires_at,
-        })
+        }
+        if "parental_controls" in item:
+            projected["parental_controls"] = item.get("parental_controls")
+        if "watching_profile_ids" in item:
+            projected["watching_profile_ids"] = list(
+                item.get("watching_profile_ids") or []
+            )
+        public.append(projected)
     return response(200, {"state": "invitations_listed", "invitations": public})
 
 
@@ -8552,6 +9008,9 @@ def join_household(event):
         switch_profile_ids = _invitation_switch_profile_ids(
             invitation.get("switch_profile_ids")
         )
+        watching_profile_ids = _invitation_watching_profile_ids(
+            invitation.get("watching_profile_ids")
+        )
     except (AccountFoundationError, ValueError):
         return response(409, {"state": "invitation_authority_invalid"})
     role = age_role.value
@@ -8562,13 +9021,25 @@ def join_household(event):
     request_access_enabled = bool_value(
         invitation.get("request_access_enabled"), False
     )
+    try:
+        parental_controls = _normalized_parental_controls(
+            invitation.get("parental_controls"),
+            require_child_safe=(
+                str(invitation.get("profile_type") or "") == "kid"
+                and "parental_controls" in invitation
+            ),
+        )
+    except ValueError:
+        return response(409, {"state": "invitation_parental_controls_invalid"})
     principal = {
         "principal_id": subject, "account_id": account_id, "household_id": household_id,
         "role": role, "canonical_role": role,
         "household_access_role": household_access,
         "cloud_access_enabled": cloud_access_enabled,
         "request_access_enabled": request_access_enabled,
+        "parental_controls": parental_controls,
         "switch_profile_ids": switch_profile_ids,
+        "watching_profile_ids": watching_profile_ids,
         "authz_version": 1, "profile_ids": [profile_id],
         "state": "active", "revoked": False, "created_at": created_at,
     }
@@ -8578,7 +9049,9 @@ def join_household(event):
         "household_access_role": household_access,
         "cloud_access_enabled": cloud_access_enabled,
         "request_access_enabled": request_access_enabled,
+        "parental_controls": parental_controls,
         "switch_profile_ids": switch_profile_ids,
+        "watching_profile_ids": watching_profile_ids,
         "authz_version": 1,
         "state": "active", "created_at": created_at,
     }
@@ -8603,7 +9076,9 @@ def join_household(event):
         "household_access_role": household_access,
         "cloud_access_enabled": cloud_access_enabled,
         "request_access_enabled": request_access_enabled,
+        "parental_controls": parental_controls,
         "switch_profile_ids": switch_profile_ids,
+        "watching_profile_ids": watching_profile_ids,
         "state": "active",
         "created_at": str((existing_managed_profile or {}).get("created_at") or created_at),
         "device_access_enabled": True,
@@ -10979,11 +11454,17 @@ def lambda_handler(event, context):
     if method == "PUT" and profile_switch_targets_path_id(path):
         return update_profile_switch_targets_v3(event, path)
 
+    if method == "PUT" and profile_watching_targets_path_id(path):
+        return update_profile_watching_targets_v3(event, path)
+
     if method == "POST" and profile_binding_path_id(path):
         return create_profile_binding_v3(event, path)
 
     if method == "PUT" and profile_jellyfin_binding_path_id(path):
         return save_profile_jellyfin_binding_v3(event, path)
+
+    if method == "PUT" and profile_seerr_binding_path_id(path):
+        return save_profile_seerr_binding_v3(event, path)
 
     if method == "POST" and profile_jellyfin_binding_preflight_path_id(path):
         return preflight_profile_jellyfin_binding_v3(event, path)

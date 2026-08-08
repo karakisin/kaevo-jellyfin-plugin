@@ -186,6 +186,67 @@ def test_parent_managed_kid_profile_creates_no_invitation_or_child_credential(mo
     assert transaction[2]["Update"]["Key"] == {"principal_id": "principal-owner"}
 
 
+def test_owner_can_assign_exact_watching_targets_during_parent_managed_creation(monkeypatch):
+    target_id = "profile_1234567890abcdef"
+    recorder = TransactionRecorder()
+    monkeypatch.setattr(handler, "household_invitations_table", Invitations())
+    monkeypatch.setattr(handler, "identity_profiles_table", RecordsTable("identity-profiles", [{
+        "profile_id": target_id,
+        "account_id": "account-1",
+        "household_id": "household-1",
+        "state": "active",
+    }]))
+    monkeypatch.setattr(handler, "principals_table", RecordsTable("principals"))
+    monkeypatch.setattr(handler, "entitlements_table", Entitlements())
+    monkeypatch.setattr(handler, "dynamodb", FakeDynamoDB(recorder))
+    monkeypatch.setattr(handler, "KAEVO_ENV", "dev")
+    monkeypatch.setattr(handler, "household_manager_bound_session", lambda _event: ({
+        "profile_id": "profile-owner", "principal_id": "principal-owner",
+        "account_id": "account-1", "household_id": "household-1",
+        "household_access_role": "owner",
+    }, None))
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _profile: ({"family_enabled": True}, None))
+
+    result = handler.create_household_invitation({"body": json.dumps({
+        "display_name": "Kid profile",
+        "profile_type": "kid",
+        "access_mode": "parent_managed",
+        "watching_profile_ids": [target_id],
+    })})
+
+    assert result["statusCode"] == 201
+    profile = recorder.calls[0]["TransactItems"][0]["Put"]["Item"]
+    assert profile["watching_profile_ids"] == [target_id]
+
+
+def test_owner_can_assign_exact_watching_targets_during_device_invitation(monkeypatch):
+    target_id = "profile_1234567890abcdef"
+    invitations = Invitations()
+    monkeypatch.setattr(handler, "household_invitations_table", invitations)
+    monkeypatch.setattr(handler, "identity_profiles_table", RecordsTable("identity-profiles", [{
+        "profile_id": target_id,
+        "account_id": "account-1",
+        "household_id": "household-1",
+        "state": "active",
+    }]))
+    monkeypatch.setattr(handler, "KAEVO_ENV", "dev")
+    monkeypatch.setattr(handler, "household_manager_bound_session", lambda _event: ({
+        "profile_id": "profile-owner", "principal_id": "principal-owner",
+        "account_id": "account-1", "household_id": "household-1",
+        "household_access_role": "owner",
+    }, None))
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _profile: ({"family_enabled": True}, None))
+
+    result = handler.create_household_invitation({"body": json.dumps({
+        "display_name": "New member",
+        "profile_type": "adult",
+        "watching_profile_ids": [target_id],
+    })})
+
+    assert result["statusCode"] == 201
+    assert invitations.item["watching_profile_ids"] == [target_id]
+
+
 def test_existing_parent_managed_kid_profile_can_receive_one_device_invitation(monkeypatch):
     profile_id = "profile_1234567890abcdef"
     managed = {
@@ -271,6 +332,7 @@ def test_managed_profile_invitation_adds_device_identity_without_duplicate_profi
         "display_name": "Kid",
         "profile_type": "kid",
         "role": "kid",
+        "watching_profile_ids": ["profile_1234567890abcdef"],
         "state": "pending",
         "managed_profile": True,
         "code_expires_at": 2_000,
@@ -308,6 +370,7 @@ def test_managed_profile_invitation_adds_device_identity_without_duplicate_profi
     assert profile_write["Item"]["profile_id"] == profile_id
     assert profile_write["Item"]["member_principal_id"] == "principal-kid"
     assert profile_write["Item"]["device_access_enabled"] is True
+    assert profile_write["Item"]["watching_profile_ids"] == ["profile_1234567890abcdef"]
     assert "pending_invitation_id" not in profile_write["Item"]
     assert "list_append" not in json.dumps(transaction)
 

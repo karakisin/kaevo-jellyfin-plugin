@@ -208,6 +208,19 @@ def test_unenrolled_native_hosted_auth_receives_only_enrollment_marker():
     assert "claimsToAddOrOverride" not in details["idTokenGeneration"]
 
 
+def test_revoked_profile_deletion_shell_receives_only_enrollment_marker():
+    dynamo, (principal, _membership, _household, _profile) = graph()
+    principal.update({"state": "revoked", "revoked": True, "profile_ids": []})
+    dynamo.tables["memberships"].items.clear()
+    dynamo.tables["profiles"].items.clear()
+
+    result = issue_claims(native_event(), dynamodb=dynamo, cognito=native_cognito())
+
+    access = result["response"]["claimsAndScopeOverrideDetails"]["accessTokenGeneration"]
+    assert access["claimsToAddOrOverride"] == {"kaevo_enrollment_required": "true"}
+    assert "account_id" in access["claimsToSuppress"]
+
+
 def test_partial_native_identity_graph_still_fails_closed():
     dynamo, _ = graph()
     dynamo.tables["memberships"].items.clear()

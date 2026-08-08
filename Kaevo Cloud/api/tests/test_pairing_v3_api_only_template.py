@@ -187,6 +187,7 @@ def test_dedicated_control_lambda_has_exact_routes_and_least_privilege_boundary(
     expected = {
         "/v3/home-connectors/register",
         "/v3/home-connectors/{connectorId}/heartbeat",
+        "/v3/home-connectors/{connectorId}/disconnect",
         "/v3/home-connectors/{connectorId}/relay-ticket",
         "/v3/remote-requests/claim",
         "/v3/remote-requests/{requestId}/complete",
