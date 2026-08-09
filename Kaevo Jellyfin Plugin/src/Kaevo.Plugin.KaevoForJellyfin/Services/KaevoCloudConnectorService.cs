@@ -15,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.84";
+    private const string PluginVersion = "0.2.85";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -221,7 +221,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 app_version = PluginVersion,
                 capabilities = new[]
                 {
-                    "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
+                    "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1", "download_controls_v1",
                     "playback_tunnel_v1", "direct_play", "hls_remux", "hls_transcode",
                     "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
                     "local_provider_configuration_v1"
@@ -879,6 +879,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             return CompleteCommand(request, operation, health);
         }
 
+        if (operation == "downloaders.set_queue_state")
+        {
+            var result = await SetExactQueueDownloadStateAsync(configuration, secrets, parameters, cancellationToken)
+                .ConfigureAwait(false);
+            return CompleteCommand(request, operation, result);
+        }
+
         if (operation == "seerr.create_request")
         {
             var mediaType = RequireString(parameters, "media_type", 8).ToLowerInvariant();
@@ -1114,6 +1121,258 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         if (bounded.Truncated) throw new InvalidOperationException("sonarrResponseTooLarge");
         using var document = JsonDocument.Parse(bounded.Data);
         return document.RootElement.Clone();
+    }
+
+    private async Task<JsonElement> SendArrJsonAsync(
+        KaevoConnectorSecrets secrets,
+        string arrKind,
+        HttpMethod method,
+        string path,
+        object? body,
+        CancellationToken cancellationToken)
+    {
+        if (arrKind is not ("sonarr" or "radarr"))
+        {
+            throw new InvalidOperationException("arrKindNotAllowed");
+        }
+
+        var arr = secrets.GetProvider(arrKind);
+        if (arr?.Enabled != true
+            || !Uri.TryCreate(arr.BaseUrl, UriKind.Absolute, out var baseUri)
+            || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps)
+            || string.IsNullOrWhiteSpace(arr.ApiKey))
+        {
+            throw new InvalidOperationException($"{arrKind}NotProvisioned");
+        }
+
+        var uri = new Uri(arr.BaseUrl.TrimEnd('/') + "/" + path.TrimStart('/'), UriKind.Absolute);
+        using var message = new HttpRequestMessage(method, uri);
+        message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        message.Headers.Add("X-Api-Key", arr.ApiKey);
+        if (body is not null)
+        {
+            message.Content = new StringContent(JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json");
+        }
+        using var response = await _providerTransport.SendAsync(arrKind, arr, message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        if ((int)response.StatusCode is >= 300 and < 400)
+        {
+            throw new InvalidOperationException($"{arrKind}RedirectRejected");
+        }
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"{arrKind}Http{(int)response.StatusCode}");
+        }
+        if (response.Content.Headers.ContentLength == 0 || method == HttpMethod.Delete)
+        {
+            return JsonSerializer.SerializeToElement(new { ok = true }, JsonOptions);
+        }
+        var bounded = await ReadBoundedAsync(response.Content, 2_000_000, cancellationToken).ConfigureAwait(false);
+        if (bounded.Truncated) throw new InvalidOperationException($"{arrKind}ResponseTooLarge");
+        using var document = JsonDocument.Parse(bounded.Data);
+        return document.RootElement.Clone();
+    }
+
+    private async Task<object> SetExactQueueDownloadStateAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        IReadOnlyDictionary<string, JsonElement> parameters,
+        CancellationToken cancellationToken)
+    {
+        var arrKind = RequireString(parameters, "arr_kind", 16).ToLowerInvariant();
+        if (arrKind is not ("sonarr" or "radarr"))
+        {
+            throw new InvalidOperationException("arrKindNotAllowed");
+        }
+        var queueId = RequirePositiveInt(parameters, "arr_queue_id");
+        var downloadClientId = RequirePositiveInt(parameters, "arr_download_client_id");
+        var downloadId = RequireString(parameters, "download_id", 128);
+        var targetState = RequireString(parameters, "target_state", 16).ToLowerInvariant();
+        if (targetState is not ("paused" or "running"))
+        {
+            throw new InvalidOperationException("downloadTargetStateInvalid");
+        }
+
+        // Never operate from a client-provided downloader id alone. Re-read the
+        // exact Arr queue record and its exact configured download client first.
+        var queue = await SendArrJsonAsync(secrets, arrKind, HttpMethod.Get, $"/api/v3/queue/{queueId}", null, cancellationToken).ConfigureAwait(false);
+        if (!queue.TryGetProperty("id", out var queueIdValue) || !queueIdValue.TryGetInt32(out var returnedQueueId) || returnedQueueId != queueId
+            || !queue.TryGetProperty("downloadId", out var returnedDownloadId) || !string.Equals(returnedDownloadId.GetString(), downloadId, StringComparison.Ordinal)
+            || !queue.TryGetProperty("downloadClientId", out var returnedClientId) || !returnedClientId.TryGetInt32(out var returnedDownloadClientId) || returnedDownloadClientId != downloadClientId)
+        {
+            throw new InvalidOperationException("arrQueueBindingChanged");
+        }
+
+        var arrClient = await SendArrJsonAsync(secrets, arrKind, HttpMethod.Get, $"/api/v3/downloadclient/{downloadClientId}", null, cancellationToken).ConfigureAwait(false);
+        if (!arrClient.TryGetProperty("id", out var clientIdValue) || !clientIdValue.TryGetInt32(out var returnedDefinitionClientId) || returnedDefinitionClientId != downloadClientId)
+        {
+            throw new InvalidOperationException("arrDownloadClientBindingChanged");
+        }
+        var providerName = ResolveExactArrDownloadProvider(arrClient, secrets);
+        if (providerName is null)
+        {
+            throw new InvalidOperationException("downloadClientBindingUnverified");
+        }
+
+        var paused = targetState == "paused";
+        var confirmedPaused = providerName switch
+        {
+            "sabnzbd" => await SetSabnzbdQueueStateAsync(configuration, secrets, downloadId, paused, cancellationToken).ConfigureAwait(false),
+            "qbittorrent" => await SetQbittorrentQueueStateAsync(configuration, secrets, downloadId, paused, cancellationToken).ConfigureAwait(false),
+            _ => throw new InvalidOperationException("downloadClientBindingUnverified")
+        };
+        if (confirmedPaused != paused)
+        {
+            throw new InvalidOperationException("downloadStateReadbackMismatch");
+        }
+        return new
+        {
+            arr_kind = arrKind,
+            arr_queue_id = queueId,
+            arr_download_client_id = downloadClientId,
+            download_id = downloadId,
+            provider = providerName,
+            state = paused ? "paused" : "running",
+            read_back = true
+        };
+    }
+
+    internal static string? ResolveExactArrDownloadProvider(JsonElement arrClient, KaevoConnectorSecrets secrets)
+    {
+        if (!arrClient.TryGetProperty("implementation", out var implementationElement)
+            || implementationElement.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+        var providerName = implementationElement.GetString()?.Trim().ToLowerInvariant() switch
+        {
+            var implementation when implementation?.Contains("sab", StringComparison.Ordinal) == true => "sabnzbd",
+            var implementation when implementation?.Contains("qbit", StringComparison.Ordinal) == true => "qbittorrent",
+            _ => null
+        };
+        if (providerName is null || !TryReadArrDownloadClientEndpoint(arrClient, out var host, out var port))
+        {
+            return null;
+        }
+        var provider = secrets.GetProvider(providerName);
+        return provider?.Enabled == true
+            && Uri.TryCreate(provider.BaseUrl, UriKind.Absolute, out var providerUri)
+            && string.Equals(providerUri.Host, host, StringComparison.OrdinalIgnoreCase)
+            && providerUri.Port == port
+            ? providerName
+            : null;
+    }
+
+    private static bool TryReadArrDownloadClientEndpoint(JsonElement arrClient, out string host, out int port)
+    {
+        host = string.Empty;
+        port = 0;
+        if (!arrClient.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+        foreach (var field in fields.EnumerateArray())
+        {
+            if (!field.TryGetProperty("name", out var nameElement) || nameElement.ValueKind != JsonValueKind.String
+                || !field.TryGetProperty("value", out var value))
+            {
+                continue;
+            }
+            var name = nameElement.GetString();
+            if (string.Equals(name, "host", StringComparison.OrdinalIgnoreCase) && value.ValueKind == JsonValueKind.String)
+            {
+                host = value.GetString()?.Trim() ?? string.Empty;
+            }
+            else if (string.Equals(name, "port", StringComparison.OrdinalIgnoreCase))
+            {
+                if (value.TryGetInt32(out var integerPort)) port = integerPort;
+                else if (value.ValueKind == JsonValueKind.String && int.TryParse(value.GetString(), out var stringPort)) port = stringPort;
+            }
+        }
+        return host.Length > 0 && port is > 0 and <= 65535;
+    }
+
+    private async Task<bool> SetSabnzbdQueueStateAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string downloadId,
+        bool paused,
+        CancellationToken cancellationToken)
+    {
+        var commandQuery = new Dictionary<string, JsonElement>
+        {
+            ["mode"] = JsonSerializer.SerializeToElement(paused ? "pause" : "resume"),
+            ["value"] = JsonSerializer.SerializeToElement(downloadId)
+        };
+        await SendProviderReadAsync(configuration, secrets, "sabnzbd", "/api", commandQuery, cancellationToken).ConfigureAwait(false);
+        var queue = await SendProviderReadAsync(
+            configuration,
+            secrets,
+            "sabnzbd",
+            "/api",
+            new Dictionary<string, JsonElement> { ["mode"] = JsonSerializer.SerializeToElement("queue") },
+            cancellationToken).ConfigureAwait(false);
+        if (!queue.Payload.TryGetProperty("queue", out var queueElement)
+            || !queueElement.TryGetProperty("slots", out var slots)
+            || slots.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException("sabnzbdQueueReadbackInvalid");
+        }
+        foreach (var slot in slots.EnumerateArray())
+        {
+            if (!slot.TryGetProperty("nzo_id", out var idElement)
+                || !string.Equals(idElement.GetString(), downloadId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            var state = slot.TryGetProperty("status", out var stateElement) ? stateElement.GetString() ?? string.Empty : string.Empty;
+            return state.Contains("pause", StringComparison.OrdinalIgnoreCase);
+        }
+        throw new InvalidOperationException("sabnzbdQueueReadbackMissing");
+    }
+
+    private async Task<bool> SetQbittorrentQueueStateAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string downloadId,
+        bool paused,
+        CancellationToken cancellationToken)
+    {
+        var provider = secrets.GetProvider("qbittorrent");
+        if (provider?.Enabled != true || !Uri.TryCreate(provider.BaseUrl, UriKind.Absolute, out _))
+        {
+            throw new InvalidOperationException("qbittorrentNotProvisioned");
+        }
+        var cookie = await AuthenticateQbittorrentAsync(provider, cancellationToken).ConfigureAwait(false);
+        var uri = new Uri(provider.BaseUrl.TrimEnd('/') + $"/api/v2/torrents/{(paused ? "pause" : "resume")}", UriKind.Absolute);
+        using (var message = new HttpRequestMessage(HttpMethod.Post, uri)
+        {
+            Content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("hashes", downloadId) })
+        })
+        {
+            message.Headers.TryAddWithoutValidation("Cookie", cookie);
+            using var response = await _providerTransport.SendAsync("qbittorrent", provider, message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if ((int)response.StatusCode is >= 300 and < 400) throw new InvalidOperationException("qbittorrentRedirectRejected");
+            if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"qbittorrentHttp{(int)response.StatusCode}");
+        }
+        var info = await SendProviderReadAsync(
+            configuration,
+            secrets,
+            "qbittorrent",
+            "/api/v2/torrents/info",
+            new Dictionary<string, JsonElement> { ["hashes"] = JsonSerializer.SerializeToElement(downloadId) },
+            cancellationToken).ConfigureAwait(false);
+        if (info.Payload.ValueKind != JsonValueKind.Array) throw new InvalidOperationException("qbittorrentQueueReadbackInvalid");
+        foreach (var torrent in info.Payload.EnumerateArray())
+        {
+            if (!torrent.TryGetProperty("hash", out var hashElement)
+                || !string.Equals(hashElement.GetString(), downloadId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            var state = torrent.TryGetProperty("state", out var stateElement) ? stateElement.GetString() ?? string.Empty : string.Empty;
+            return state.StartsWith("paused", StringComparison.OrdinalIgnoreCase);
+        }
+        throw new InvalidOperationException("qbittorrentQueueReadbackMissing");
     }
 
     private async Task<JsonElement> SendSeerrJsonAsync(
@@ -2457,6 +2716,18 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 PluginVersion,
                 !configured ? "notConfigured" : enabled ? null : "disabled");
         }
+
+        var configuredDownloaders = new[] { "sabnzbd", "qbittorrent" }
+            .Select(secrets.GetProvider)
+            .Where(provider => provider is not null)
+            .ToArray();
+        var anyDownloaderConfigured = configuredDownloaders.Any(provider =>
+            Uri.TryCreate(provider!.BaseUrl, UriKind.Absolute, out _) && provider.Enabled);
+        result["downloaders"] = ProviderStatus(
+            anyDownloaderConfigured,
+            configuredDownloaders.Any(provider => Uri.TryCreate(provider!.BaseUrl, UriKind.Absolute, out _)),
+            PluginVersion,
+            anyDownloaderConfigured ? null : "notConfigured");
 
         if (includeOptimizer)
         {

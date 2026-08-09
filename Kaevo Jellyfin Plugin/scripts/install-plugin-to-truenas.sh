@@ -86,4 +86,8 @@ echo "Installed Kaevo and restarted Jellyfin container $container."
 REMOTE
 )"
 REMOTE_COMMAND="KAEVO_PLUGIN_TARGET_DIRECTORY=$(printf '%q' "$PLUGIN_TARGET_DIRECTORY") KAEVO_PLUGIN_DLL_SHA256=$(printf '%q' "$PLUGIN_DLL_SHA256") bash -c $(printf '%q' "$REMOTE_SCRIPT")"
-tar -C "$PACKAGE_ROOT" -cf - Kaevo | ssh "${SSH_ARGS[@]}" "$TRUENAS_SSH" "$REMOTE_COMMAND"
+if (( ${#SSH_ARGS[@]} )); then
+    tar -C "$PACKAGE_ROOT" -cf - Kaevo | ssh "${SSH_ARGS[@]}" "$TRUENAS_SSH" "$REMOTE_COMMAND"
+else
+    tar -C "$PACKAGE_ROOT" -cf - Kaevo | ssh "$TRUENAS_SSH" "$REMOTE_COMMAND"
+fi

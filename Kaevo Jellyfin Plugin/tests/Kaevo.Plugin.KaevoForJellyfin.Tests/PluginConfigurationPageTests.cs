@@ -37,6 +37,9 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("background:#0b0d10 !important", page, StringComparison.Ordinal);
         Assert.Contains("background:rgba(8,10,13,.52)", page, StringComparison.Ordinal);
         Assert.Contains("border:1px solid rgba(231,196,139,.45)", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoRepairPairing", page, StringComparison.Ordinal);
+        Assert.Contains("background:rgba(8,10,13,.74) !important", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoRepairPairing:focus-visible", page, StringComparison.Ordinal);
         Assert.Contains("Scan this signed Pairing V3 QR in Kaevo.", page, StringComparison.Ordinal);
         Assert.Contains("KaevoPairingCountdown", page, StringComparison.Ordinal);
         Assert.Contains("Here’s your one-time code", page, StringComparison.Ordinal);
