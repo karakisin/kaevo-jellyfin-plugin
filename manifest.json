@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.88.0",
+        "changelog": "Fixes exact SABnzbd job Start and Pause by using SABnzbd's per-job queue command with the immutable nzo_id instead of a global queue-state command.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.88/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "e8ed4c813390e3619a0cd2015f219ff2",
+        "timestamp": "2026-08-09T21:32:49Z"
+      },
+      {
         "version": "0.2.87.0",
         "changelog": "Fixes owner-only Start and Pause controls by re-reading the exact immutable Arr queue binding through the supported paged queue endpoint before mutating the matching SABnzbd or qBittorrent job.",
         "targetAbi": "10.11.0.0",
