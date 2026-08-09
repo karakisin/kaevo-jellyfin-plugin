@@ -15,7 +15,8 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.86";
+    private const string PluginVersion = "0.2.87";
+    internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -1200,9 +1201,18 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             throw new InvalidOperationException("downloadTargetStateInvalid");
         }
 
-        // Never operate from a client-provided downloader id alone. Re-read the
-        // exact Arr queue record and its exact configured download client first.
-        var queue = await SendArrJsonAsync(secrets, arrKind, HttpMethod.Get, $"/api/v3/queue/{queueId}", null, cancellationToken).ConfigureAwait(false);
+        // Arr exposes queue records through the paged collection endpoint; its
+        // single-record GET route is not available even though DELETE by id is.
+        // Re-read a bounded collection and select only the exact immutable id.
+        var queuePayload = await SendArrJsonAsync(
+            secrets,
+            arrKind,
+            HttpMethod.Get,
+            ExactArrQueueReadPath,
+            null,
+            cancellationToken).ConfigureAwait(false);
+        var queue = FindExactArrQueueRecord(queuePayload, queueId)
+            ?? throw new InvalidOperationException("arrQueueBindingChanged");
         if (!queue.TryGetProperty("id", out var queueIdValue) || !queueIdValue.TryGetInt32(out var returnedQueueId) || returnedQueueId != queueId
             || !queue.TryGetProperty("downloadId", out var returnedDownloadId) || !string.Equals(returnedDownloadId.GetString(), downloadId, StringComparison.Ordinal)
             || (queue.TryGetProperty("downloadClientId", out var returnedClientId)
@@ -1252,6 +1262,33 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             state = paused ? "paused" : "running",
             read_back = true
         };
+    }
+
+    internal static JsonElement? FindExactArrQueueRecord(JsonElement queuePayload, int queueId)
+    {
+        var records = queuePayload.ValueKind == JsonValueKind.Object
+            && queuePayload.TryGetProperty("records", out var recordsElement)
+            && recordsElement.ValueKind == JsonValueKind.Array
+                ? recordsElement
+                : queuePayload.ValueKind == JsonValueKind.Array
+                    ? queuePayload
+                    : default;
+        if (records.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var record in records.EnumerateArray())
+        {
+            if (record.ValueKind == JsonValueKind.Object
+                && record.TryGetProperty("id", out var idElement)
+                && idElement.TryGetInt32(out var id)
+                && id == queueId)
+            {
+                return record.Clone();
+            }
+        }
+        return null;
     }
 
     private async Task<CommandResult> EnrichArrQueueDownloadClientIdsAsync(

@@ -7,6 +7,14 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 public sealed class DownloadControlBindingTests
 {
     [Fact]
+    public void ExactQueueReadUsesTheSupportedPagedCollectionRoute()
+    {
+        Assert.Equal(
+            "/api/v3/queue?page=1&pageSize=1000",
+            KaevoCloudConnectorService.ExactArrQueueReadPath);
+    }
+
+    [Fact]
     public void ExactArrClientResolvesOnlyTheConfiguredMatchingDownloader()
     {
         using var document = JsonDocument.Parse("""
@@ -101,6 +109,41 @@ public sealed class DownloadControlBindingTests
             new Dictionary<string, int[]>(StringComparer.Ordinal) { ["exact-job-1"] = [17] });
 
         Assert.Equal(9, enriched.GetProperty("records")[0].GetProperty("downloadClientId").GetInt32());
+    }
+
+    [Fact]
+    public void ExactQueueRecordIsSelectedFromTheSupportedPagedCollectionShape()
+    {
+        using var document = JsonDocument.Parse("""
+            {
+              "page": 1,
+              "pageSize": 1000,
+              "totalRecords": 2,
+              "records": [
+                { "id": 41, "downloadId": "other-job" },
+                { "id": 2071545594, "downloadId": "exact-job" }
+              ]
+            }
+            """);
+
+        var record = KaevoCloudConnectorService.FindExactArrQueueRecord(
+            document.RootElement,
+            2071545594);
+
+        Assert.True(record.HasValue);
+        Assert.Equal("exact-job", record.Value.GetProperty("downloadId").GetString());
+    }
+
+    [Fact]
+    public void MissingExactQueueIdNeverFallsBackToAnotherRecord()
+    {
+        using var document = JsonDocument.Parse("""
+            { "records": [{ "id": 41, "downloadId": "other-job" }] }
+            """);
+
+        Assert.Null(KaevoCloudConnectorService.FindExactArrQueueRecord(
+            document.RootElement,
+            2071545594));
     }
 
     private static KaevoConnectorSecrets Secrets(string sabUrl) => new(

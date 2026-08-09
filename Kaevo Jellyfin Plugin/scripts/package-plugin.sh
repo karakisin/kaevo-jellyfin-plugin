@@ -41,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Restores owner-only Start and Pause controls when an Arr queue item omits its download-client ID by proving one exact immutable Arr client and exact SABnzbd or qBittorrent job before exposing or executing the control.",
+  "changelog": "Fixes owner-only Start and Pause controls by re-reading the exact immutable Arr queue binding through the supported paged queue endpoint before mutating the matching SABnzbd or qBittorrent job.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
