@@ -15,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.82";
+    private const string PluginVersion = "0.2.84";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -894,12 +894,17 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             var is4K = parameters.TryGetValue("is_4k", out var fourKElement)
                 && (fourKElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
                 && fourKElement.GetBoolean();
+            // Cloud resolves this immutable Seerr user id from the protected
+            // profile binding. The iOS device never supplies it, so a command
+            // cannot attribute a request to another household member.
+            var requesterUserId = RequirePositiveInt(parameters, "requester_user_id");
             var created = await SendSeerrJsonAsync(secrets, HttpMethod.Post, "/api/v1/request", new
             {
                 mediaType,
                 mediaId,
                 seasons,
-                is4k = is4K
+                is4k = is4K,
+                userId = requesterUserId
             }, cancellationToken).ConfigureAwait(false);
             return CompleteCommand(request, operation, created);
         }
