@@ -369,8 +369,8 @@ def test_household_access_role_is_independent_from_age_classification():
         CanonicalRole.ADULT, HouseholdAccessRole.ADMIN,
     )
     assert Capability.PROFILE_MANAGE_HOUSEHOLD.value in admin_capabilities
-    assert Capability.REQUESTS_VIEW_HOUSEHOLD.value in admin_capabilities
-    assert Capability.DOWNLOADS_VIEW_HOUSEHOLD.value in admin_capabilities
+    assert Capability.REQUESTS_VIEW_HOUSEHOLD.value not in admin_capabilities
+    assert Capability.DOWNLOADS_VIEW_HOUSEHOLD.value not in admin_capabilities
     assert Capability.STREAMS_VIEW_HOUSEHOLD.value in admin_capabilities
     assert Capability.BILLING_MANAGE.value not in admin_capabilities
     assert Capability.HOUSEHOLD_TRANSFER_OWNERSHIP.value not in admin_capabilities

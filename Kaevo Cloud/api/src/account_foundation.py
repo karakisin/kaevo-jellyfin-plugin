@@ -130,8 +130,6 @@ ACCESS_ROLE_CAPABILITIES: dict[HouseholdAccessRole, frozenset[Capability]] = {
         Capability.PROFILE_SWITCH,
         Capability.PROFILE_SWITCH_GRANT,
         Capability.MEDIA_SERVICES_MANAGE,
-        Capability.REQUESTS_VIEW_HOUSEHOLD,
-        Capability.DOWNLOADS_VIEW_HOUSEHOLD,
         Capability.STREAMS_VIEW_HOUSEHOLD,
     }),
     HouseholdAccessRole.MEMBER: frozenset(),

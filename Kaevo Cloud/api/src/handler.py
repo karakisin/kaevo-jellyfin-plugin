@@ -11007,6 +11007,163 @@ def latest_online_connector_for_profile(profile_id):
     return None
 
 
+def _authorized_seerr_request_query(profile_id, query):
+    """Return the least-privileged Seerr request-list query for this profile.
+
+    Remote metadata is credentialless on iOS.  The Household Owner may read
+    the household's request/download status; Admins and Members may read only
+    the requests associated with their own plugin-proven immutable Seerr user
+    id.  The client never chooses that scope, so a forged ``requestedBy``
+    query cannot enumerate another household member's requests.
+    """
+    if identity_profiles_table is None:
+        return None, "profile_identity_unavailable"
+    try:
+        profile = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True
+        ).get("Item")
+    except ClientError:
+        return None, "profile_identity_unavailable"
+
+    if (
+        not isinstance(profile, dict)
+        or str(profile.get("profile_id") or "") != profile_id
+        or str(profile.get("state") or "") != "active"
+    ):
+        return None, "profile_seerr_binding_required"
+
+    scoped = dict(query or {})
+
+    # The household membership is the canonical authority for an Owner's
+    # household-wide *read*.  Identity profiles deliberately do not duplicate
+    # every provider edge, so requiring an Owner's personal Seerr binding here
+    # made a valid Owner receive an empty dashboard.  We still require the
+    # exact Seerr binding below for every non-Owner scope and for all commands.
+    # This is an exact household/account membership read; display names and
+    # provider aliases are never consulted.
+    membership_role = ""
+    membership_found = False
+    household_id = str(profile.get("household_id") or "")
+    account_id = str(profile.get("account_id") or "")
+    if household_memberships_table is not None and household_id and account_id:
+        try:
+            membership = household_memberships_table.get_item(Key={
+                "household_id": household_id,
+                "membership_id": household_membership_id(account_id, household_id),
+            }, ConsistentRead=True).get("Item")
+        except ClientError:
+            membership = None
+        if (
+            isinstance(membership, dict)
+            and membership.get("entity_type") == "HouseholdMembership"
+            and membership.get("status") == "active"
+            and str(membership.get("household_id") or "") == household_id
+            and str(membership.get("account_id") or "") == account_id
+            and str(membership.get("profile_id") or "") == profile_id
+        ):
+            membership_found = True
+            membership_role = str(membership.get("household_access_role") or "").lower()
+
+    # Keep the legacy profile projection as a compatibility fallback only when
+    # a canonical membership record is unavailable.  It never overrides an
+    # exact membership record.
+    effective_role = (
+        membership_role
+        if membership_found
+        else str(profile.get("household_access_role") or "").lower()
+    )
+    if effective_role == HouseholdAccessRole.OWNER.value:
+        scoped.pop("requestedBy", None)
+        return scoped, ""
+
+    if str(profile.get("seerr_binding_state") or "") != "active":
+        return None, "profile_seerr_binding_required"
+
+    seerr_user_id = _normalized_seerr_user_id(profile.get("seerr_user_id"))
+    if not seerr_user_id:
+        return None, "profile_seerr_binding_required"
+
+    supplied = str(scoped.get("requestedBy") or "").strip()
+    if supplied and not hmac.compare_digest(supplied, seerr_user_id):
+        return None, "profile_seerr_request_scope_conflict"
+
+    scoped["requestedBy"] = seerr_user_id
+    return scoped, ""
+
+
+def _authorized_seerr_requester_for_command(profile_id, connector_id):
+    """Return the exact bound Seerr user for one protected create command.
+
+    A device may prove only its Cloud profile session.  It must never be able
+    to choose a Seerr requester id itself: that would let a forged command
+    impersonate another household member.  Resolve the requester from the
+    canonical profile record and require the same connector that will execute
+    the command.
+    """
+    if identity_profiles_table is None:
+        return None, "profile_identity_unavailable"
+    try:
+        profile = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+    except Exception:
+        return None, "profile_identity_unavailable"
+
+    if (
+        not isinstance(profile, dict)
+        or str(profile.get("profile_id") or "") != profile_id
+        or str(profile.get("state") or "") != "active"
+        or str(profile.get("seerr_binding_state") or "") != "active"
+        or not hmac.compare_digest(
+            str(profile.get("seerr_connector_id") or ""), str(connector_id or ""),
+        )
+    ):
+        return None, "profile_seerr_binding_required"
+
+    is_owner = str(profile.get("household_access_role") or "").lower() == HouseholdAccessRole.OWNER.value
+    if not is_owner and not bool_value(profile.get("request_access_enabled"), False):
+        return None, "profile_request_access_required"
+
+    seerr_user_id = _normalized_seerr_user_id(profile.get("seerr_user_id"))
+    if not seerr_user_id:
+        return None, "profile_seerr_binding_required"
+    return seerr_user_id, ""
+
+
+def _authorized_jellyfin_metadata_request(profile_id, connector_id, path, query):
+    """Bind remote Jellyfin metadata reads to the caller's exact profile edge.
+
+    A joined iOS device deliberately has no other household member's Jellyfin
+    user ID.  Cloud therefore owns the final identity injection for the small
+    set of user-scoped metadata routes.  Never honour a client-supplied
+    ``userId`` or ``/Users/<id>`` segment for these reads.
+    """
+    binding = _profile_jellyfin_binding_for_connector(profile_id, connector_id)
+    if binding is None:
+        return None, None, "profile_jellyfin_binding_required"
+
+    user_id = binding["provider_user_id"]
+    rewritten_path = str(path or "")
+    rewritten_query = {
+        key: value
+        for key, value in dict(query or {}).items()
+        if str(key).lower() != "userid"
+    }
+
+    if re.fullmatch(r"/Users/[0-9a-fA-F]{32}/Views", rewritten_path):
+        rewritten_path = f"/Users/{user_id}/Views"
+    elif re.fullmatch(r"/Users/[0-9a-fA-F]{32}/Items", rewritten_path):
+        rewritten_path = f"/Users/{user_id}/Items"
+    elif re.fullmatch(r"/Users/[0-9a-fA-F]{32}/Items/[0-9a-fA-F]{32}", rewritten_path):
+        item_id = rewritten_path.rsplit("/", 1)[-1]
+        rewritten_path = f"/Users/{user_id}/Items/{item_id}"
+
+    if re.fullmatch(r"/Shows/[0-9a-fA-F]{32}/(Seasons|Episodes)", rewritten_path):
+        rewritten_query["userId"] = user_id
+
+    return rewritten_path, rewritten_query, ""
+
+
 def create_remote_request(event):
     if remote_requests_table is None:
         return response(500, {"state": "server_error", "message": "remote requests table is not configured"})
@@ -11034,6 +11191,11 @@ def create_remote_request(event):
     if not allowed:
         return response(400, {"state": "bad_request", "message": reason})
 
+    if provider == "seerr" and path == "/api/v1/request":
+        query, reason = _authorized_seerr_request_query(profile_id, query)
+        if query is None:
+            return response(409, {"state": reason})
+
     connector = latest_online_connector_for_profile(profile_id)
 
     if not connector:
@@ -11045,6 +11207,16 @@ def create_remote_request(event):
     now = utc_now_iso()
     request_id = str(uuid.uuid4())
     connector_id = connector.get("connector_id")
+
+    if provider == "jellyfin":
+        path, query, reason = _authorized_jellyfin_metadata_request(
+            profile_id,
+            connector_id,
+            path,
+            query,
+        )
+        if path is None:
+            return response(409, {"state": reason})
 
     request_payload = {
         "provider": provider,
@@ -11119,6 +11291,19 @@ def create_remote_command(event):
             "state": "connector_unavailable",
             "message": "No online Kaevo Jellyfin Plugin is available for this profile."
         })
+
+    if operation == "seerr.create_request":
+        requester_user_id, requester_error = _authorized_seerr_requester_for_command(
+            profile_id, connector.get("connector_id"),
+        )
+        if not requester_user_id:
+            return response(409, {"state": requester_error})
+        # `normalize_remote_command` deliberately discards client-supplied
+        # identity fields. Add only the canonical, connector-bound Seerr id
+        # derived above so the plugin can submit as the requested profile.
+        command_body = dict(request_payload["body"])
+        command_body["requester_user_id"] = int(requester_user_id)
+        request_payload = {**request_payload, "body": command_body}
 
     request_id = str(uuid.uuid5(REMOTE_COMMAND_ID_NAMESPACE, f"{profile_id}:{idempotency_key}"))
     encoded_request = json.dumps(request_payload, separators=(",", ":"), sort_keys=True)

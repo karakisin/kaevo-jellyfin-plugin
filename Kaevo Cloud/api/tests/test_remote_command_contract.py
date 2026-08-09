@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -51,6 +52,53 @@ def test_seerr_request_body_is_bounded_and_normalized():
         "seasons": [1, 3],
         "is_4k": False,
     }
+
+
+def test_seerr_create_command_derives_the_bound_requester_not_the_client(monkeypatch):
+    class RemoteRequests:
+        def __init__(self):
+            self.items = {}
+
+        def get_item(self, *, Key):
+            item = self.items.get(Key["request_id"])
+            return {"Item": dict(item)} if item else {}
+
+        def put_item(self, *, Item):
+            self.items[Item["request_id"]] = dict(Item)
+
+    class Profiles:
+        def get_item(self, *, Key, ConsistentRead):
+            assert Key == {"profile_id": "profile-1"}
+            assert ConsistentRead is True
+            return {"Item": {
+                "profile_id": "profile-1",
+                "state": "active",
+                "household_access_role": "member",
+                "request_access_enabled": True,
+                "seerr_binding_state": "active",
+                "seerr_connector_id": "connector-1",
+                "seerr_user_id": "14",
+            }}
+
+    remote_requests = RemoteRequests()
+    monkeypatch.setattr(handler, "remote_requests_table", remote_requests)
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
+    monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
+    monkeypatch.setattr(handler, "require_profile_auth", lambda _event, profile_id: profile_id == "profile-1")
+    monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda _: {"connector_id": "connector-1"})
+
+    result = handler.create_remote_command({
+        "headers": {"authorization": "Bearer scoped-session"},
+        "body": (
+            '{"profile_id":"profile-1","operation":"seerr.create_request",'
+            '"parameters":{"media_type":"movie","media_id":42,"requester_user_id":999},'
+            '"idempotency_key":"seerr-create-derived-user-1"}'
+        ),
+    })
+
+    assert result["statusCode"] == 202
+    queued = next(iter(remote_requests.items.values()))
+    assert json.loads(queued["request_json"])["body"]["requester_user_id"] == 14
 
 
 def test_optimizer_execute_requires_plan_token_and_exact_confirmation():
@@ -218,8 +266,23 @@ def test_seerr_create_request_is_available_only_to_the_exact_scoped_profile_sess
             self.put_count += 1
             self.items[Item["request_id"]] = dict(Item)
 
+    class Profiles:
+        def get_item(self, *, Key, ConsistentRead):
+            if Key["profile_id"] != "profile-1":
+                return {}
+            return {"Item": {
+                "profile_id": "profile-1",
+                "state": "active",
+                "household_access_role": "member",
+                "request_access_enabled": True,
+                "seerr_binding_state": "active",
+                "seerr_connector_id": "connector-1",
+                "seerr_user_id": "14",
+            }}
+
     remote_requests = RemoteRequests()
     monkeypatch.setattr(handler, "remote_requests_table", remote_requests)
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
     monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
     monkeypatch.setattr(
         handler,

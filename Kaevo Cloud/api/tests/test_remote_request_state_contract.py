@@ -66,6 +66,29 @@ class RecordingS3:
         self.objects[(Bucket, Key)] = Body
 
 
+class ExactProfileTable:
+    def __init__(self, item):
+        self.item = dict(item)
+
+    def get_item(self, *, Key, **_):
+        if Key["profile_id"] != self.item["profile_id"]:
+            return {}
+        return {"Item": dict(self.item)}
+
+
+class ExactHouseholdMembershipTable:
+    def __init__(self, item):
+        self.item = dict(item)
+
+    def get_item(self, *, Key, **_):
+        if (
+            Key["household_id"] != self.item["household_id"]
+            or Key["membership_id"] != self.item["membership_id"]
+        ):
+            return {}
+        return {"Item": dict(self.item)}
+
+
 def event(body):
     return {"headers": {"authorization": "Bearer connector-token"}, "body": json.dumps(body)}
 
@@ -135,3 +158,205 @@ def test_large_completion_stores_only_under_the_bounded_remote_response_prefix(m
     assert completed["statusCode"] == 200
     assert set(storage.objects) == {("bound-test-bucket", expected_key)}
     assert table.items[request_id]["response_s3_key"] == expected_key
+
+
+def test_admin_seerr_request_list_keeps_only_its_matching_exact_scope(monkeypatch):
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable({
+        "profile_id": "profile-1",
+        "state": "active",
+        "seerr_binding_state": "active",
+        "seerr_user_id": 42,
+    }))
+
+    query, reason = handler._authorized_seerr_request_query(
+        "profile-1",
+        {"take": 50, "skip": 0, "requestedBy": "42"},
+    )
+
+    assert reason == ""
+    assert query == {"take": 50, "skip": 0, "requestedBy": "42"}
+
+
+def test_admin_seerr_request_list_rejects_another_profiles_scope(monkeypatch):
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable({
+        "profile_id": "profile-1",
+        "state": "active",
+        "seerr_binding_state": "active",
+        "seerr_user_id": "42",
+    }))
+
+    query, reason = handler._authorized_seerr_request_query(
+        "profile-1",
+        {"requestedBy": "99"},
+    )
+
+    assert query is None
+    assert reason == "profile_seerr_request_scope_conflict"
+
+
+def test_admin_seerr_request_list_requires_an_active_exact_binding(monkeypatch):
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable({
+        "profile_id": "profile-1",
+        "state": "active",
+        "seerr_binding_state": "pending",
+        "seerr_user_id": "42",
+    }))
+
+    query, reason = handler._authorized_seerr_request_query("profile-1", {})
+
+    assert query is None
+    assert reason == "profile_seerr_binding_required"
+
+
+def test_owner_seerr_request_list_is_household_wide_and_ignores_client_scope(monkeypatch):
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable({
+        "profile_id": "profile-owner",
+        "state": "active",
+        "seerr_binding_state": "active",
+        "seerr_user_id": "42",
+        "household_access_role": "owner",
+    }))
+
+    query, reason = handler._authorized_seerr_request_query(
+        "profile-owner",
+        {"take": 50, "skip": 0, "requestedBy": "42"},
+    )
+
+    assert reason == ""
+    assert query == {"take": 50, "skip": 0}
+
+
+def test_owner_seerr_request_list_uses_exact_membership_without_personal_binding(monkeypatch):
+    household_id = "household-1"
+    account_id = "account-1"
+    profile_id = "profile-owner"
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable({
+        "profile_id": profile_id,
+        "state": "active",
+        "household_id": household_id,
+        "account_id": account_id,
+        # Intentionally no Seerr binding: an Owner's household-wide read is
+        # authorized by the exact canonical membership, not a copied field.
+    }))
+    monkeypatch.setattr(handler, "household_memberships_table", ExactHouseholdMembershipTable({
+        "household_id": household_id,
+        "membership_id": handler.household_membership_id(account_id, household_id),
+        "entity_type": "HouseholdMembership",
+        "status": "active",
+        "account_id": account_id,
+        "profile_id": profile_id,
+        "household_access_role": "owner",
+    }))
+
+    query, reason = handler._authorized_seerr_request_query(
+        profile_id,
+        {"take": 50, "requestedBy": "42"},
+    )
+
+    assert reason == ""
+    assert query == {"take": 50}
+
+
+def test_remote_metadata_request_enforces_admin_scope_before_queueing(monkeypatch):
+    table = FakeRemoteRequests([])
+    monkeypatch.setattr(handler, "remote_requests_table", table)
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable({
+        "profile_id": "profile-admin",
+        "state": "active",
+        "seerr_binding_state": "active",
+        "seerr_user_id": "42",
+        "household_access_role": "admin",
+    }))
+    monkeypatch.setattr(handler, "require_profile_auth", lambda _event, profile_id: profile_id == "profile-admin")
+    monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda profile_id: {"connector_id": "connector-1"})
+
+    result = handler.create_remote_request(event({
+        "profile_id": "profile-admin",
+        "provider": "seerr",
+        "method": "GET",
+        "path": "/api/v1/request",
+        "query": {"take": 50, "skip": 0},
+    }))
+
+    assert result["statusCode"] == 202
+    queued = next(iter(table.items.values()))
+    assert json.loads(queued["request_json"])["query"] == {"take": 50, "skip": 0, "requestedBy": "42"}
+
+
+def test_remote_metadata_request_owner_receives_household_scope_before_queueing(monkeypatch):
+    table = FakeRemoteRequests([])
+    monkeypatch.setattr(handler, "remote_requests_table", table)
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable({
+        "profile_id": "profile-owner",
+        "state": "active",
+        "seerr_binding_state": "active",
+        "seerr_user_id": "42",
+        "household_access_role": "owner",
+    }))
+    monkeypatch.setattr(handler, "require_profile_auth", lambda _event, profile_id: profile_id == "profile-owner")
+    monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda profile_id: {"connector_id": "connector-1"})
+
+    result = handler.create_remote_request(event({
+        "profile_id": "profile-owner",
+        "provider": "seerr",
+        "method": "GET",
+        "path": "/api/v1/request",
+        "query": {"take": 50, "skip": 0, "requestedBy": "42"},
+    }))
+
+    assert result["statusCode"] == 202
+    queued = next(iter(table.items.values()))
+    assert json.loads(queued["request_json"])["query"] == {"take": 50, "skip": 0}
+
+
+def test_remote_jellyfin_metadata_rewrites_client_identity_to_exact_profile_binding(monkeypatch):
+    table = FakeRemoteRequests([])
+    profile_id = "profile-member"
+    bound_user_id = "0123456789abcdef0123456789abcdef"
+    untrusted_user_id = "fedcba9876543210fedcba9876543210"
+    monkeypatch.setattr(handler, "remote_requests_table", table)
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable({
+        "profile_id": profile_id,
+        "state": "active",
+        "jellyfin_binding_state": "active",
+        "jellyfin_connector_id": "connector-1",
+        "jellyfin_user_id": bound_user_id,
+    }))
+    monkeypatch.setattr(handler, "require_profile_auth", lambda _event, value: value == profile_id)
+    monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda _profile_id: {"connector_id": "connector-1"})
+
+    result = handler.create_remote_request(event({
+        "profile_id": profile_id,
+        "provider": "jellyfin",
+        "method": "GET",
+        "path": f"/Shows/{'a' * 32}/Seasons",
+        "query": {"userId": untrusted_user_id},
+    }))
+
+    assert result["statusCode"] == 202
+    queued = json.loads(next(iter(table.items.values()))["request_json"])
+    assert queued["query"] == {"userId": bound_user_id}
+
+
+def test_remote_jellyfin_metadata_requires_exact_profile_binding(monkeypatch):
+    table = FakeRemoteRequests([])
+    monkeypatch.setattr(handler, "remote_requests_table", table)
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable({
+        "profile_id": "profile-member",
+        "state": "active",
+        "jellyfin_binding_state": "inactive",
+    }))
+    monkeypatch.setattr(handler, "require_profile_auth", lambda *_: True)
+    monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda _profile_id: {"connector_id": "connector-1"})
+
+    result = handler.create_remote_request(event({
+        "profile_id": "profile-member",
+        "provider": "jellyfin",
+        "method": "GET",
+        "path": f"/Shows/{'a' * 32}/Episodes",
+        "query": {"userId": "0" * 32},
+    }))
+
+    assert result["statusCode"] == 409
+    assert json.loads(result["body"])["state"] == "profile_jellyfin_binding_required"
+    assert not table.items
