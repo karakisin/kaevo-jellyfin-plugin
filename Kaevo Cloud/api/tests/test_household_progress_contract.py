@@ -33,8 +33,15 @@ class ExactProfileTable:
 class ProgressEventsTable:
     def __init__(self):
         self.items = {}
+        self.update_requests = []
 
-    def update_item(self, *, Key, ExpressionAttributeValues, **_):
+    def update_item(self, *, Key, ExpressionAttributeValues, **kwargs):
+        self.update_requests.append({
+            "key": dict(Key),
+            "names": dict(kwargs.get("ExpressionAttributeNames") or {}),
+            "update": kwargs.get("UpdateExpression"),
+            "condition": kwargs.get("ConditionExpression"),
+        })
         values = ExpressionAttributeValues
         self.items[(Key["profile_id"], Key["event_key"])] = {
             "profile_id": Key["profile_id"],
@@ -47,6 +54,10 @@ class ProgressEventsTable:
             "received_at": values[":received_at"],
             "metadata_json": values[":metadata_json"],
         }
+
+    def get_item(self, *, Key, ConsistentRead=False):
+        item = self.items.get((Key["profile_id"], Key["event_key"]))
+        return {"Item": dict(item)} if item else {}
 
     def query(self, **_):
         return {"Items": [dict(item) for item in self.items.values()]}
@@ -73,15 +84,15 @@ def configure(monkeypatch):
     return source, events
 
 
-def request_body(*, selected_ids, sequence=1):
+def request_body(*, selected_ids, sequence=1, position_seconds=600, session_started_at_epoch_milliseconds=1_784_000_000_000):
     return {
         "provider": "jellyfin",
         "item_id": "a" * 32,
         "session_id": "play-session-001",
         "media_type": "movie",
-        "session_started_at_epoch_milliseconds": 1_784_000_000_000,
+        "session_started_at_epoch_milliseconds": session_started_at_epoch_milliseconds,
         "sequence": sequence,
-        "position_seconds": 600,
+        "position_seconds": position_seconds,
         "runtime_seconds": 7_200,
         "selected_viewer_profile_ids": selected_ids,
     }
@@ -102,6 +113,38 @@ def test_progress_projects_only_to_exact_authorized_viewers(monkeypatch):
     stored = json.loads(events.items[("cloud-margaret-002", "household-progress#jellyfin#" + "a" * 32)]["metadata_json"])
     assert stored["viewer_profile_ids"] == ["cloud-jefferson-001", "cloud-margaret-002"]
     assert "display_name" not in stored
+
+
+def test_progress_escapes_dynamodb_reserved_attributes_in_both_expressions(monkeypatch):
+    source, events = configure(monkeypatch)
+
+    result = handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[source["profile_id"]]))})
+
+    assert result["statusCode"] == 202
+    write = events.update_requests[0]
+    assert write["names"]["#source"] == "source"
+    assert write["names"]["#timestamp"] == "timestamp"
+    assert write["names"]["#sequence"] == "sequence"
+    assert "#source = :source" in write["update"]
+    assert "#timestamp = :timestamp" in write["update"]
+    assert "#sequence < :sequence" in write["condition"]
+
+
+def test_progress_ignores_provisional_zero_without_replacing_checkpoint(monkeypatch):
+    source, events = configure(monkeypatch)
+    selected_ids = [source["profile_id"], "cloud-margaret-002"]
+
+    assert handler.save_household_progress({"body": json.dumps(request_body(selected_ids=selected_ids))})["statusCode"] == 202
+    result = handler.save_household_progress({"body": json.dumps(request_body(
+        selected_ids=[source["profile_id"]],
+        position_seconds=0,
+        session_started_at_epoch_milliseconds=1_784_000_001_000,
+    ))})
+
+    assert result["statusCode"] == 202
+    assert json.loads(result["body"])["state"] == "ignored_below_threshold"
+    stored = json.loads(events.items[(source["profile_id"], "household-progress#jellyfin#" + "a" * 32)]["metadata_json"])
+    assert stored["position_seconds"] == 600
 
 
 def test_progress_rejects_a_profile_outside_explicit_watching_audience(monkeypatch):
@@ -141,7 +184,9 @@ def test_departing_authorized_viewer_receives_only_its_final_checkpoint(monkeypa
 
 def test_progress_read_returns_only_the_authenticated_profiles_rows(monkeypatch):
     source, _ = configure(monkeypatch)
-    assert handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[source["profile_id"]]))})["statusCode"] == 202
+    assert handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[
+        source["profile_id"], "cloud-margaret-002",
+    ]))})["statusCode"] == 202
 
     result = handler.get_household_progress({})
 
@@ -149,7 +194,44 @@ def test_progress_read_returns_only_the_authenticated_profiles_rows(monkeypatch)
     body = json.loads(result["body"])
     assert body["profile_id"] == source["profile_id"]
     assert body["items"][0]["item_id"] == "a" * 32
-    assert body["items"][0]["viewer_profile_ids"] == [source["profile_id"]]
+    assert body["items"][0]["viewer_profile_ids"] == ["cloud-jefferson-001", "cloud-margaret-002"]
+    assert body["items"][0]["viewer_progress"] == [
+        {
+            "profile_id": "cloud-jefferson-001",
+            "position_seconds": 600.0,
+            "runtime_seconds": 7200.0,
+            "is_currently_selected": True,
+            "updated_at": body["items"][0]["updated_at"],
+        },
+        {
+            "profile_id": "cloud-margaret-002",
+            "position_seconds": 600.0,
+            "runtime_seconds": 7200.0,
+            "is_currently_selected": True,
+            "updated_at": body["items"][0]["updated_at"],
+        },
+    ]
+
+
+def test_progress_read_keeps_an_authorized_viewer_checkpoint_after_a_solo_session(monkeypatch):
+    source, events = configure(monkeypatch)
+    assert handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[
+        source["profile_id"], "cloud-margaret-002",
+    ]))})["statusCode"] == 202
+
+    # The source profile later writes a meaningful solo checkpoint. Its
+    # historical roster no longer names Margaret, while the current exact
+    # Who's Watching grant still authorizes this checkpoint projection.
+    assert handler.save_household_progress({"body": json.dumps(request_body(
+        selected_ids=[source["profile_id"]],
+        position_seconds=720,
+        session_started_at_epoch_milliseconds=1_784_000_001_000,
+    ))})["statusCode"] == 202
+
+    body = json.loads(handler.get_household_progress({})["body"])
+    checkpoints = {entry["profile_id"]: entry["position_seconds"] for entry in body["items"][0]["viewer_progress"]}
+    assert checkpoints == {"cloud-jefferson-001": 720.0, "cloud-margaret-002": 600.0}
+    assert events.items[(source["profile_id"], "household-progress#jellyfin#" + "a" * 32)]
 
 
 def test_template_exposes_protected_household_progress_read_and_write_routes():

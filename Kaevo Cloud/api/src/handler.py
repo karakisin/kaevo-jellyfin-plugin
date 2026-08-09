@@ -6039,6 +6039,18 @@ def save_household_progress(event):
     if error:
         return response(400 if error.startswith("invalid") or error == "active_profile_required" else 403, {"state": error})
 
+    # A fresh player reports position zero before its local resume seek has
+    # settled. Do not let that provisional packet replace a meaningful
+    # household checkpoint from another device/session. The iOS client also
+    # defers these writes; this is the authoritative backwards-compatible
+    # guard for an older client or a future caller.
+    if progress["position_seconds"] < 10:
+        return response(202, {
+            "state": "ignored_below_threshold",
+            "profile_ids": [],
+            "deferred_profile_ids": [],
+        })
+
     received_at = utc_now_iso()
     expires_at = epoch_now() + (90 * 24 * 60 * 60)
     written_profile_ids = []
@@ -6063,19 +6075,34 @@ def save_household_progress(event):
             events_table.update_item(
                 Key={"profile_id": profile_id, "event_key": event_key},
                 UpdateExpression=(
-                    "SET event_id = :event_id, event_type = :event_type, item_id = :item_id, "
-                    "source = :source, session_id = :session_id, timestamp = :timestamp, "
-                    "received_at = :received_at, expires_at = :expires_at, metadata_json = :metadata_json, "
-                    "session_started_at_epoch_milliseconds = :session_started_at_epoch_milliseconds, sequence = :sequence"
+                    "SET #event_id = :event_id, #event_type = :event_type, #item_id = :item_id, "
+                    "#source = :source, #session_id = :session_id, #timestamp = :timestamp, "
+                    "#received_at = :received_at, #expires_at = :expires_at, #metadata_json = :metadata_json, "
+                    "#session_started_at_epoch_milliseconds = :session_started_at_epoch_milliseconds, #sequence = :sequence"
                 ),
                 ConditionExpression=(
-                    Attr("session_started_at_epoch_milliseconds").not_exists()
-                    | Attr("session_started_at_epoch_milliseconds").lt(progress["session_started_at_epoch_milliseconds"])
-                    | (
-                        Attr("session_started_at_epoch_milliseconds").eq(progress["session_started_at_epoch_milliseconds"])
-                        & Attr("sequence").lt(progress["sequence"])
-                    )
+                    "attribute_not_exists(#session_started_at_epoch_milliseconds) "
+                    "OR #session_started_at_epoch_milliseconds < :session_started_at_epoch_milliseconds "
+                    "OR (#session_started_at_epoch_milliseconds = :session_started_at_epoch_milliseconds "
+                    "AND #sequence < :sequence)"
                 ),
+                # ``source``, ``timestamp``, and ``sequence`` are reserved
+                # DynamoDB expression words. Alias every persisted attribute
+                # so this projection never depends on the current reserved
+                # word list and Cloud writes reach every selected exact ID.
+                ExpressionAttributeNames={
+                    "#event_id": "event_id",
+                    "#event_type": "event_type",
+                    "#item_id": "item_id",
+                    "#source": "source",
+                    "#session_id": "session_id",
+                    "#timestamp": "timestamp",
+                    "#received_at": "received_at",
+                    "#expires_at": "expires_at",
+                    "#metadata_json": "metadata_json",
+                    "#session_started_at_epoch_milliseconds": "session_started_at_epoch_milliseconds",
+                    "#sequence": "sequence",
+                },
                 ExpressionAttributeValues={
                     ":event_id": str(uuid.uuid4()),
                     ":event_type": HOUSEHOLD_PROGRESS_EVENT_TYPE,
@@ -6104,11 +6131,59 @@ def save_household_progress(event):
     })
 
 
+def _household_progress_viewer_snapshots(*, source_profile, household_id, item, metadata):
+    """Return exact, still-authorized viewer checkpoints for one media item.
+
+    The authenticated profile's row is the capability.  It may reveal only
+    IDs explicitly present in that row and still present in the active
+    profile's current Who's Watching grant.  We read each exact row by its
+    primary key; this never scans a household or uses display metadata.
+    """
+    active_profile_id = str(source_profile.get("profile_id") or "").strip()
+    event_key = str(item.get("event_key") or "").strip()
+    allowed_ids = {active_profile_id}
+    allowed_ids.update(_household_progress_authorized_target_ids(
+        source_profile=source_profile,
+        household_id=household_id,
+    ))
+    # A later solo session must not hide a still-authorized co-viewer's last
+    # checkpoint. Current owner-managed grants are the authorization source;
+    # a prior playback roster is only historical metadata and is never used to
+    # discover or authorize an identity.
+    viewer_ids = sorted(allowed_ids)
+
+    snapshots = []
+    for viewer_profile_id in viewer_ids:
+        candidate = item if viewer_profile_id == active_profile_id else events_table.get_item(
+            Key={"profile_id": viewer_profile_id, "event_key": event_key},
+            ConsistentRead=True,
+        ).get("Item")
+        if not isinstance(candidate, dict):
+            continue
+        if (
+            candidate.get("event_type") != HOUSEHOLD_PROGRESS_EVENT_TYPE
+            or str(candidate.get("item_id") or "") != str(item.get("item_id") or "")
+        ):
+            continue
+        candidate_metadata = parse_json_field(candidate.get("metadata_json"), {})
+        position_seconds = _household_progress_seconds(candidate_metadata.get("position_seconds"))
+        if position_seconds is None:
+            continue
+        snapshots.append({
+            "profile_id": viewer_profile_id,
+            "position_seconds": position_seconds,
+            "runtime_seconds": _household_progress_seconds(candidate_metadata.get("runtime_seconds")),
+            "is_currently_selected": bool(candidate_metadata.get("is_currently_selected")),
+            "updated_at": str(candidate.get("received_at") or ""),
+        })
+    return snapshots
+
+
 def get_household_progress(event):
-    """Return only the authenticated profile's latest per-item progress rows."""
+    """Return the active profile's rows plus exact authorized viewer checkpoints."""
     if events_table is None:
         return response(503, {"state": "household_progress_storage_unavailable"})
-    source_profile, _, failure = _household_progress_authorized_source(event)
+    source_profile, household_id, failure = _household_progress_authorized_source(event)
     if failure:
         return failure
     profile_id = str(source_profile.get("profile_id") or "")
@@ -6134,6 +6209,12 @@ def get_household_progress(event):
             "viewer_profile_ids": metadata.get("viewer_profile_ids") or [],
             "session_id": str(item.get("session_id") or ""),
             "updated_at": str(item.get("received_at") or ""),
+            "viewer_progress": _household_progress_viewer_snapshots(
+                source_profile=source_profile,
+                household_id=household_id,
+                item=item,
+                metadata=metadata,
+            ),
         })
     return response(200, {"profile_id": profile_id, "items": items})
 
