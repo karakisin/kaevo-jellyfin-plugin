@@ -1,16 +1,17 @@
 # Kaevo Jellyfin Plugin
 
 The Kaevo Jellyfin Plugin is the local foundation for Kaevo. It runs inside the
-user's existing Jellyfin server and gives the Kaevo app bounded, read-only
-metadata access without requiring a separate Kaevo server installation.
+user's existing Jellyfin server and gives the Kaevo app bounded metadata access
+and explicitly authorized controls without requiring a separate Kaevo server
+installation.
 
 ## Current scope
 
 - Jellyfin: `10.11.x`
 - .NET target: `net8.0`
 - Foundation baseline: `0.1.0`
-- Current repository build: `0.2.84`
-- Supported phase: local metadata, app-guided Cloud activation, and guarded remote playback
+- Current repository build: `0.2.86`
+- Supported phase: local metadata, app-guided Cloud activation, guarded remote playback, and owner-authorized download controls
 
 Current endpoints:
 
@@ -31,15 +32,17 @@ stream URLs, provider secrets, or local credentials.
 The Kaevo app can activate the plugin without asking the user for a Cloud URL,
 pairing code, or TrueNAS environment credential. Playback stays on the Jellyfin
 server: compatible video is copied directly and unsupported audio can be
-transcoded to AAC before secure delivery. Remote mutations and optimizer
-execution remain disabled.
+transcoded to AAC before secure delivery. Unbounded remote mutations and remote
+optimizer execution remain disabled.
 
 The plugin settings page can privately store and independently enable local
 connections for Sonarr, Radarr, Seerr, Lidarr, Readarr, Prowlarr, Bazarr,
 Tdarr, SABnzbd, and qBittorrent. API keys, download-client credentials, and
-local addresses remain on the Jellyfin server. SABnzbd and qBittorrent are
-read-only health and queue integrations; Kaevo Cloud cannot submit, remove, or
-otherwise mutate downloads through them.
+local addresses remain on the Jellyfin server. SABnzbd and qBittorrent expose
+bounded health and queue reads. An authorized household owner can start or pause
+only an exact queue job after the plugin verifies its immutable Arr client ID,
+configured endpoint, and downloader job. Kaevo Cloud cannot submit or remove
+downloads through these integrations.
 
 ## Privacy boundary
 

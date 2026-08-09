@@ -19,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
-    private const string PluginVersion = "0.2.84";
+    private const string PluginVersion = "0.2.86";
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey, bool RequiresUsernamePassword, string Category)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey, bool RequiresUsernamePassword, string Category)>(StringComparer.OrdinalIgnoreCase)
         {

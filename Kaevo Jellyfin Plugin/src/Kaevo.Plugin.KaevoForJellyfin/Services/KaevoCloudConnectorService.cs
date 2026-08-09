@@ -15,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.85";
+    private const string PluginVersion = "0.2.86";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
@@ -455,13 +455,21 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 throw new InvalidOperationException("remoteProviderRouteNotAllowed");
             }
 
-            return await SendProviderReadAsync(
+            var providerResult = await SendProviderReadAsync(
                 configuration,
                 secrets,
                 request.Provider,
                 request.Path,
                 request.Query,
                 cancellationToken).ConfigureAwait(false);
+            return request.Provider is "sonarr" or "radarr" && request.Path == "/api/v3/queue"
+                ? await EnrichArrQueueDownloadClientIdsAsync(
+                    configuration,
+                    secrets,
+                    request.Provider,
+                    providerResult,
+                    cancellationToken).ConfigureAwait(false)
+                : providerResult;
         }
 
         if (request.Path == "/kaevo/internal/image")
@@ -1197,7 +1205,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var queue = await SendArrJsonAsync(secrets, arrKind, HttpMethod.Get, $"/api/v3/queue/{queueId}", null, cancellationToken).ConfigureAwait(false);
         if (!queue.TryGetProperty("id", out var queueIdValue) || !queueIdValue.TryGetInt32(out var returnedQueueId) || returnedQueueId != queueId
             || !queue.TryGetProperty("downloadId", out var returnedDownloadId) || !string.Equals(returnedDownloadId.GetString(), downloadId, StringComparison.Ordinal)
-            || !queue.TryGetProperty("downloadClientId", out var returnedClientId) || !returnedClientId.TryGetInt32(out var returnedDownloadClientId) || returnedDownloadClientId != downloadClientId)
+            || (queue.TryGetProperty("downloadClientId", out var returnedClientId)
+                && (!returnedClientId.TryGetInt32(out var returnedDownloadClientId) || returnedDownloadClientId != downloadClientId)))
         {
             throw new InvalidOperationException("arrQueueBindingChanged");
         }
@@ -1209,6 +1218,15 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
         var providerName = ResolveExactArrDownloadProvider(arrClient, secrets);
         if (providerName is null)
+        {
+            throw new InvalidOperationException("downloadClientBindingUnverified");
+        }
+        if (!await DownloaderContainsExactJobAsync(
+                configuration,
+                secrets,
+                providerName,
+                downloadId,
+                cancellationToken).ConfigureAwait(false))
         {
             throw new InvalidOperationException("downloadClientBindingUnverified");
         }
@@ -1234,6 +1252,195 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             state = paused ? "paused" : "running",
             read_back = true
         };
+    }
+
+    private async Task<CommandResult> EnrichArrQueueDownloadClientIdsAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string arrKind,
+        CommandResult result,
+        CancellationToken cancellationToken)
+    {
+        if (!result.Payload.TryGetProperty("records", out var records)
+            || records.ValueKind != JsonValueKind.Array)
+        {
+            return result;
+        }
+
+        JsonElement definitions;
+        try
+        {
+            definitions = await SendArrJsonAsync(
+                secrets,
+                arrKind,
+                HttpMethod.Get,
+                "/api/v3/downloadclient",
+                null,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return result;
+        }
+        if (definitions.ValueKind != JsonValueKind.Array)
+        {
+            return result;
+        }
+
+        var clients = definitions.EnumerateArray()
+            .Select(definition => new
+            {
+                ClientId = definition.TryGetProperty("id", out var id) && id.TryGetInt32(out var value) && value > 0
+                    ? value
+                    : 0,
+                Provider = ResolveExactArrDownloadProvider(definition, secrets)
+            })
+            .Where(candidate => candidate.ClientId > 0 && candidate.Provider is not null)
+            .ToArray();
+        if (clients.Length == 0)
+        {
+            return result;
+        }
+
+        var proofCache = new Dictionary<string, bool>(StringComparer.Ordinal);
+        var candidates = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+        foreach (var record in records.EnumerateArray())
+        {
+            if (record.TryGetProperty("downloadClientId", out var existingClientId)
+                && existingClientId.TryGetInt32(out var existingValue)
+                && existingValue > 0)
+            {
+                continue;
+            }
+            if (!record.TryGetProperty("downloadId", out var downloadIdElement)
+                || downloadIdElement.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+            var downloadId = downloadIdElement.GetString()?.Trim() ?? string.Empty;
+            if (downloadId.Length == 0 || downloadId.Length > 128)
+            {
+                continue;
+            }
+            foreach (var client in clients)
+            {
+                var providerName = client.Provider!;
+                var cacheKey = providerName + "\0" + downloadId;
+                if (!proofCache.TryGetValue(cacheKey, out var exists))
+                {
+                    try
+                    {
+                        exists = await DownloaderContainsExactJobAsync(
+                            configuration,
+                            secrets,
+                            providerName,
+                            downloadId,
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        exists = false;
+                    }
+                    proofCache[cacheKey] = exists;
+                }
+                if (!exists)
+                {
+                    continue;
+                }
+                if (!candidates.TryGetValue(downloadId, out var ids))
+                {
+                    ids = new HashSet<int>();
+                    candidates[downloadId] = ids;
+                }
+                ids.Add(client.ClientId);
+            }
+        }
+
+        var exactCandidates = candidates.ToDictionary(
+            pair => pair.Key,
+            pair => pair.Value.Order().ToArray(),
+            StringComparer.Ordinal);
+        return result with
+        {
+            Payload = EnrichQueueWithVerifiedDownloadClientCandidates(
+                result.Payload,
+                exactCandidates)
+        };
+    }
+
+    internal static JsonElement EnrichQueueWithVerifiedDownloadClientCandidates(
+        JsonElement payload,
+        IReadOnlyDictionary<string, int[]> candidates)
+    {
+        var root = JsonNode.Parse(payload.GetRawText()) as JsonObject;
+        if (root?["records"] is not JsonArray records)
+        {
+            return payload;
+        }
+        foreach (var node in records)
+        {
+            if (node is not JsonObject record
+                || record["downloadClientId"] is not null
+                || record["downloadId"] is not JsonValue downloadIdValue
+                || !downloadIdValue.TryGetValue<string>(out var downloadId)
+                || string.IsNullOrWhiteSpace(downloadId)
+                || !candidates.TryGetValue(downloadId.Trim(), out var clientIds)
+                || clientIds.Distinct().Take(2).ToArray() is not [var clientId]
+                || clientId <= 0)
+            {
+                continue;
+            }
+            record["downloadClientId"] = clientId;
+        }
+        return JsonSerializer.SerializeToElement(root, JsonOptions);
+    }
+
+    private async Task<bool> DownloaderContainsExactJobAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string providerName,
+        string downloadId,
+        CancellationToken cancellationToken)
+    {
+        if (providerName == "sabnzbd")
+        {
+            var queue = await SendProviderReadAsync(
+                configuration,
+                secrets,
+                "sabnzbd",
+                "/api",
+                new Dictionary<string, JsonElement>
+                {
+                    ["mode"] = JsonSerializer.SerializeToElement("queue")
+                },
+                cancellationToken).ConfigureAwait(false);
+            return queue.Payload.TryGetProperty("queue", out var queueElement)
+                && queueElement.TryGetProperty("slots", out var slots)
+                && slots.ValueKind == JsonValueKind.Array
+                && slots.EnumerateArray().Any(slot =>
+                    slot.TryGetProperty("nzo_id", out var idElement)
+                    && idElement.ValueKind == JsonValueKind.String
+                    && string.Equals(idElement.GetString(), downloadId, StringComparison.Ordinal));
+        }
+        if (providerName == "qbittorrent")
+        {
+            var torrents = await SendProviderReadAsync(
+                configuration,
+                secrets,
+                "qbittorrent",
+                "/api/v2/torrents/info",
+                new Dictionary<string, JsonElement>
+                {
+                    ["hashes"] = JsonSerializer.SerializeToElement(downloadId)
+                },
+                cancellationToken).ConfigureAwait(false);
+            return torrents.Payload.ValueKind == JsonValueKind.Array
+                && torrents.Payload.EnumerateArray().Any(torrent =>
+                    torrent.TryGetProperty("hash", out var hashElement)
+                    && hashElement.ValueKind == JsonValueKind.String
+                    && string.Equals(hashElement.GetString(), downloadId, StringComparison.OrdinalIgnoreCase));
+        }
+        return false;
     }
 
     internal static string? ResolveExactArrDownloadProvider(JsonElement arrClient, KaevoConnectorSecrets secrets)
@@ -2340,7 +2547,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             : await _lifecycleClient.SendConnectorAsync(cloudBase, method, effectivePath, body, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException($"cloudHttp{(int)response.StatusCode}");
+            throw new InvalidOperationException(CloudFailureCategory(effectivePath, response.StatusCode));
         }
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -2353,6 +2560,22 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
     internal static string PairingV3CloudPath(string path)
         => path.StartsWith("/v1/", StringComparison.Ordinal) ? "/v3/" + path[4..] : path;
+
+    internal static string CloudFailureCategory(string path, HttpStatusCode statusCode)
+    {
+        var stage = path switch
+        {
+            "/v1/remote-requests/claim" or "/v3/remote-requests/claim" => "cloudRemoteRequestClaim",
+            _ when path.EndsWith("/complete", StringComparison.Ordinal)
+                && (path.StartsWith("/v1/remote-requests/", StringComparison.Ordinal)
+                    || path.StartsWith("/v3/remote-requests/", StringComparison.Ordinal)) => "cloudRemoteRequestComplete",
+            _ when path.EndsWith("/fail", StringComparison.Ordinal)
+                && (path.StartsWith("/v1/remote-requests/", StringComparison.Ordinal)
+                    || path.StartsWith("/v3/remote-requests/", StringComparison.Ordinal)) => "cloudRemoteRequestFail",
+            _ => "cloudConnector",
+        };
+        return $"{stage}Http{(int)statusCode}";
+    }
 
     internal static string ProfileIdForCloud(string profileId, bool pairingV3Active)
         => pairingV3Active ? string.Empty : profileId;

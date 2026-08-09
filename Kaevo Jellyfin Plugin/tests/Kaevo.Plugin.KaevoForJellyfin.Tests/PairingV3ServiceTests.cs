@@ -260,6 +260,18 @@ public sealed class PairingV3ServiceTests : IDisposable
     }
 
     [Fact]
+    public void ConnectorResponseCanonicalDigestPreservesProviderNumberLexemes()
+    {
+        using var document = JsonDocument.Parse("""
+            {"z":1e+30,"a":1.2300,"n":-0.0}
+            """);
+
+        Assert.Equal(
+            "2q5ACfJV126jET-pNLYSExSxcYsJoHWO9vWCQI2TJwU",
+            KaevoPairingV3Crypto.CanonicalJsonDigest(document.RootElement));
+    }
+
+    [Fact]
     public async Task LostResponseRecoversThroughStatusAndConsumesDurably()
     {
         var cloud = new CapturingCloud(new("ambiguous_enrollment", Retryable: true)) { StatusResult = new("pairing_redeemed", "connector-1", Idempotent: true) };
@@ -317,6 +329,10 @@ public sealed class PairingV3ServiceTests : IDisposable
         Assert.DoesNotContain(token, capture.Body);
         Assert.Equal("/v3/remote-requests/claim", KaevoCloudConnectorService.PairingV3CloudPath("/v1/remote-requests/claim"));
         Assert.Equal("/v3/home-connectors/connector-1/heartbeat", KaevoCloudConnectorService.PairingV3CloudPath("/v1/home-connectors/connector-1/heartbeat"));
+        Assert.Equal("cloudRemoteRequestClaimHttp401", KaevoCloudConnectorService.CloudFailureCategory("/v3/remote-requests/claim", HttpStatusCode.Unauthorized));
+        Assert.Equal("cloudRemoteRequestCompleteHttp401", KaevoCloudConnectorService.CloudFailureCategory("/v3/remote-requests/request-secret/complete", HttpStatusCode.Unauthorized));
+        Assert.Equal("cloudRemoteRequestFailHttp401", KaevoCloudConnectorService.CloudFailureCategory("/v3/remote-requests/request-secret/fail", HttpStatusCode.Unauthorized));
+        Assert.Equal("cloudConnectorHttp503", KaevoCloudConnectorService.CloudFailureCategory("/v3/home-connectors/connector-secret/heartbeat", HttpStatusCode.ServiceUnavailable));
         Assert.Equal(string.Empty, KaevoCloudConnectorService.ProfileIdForCloud("legacy-profile", pairingV3Active: true));
         Assert.Equal("legacy-profile", KaevoCloudConnectorService.ProfileIdForCloud("legacy-profile", pairingV3Active: false));
     }
