@@ -15,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.87";
+    private const string PluginVersion = "0.2.88";
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
@@ -1542,11 +1542,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         bool paused,
         CancellationToken cancellationToken)
     {
-        var commandQuery = new Dictionary<string, JsonElement>
-        {
-            ["mode"] = JsonSerializer.SerializeToElement(paused ? "pause" : "resume"),
-            ["value"] = JsonSerializer.SerializeToElement(downloadId)
-        };
+        var commandQuery = BuildSabnzbdQueueStateQuery(downloadId, paused);
         await SendProviderReadAsync(configuration, secrets, "sabnzbd", "/api", commandQuery, cancellationToken).ConfigureAwait(false);
         var queue = await SendProviderReadAsync(
             configuration,
@@ -1573,6 +1569,17 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
         throw new InvalidOperationException("sabnzbdQueueReadbackMissing");
     }
+
+    internal static IReadOnlyDictionary<string, JsonElement> BuildSabnzbdQueueStateQuery(
+        string downloadId,
+        bool paused) => new Dictionary<string, JsonElement>
+        {
+            // SABnzbd's top-level mode=pause|resume controls the entire queue
+            // and does not target value. Exact job control is a queue command.
+            ["mode"] = JsonSerializer.SerializeToElement("queue"),
+            ["name"] = JsonSerializer.SerializeToElement(paused ? "pause" : "resume"),
+            ["value"] = JsonSerializer.SerializeToElement(downloadId)
+        };
 
     private async Task<bool> SetQbittorrentQueueStateAsync(
         PluginConfiguration configuration,

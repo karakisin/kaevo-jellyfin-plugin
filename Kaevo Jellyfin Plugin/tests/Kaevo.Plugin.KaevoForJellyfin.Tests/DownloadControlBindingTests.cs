@@ -146,6 +146,22 @@ public sealed class DownloadControlBindingTests
             2071545594));
     }
 
+    [Theory]
+    [InlineData(true, "pause")]
+    [InlineData(false, "resume")]
+    public void SabnzbdStateChangeTargetsOnlyTheExactQueueJob(bool paused, string command)
+    {
+        const string exactDownloadId = "e41c87db-d088-4470-a8fe-cdd56faf0e9c";
+
+        var query = KaevoCloudConnectorService.BuildSabnzbdQueueStateQuery(
+            exactDownloadId,
+            paused);
+
+        Assert.Equal("queue", query["mode"].GetString());
+        Assert.Equal(command, query["name"].GetString());
+        Assert.Equal(exactDownloadId, query["value"].GetString());
+    }
+
     private static KaevoConnectorSecrets Secrets(string sabUrl) => new(
         "connector", "playback", "jellyfin", Providers: new Dictionary<string, KaevoLocalProviderSecret>
         {
