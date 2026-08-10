@@ -192,6 +192,30 @@ def signed_connector_request(route, body, *, nonce="connectorrequestnonce0123456
     })
 
 
+def signed_raw_connector_request(route, raw_body, *, nonce="connectorrawnumbernonce0123456"):
+    body = json.loads(raw_body)
+    timestamp = str(handler.epoch_now() * 1000)
+    connector_id = str(body["connector_id"])
+    fingerprint = bindings()["pluginPublicKeyFingerprint"]
+    transcript = pairing_v3.canonical_transcript("connector-request", (
+        ("httpMethod", "POST"), ("canonicalRoute", route),
+        ("bodyDigest", pairing_v3.canonical_json_digest_preserving_number_lexemes(raw_body)),
+        ("timestamp", timestamp), ("nonce", nonce), ("connectorId", connector_id),
+        ("pluginInstanceId", bindings()["pluginInstanceId"]), ("pluginKeyId", "1"),
+        ("pluginPublicKeyFingerprint", fingerprint),
+    ))
+    return {
+        "rawPath": route,
+        "requestContext": {"http": {"method": "POST"}},
+        "headers": {
+            "X-Kaevo-Plugin-Key-Id": "1", "X-Kaevo-Plugin-Timestamp": timestamp,
+            "X-Kaevo-Plugin-Nonce": nonce,
+            "X-Kaevo-Plugin-Signature": pairing_v3.sign_ed25519(PLUGIN_SEED, transcript),
+        },
+        "body": raw_body,
+    }
+
+
 def test_fixed_vector_matches_hkdf_public_key_transcript_and_signature():
     vector = json.loads(VECTOR_PATH.read_text())
     kdf = vector["challengeSigningKdf"]
@@ -216,6 +240,38 @@ def test_fixed_vector_matches_hkdf_public_key_transcript_and_signature():
     signature = pairing_v3.sign_ed25519(seed, transcript)
     assert signature == vector["challengeTranscript"]["expectedSignatureBase64url"]
     pairing_v3.verify_ed25519(public, transcript, signature)
+
+
+def test_raw_number_canonical_digest_matches_plugin_fixed_vector():
+    raw_body = '{"z":1e+30,"a":1.2300,"n":-0.0}'
+    assert pairing_v3.canonical_json_digest_preserving_number_lexemes(raw_body) == (
+        "2q5ACfJV126jET-pNLYSExSxcYsJoHWO9vWCQI2TJwU"
+    )
+    assert pairing_v3.canonical_json_digest(json.loads(raw_body)) != (
+        pairing_v3.canonical_json_digest_preserving_number_lexemes(raw_body)
+    )
+
+
+@pytest.mark.parametrize(("raw_body", "expected_digest"), [
+    ('{"s":"\\uD83D\\uDE00"}', "_C6fjXom4iuJQdFW3QtMOU1s6WuTN-0foAAugvKGl1Q"),
+    (
+        '{"s":"caf\\u00E9 \\u0026 \\u003Ctag\\u003E / \\u0022quote\\u0022 \\\\ path"}',
+        "5aSCh07KHIahFiTdM4wEQg5RZ1n9ksgGEytIHvnIQYA",
+    ),
+])
+def test_raw_canonical_digest_matches_dotnet_unsafe_relaxed_string_vectors(raw_body, expected_digest):
+    assert pairing_v3.canonical_json_digest_preserving_number_lexemes(raw_body) == expected_digest
+
+
+@pytest.mark.parametrize("raw_body", [
+    '{"value":1,"value":2}',
+    '{"value":NaN}',
+    '{"value":Infinity}',
+    '{"value":-Infinity}',
+])
+def test_raw_number_canonical_digest_rejects_ambiguous_or_nonstandard_json(raw_body):
+    with pytest.raises(pairing_v3.PairingV3CryptoError):
+        pairing_v3.canonical_json_digest_preserving_number_lexemes(raw_body)
 
 
 @pytest.mark.parametrize("value", ["ABC", "123e4567-e89b-12d3-a456-426614174000\\n", "123E4567-E89B-12D3-A456-426614174000"])
@@ -312,6 +368,25 @@ def test_v3_connector_registers_and_becomes_online_with_signed_control_request(v
     public = json.loads(result["body"])["connector"]
     assert public["online"] is True
     assert public["provider_status"]["sonarr"]["ok"] is True
+
+
+def test_v3_connector_accepts_plugin_digest_that_preserves_provider_number_lexemes(v3_tables):
+    _, connectors, _ = v3_tables
+    authorization = issue_authorization()
+    redeemed = handler.redeem_home_connector_pairing_v3(signed_redemption(authorization))
+    connector_id = json.loads(redeemed["body"])["connectorId"]
+    raw_body = (
+        '{"connector_id":' + json.dumps(connector_id)
+        + ',"profile_id":"profile-1","provider_status":{"radarr":{"progress":1.2300,"rate":1e+30}}}'
+    )
+
+    result = handler.register_home_connector(
+        signed_raw_connector_request("/v3/home-connectors/register", raw_body),
+        pairing_v3=True,
+    )
+
+    assert result["statusCode"] == 200
+    assert connectors.items[connector_id]["auth_state"] == "v3_active"
 
 
 def test_v3_connector_rejects_missing_signature_and_nonce_replay(v3_tables):

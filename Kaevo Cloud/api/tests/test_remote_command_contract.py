@@ -54,6 +54,208 @@ def test_seerr_request_body_is_bounded_and_normalized():
     }
 
 
+def test_downloader_queue_command_is_exact_id_bound_and_state_bounded():
+    payload, error = command(
+        "downloaders.set_queue_state",
+        {
+            "arr_kind": "SONARR",
+            "arr_queue_id": 41,
+            "arr_download_client_id": 8,
+            "download_id": "SABnzbd_nzo_7f9c",
+            "target_state": "PAUSED",
+        },
+    )
+    assert error == ""
+    assert payload == {
+        "provider": "home_server",
+        "method": "COMMAND",
+        "path": "/commands/downloaders.set_queue_state",
+        "query": {},
+        "body": {
+            "arr_kind": "sonarr",
+            "arr_queue_id": 41,
+            "arr_download_client_id": 8,
+            "download_id": "SABnzbd_nzo_7f9c",
+            "target_state": "paused",
+        },
+    }
+
+    for invalid in (
+        {"arr_kind": "sonarr", "arr_queue_id": 0, "arr_download_client_id": 8, "download_id": "safe", "target_state": "paused"},
+        {"arr_kind": "sonarr", "arr_queue_id": 1, "arr_download_client_id": 0, "download_id": "safe", "target_state": "paused"},
+        {"arr_kind": "sonarr", "arr_queue_id": 1, "arr_download_client_id": 8, "download_id": "../../unsafe", "target_state": "paused"},
+        {"arr_kind": "lidarr", "arr_queue_id": 1, "arr_download_client_id": 8, "download_id": "safe", "target_state": "paused"},
+        {"arr_kind": "sonarr", "arr_queue_id": 1, "arr_download_client_id": 8, "download_id": "safe", "target_state": "delete"},
+    ):
+        rejected, rejected_error = command("downloaders.set_queue_state", invalid)
+        assert rejected is None
+        assert rejected_error
+
+
+def test_downloader_queue_command_requires_owner_capability(monkeypatch):
+    class RemoteRequests:
+        def __init__(self):
+            self.items = {}
+
+        def get_item(self, *, Key):
+            item = self.items.get(Key["request_id"])
+            return {"Item": dict(item)} if item else {}
+
+        def put_item(self, *, Item, **_):
+            self.items[Item["request_id"]] = dict(Item)
+
+    monkeypatch.setattr(handler, "remote_requests_table", RemoteRequests())
+    monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
+    monkeypatch.setattr(
+        handler,
+        "authorize_protected_owner_download_command",
+        lambda _event, profile_id: (
+            None
+            if profile_id == "owner-profile"
+            else handler.response(403, {"state": "unauthorized"})
+        ),
+    )
+    monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda _: {"connector_id": "connector-1"})
+
+    result = handler.create_remote_command({
+        "body": json.dumps({
+            "profile_id": "owner-profile",
+            "operation": "downloaders.set_queue_state",
+            "parameters": {
+                "arr_kind": "radarr",
+                "arr_queue_id": 9,
+                "arr_download_client_id": 4,
+                "download_id": "hash-9",
+                "target_state": "running",
+            },
+            "idempotency_key": "owner-download-control-1",
+        }),
+    })
+    assert result["statusCode"] == 202
+    queued = next(iter(handler.remote_requests_table.items.values()))
+    assert queued["priority"] == 1
+
+    denied = handler.create_remote_command({
+        "body": json.dumps({
+            "profile_id": "member-profile",
+            "operation": "downloaders.set_queue_state",
+            "parameters": {
+                "arr_kind": "radarr",
+                "arr_queue_id": 9,
+                "arr_download_client_id": 4,
+                "download_id": "hash-9",
+                "target_state": "running",
+            },
+            "idempotency_key": "member-download-control-1",
+        }),
+    })
+    assert denied["statusCode"] == 403
+
+
+def test_protected_owner_download_command_uses_exact_same_household_profiles(monkeypatch):
+    class Profiles:
+        def __init__(self):
+            self.items = {
+                "owner-profile": {
+                    "profile_id": "owner-profile",
+                    "household_id": "household-1",
+                    "state": "active",
+                },
+                "member-profile": {
+                    "profile_id": "member-profile",
+                    "household_id": "household-1",
+                    "state": "active",
+                },
+                "foreign-profile": {
+                    "profile_id": "foreign-profile",
+                    "household_id": "household-2",
+                    "state": "active",
+                },
+            }
+
+        def get_item(self, *, Key, ConsistentRead):
+            assert ConsistentRead is True
+            item = self.items.get(Key["profile_id"])
+            return {"Item": dict(item)} if item else {}
+
+    monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
+    monkeypatch.setattr(
+        handler,
+        "household_manager_bound_session",
+        lambda _event: ({
+            "record_type": "access",
+            "profile_id": "owner-profile",
+            "household_id": "household-1",
+            "household_access_role": "owner",
+        }, None),
+    )
+
+    assert handler.authorize_protected_owner_download_command({}, "owner-profile") is None
+    assert handler.authorize_protected_owner_download_command({}, "member-profile") is None
+    denied = handler.authorize_protected_owner_download_command({}, "foreign-profile")
+    assert denied["statusCode"] == 404
+    assert json.loads(denied["body"])["state"] == "target_not_found"
+
+
+def test_protected_download_command_rejects_non_owner_manager(monkeypatch):
+    monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
+    monkeypatch.setattr(
+        handler,
+        "household_manager_bound_session",
+        lambda _event: ({
+            "record_type": "access",
+            "profile_id": "admin-profile",
+            "household_id": "household-1",
+            "household_access_role": "admin",
+        }, None),
+    )
+
+    denied = handler.authorize_protected_owner_download_command({}, "member-profile")
+    assert denied["statusCode"] == 403
+    assert json.loads(denied["body"])["state"] == "owner_required"
+
+
+def test_protected_owner_can_poll_same_household_download_command(monkeypatch):
+    class RemoteRequests:
+        def get_item(self, *, Key):
+            assert Key == {"request_id": "request-1"}
+            return {"Item": {
+                "request_id": "request-1",
+                "profile_id": "member-profile",
+                "status": "completed",
+                "request_json": json.dumps({
+                    "provider": "home_server",
+                    "method": "COMMAND",
+                    "path": "/commands/downloaders.set_queue_state",
+                    "query": {},
+                    "body": {
+                        "arr_kind": "radarr",
+                        "arr_queue_id": 9,
+                        "arr_download_client_id": 4,
+                        "download_id": "hash-9",
+                        "target_state": "paused",
+                    },
+                }),
+            }}
+
+    monkeypatch.setattr(handler, "remote_requests_table", RemoteRequests())
+    monkeypatch.setattr(
+        handler,
+        "authorize_protected_owner_download_command",
+        lambda _event, profile_id: None if profile_id == "member-profile" else handler.response(403, {"state": "unauthorized"}),
+    )
+    monkeypatch.setattr(
+        handler,
+        "require_profile_auth",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("owner command polling must not consume profile auth first")),
+    )
+
+    result = handler.get_remote_request({}, "/v1/remote-requests/request-1")
+    assert result["statusCode"] == 200
+    assert json.loads(result["body"])["request_id"] == "request-1"
+
+
 def test_seerr_create_command_derives_the_bound_requester_not_the_client(monkeypatch):
     class RemoteRequests:
         def __init__(self):

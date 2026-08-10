@@ -934,6 +934,32 @@ def test_identity_me_prefers_exact_profile_request_policy_over_stale_membership_
     assert json.loads(response["body"])["profile_access"][0]["request_access_enabled"] is True
 
 
+def test_identity_me_exposes_only_exact_self_seerr_binding(monkeypatch):
+    tables, _transaction_client, session = install_normalized_profile_context(monkeypatch)
+    membership_id = household_membership_id("acct_1", "household-1")
+    membership = tables["household-memberships"].items[("household-1", membership_id)]
+    membership["profile_id"] = "profile-1"
+    identity_profile = handler.identity_profiles_table.items["profile-1"]
+    identity_profile.update({
+        "display_name": "Owner",
+        "seerr_binding_state": "active",
+        "seerr_user_id": "42",
+    })
+
+    response = handler.identity_me_v3({}, verified_session=session)
+
+    assert response["statusCode"] == 200
+    self_access = json.loads(response["body"])["profile_access"]
+    assert len(self_access) == 1
+    assert self_access[0]["profile_id"] == "profile-1"
+    assert self_access[0]["is_self"] is True
+    assert self_access[0]["seerr_user_id"] == "42"
+
+    identity_profile["seerr_binding_state"] = "inactive"
+    response = handler.identity_me_v3({}, verified_session=session)
+    assert "seerr_user_id" not in json.loads(response["body"])["profile_access"][0]
+
+
 def test_owner_updates_exact_watching_targets_without_changing_switch_authority(monkeypatch):
     tables, _transaction_client, _session = install_normalized_profile_context(monkeypatch)
     source = handler.identity_profiles_table.items["profile-1"]

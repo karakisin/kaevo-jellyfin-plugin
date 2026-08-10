@@ -12,6 +12,7 @@ import gzip
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -28,6 +29,7 @@ from pairing_v3 import (
     PairingV3CryptoError,
     b64url_decode,
     canonical_json_digest,
+    canonical_json_digest_preserving_number_lexemes,
     canonical_transcript,
     constant_time_equal,
     plugin_fingerprint,
@@ -68,6 +70,7 @@ binding_operations_table = dynamodb.Table(BINDING_OPERATIONS_TABLE) if BINDING_O
 app_sessions_table = dynamodb.Table(APP_SESSIONS_TABLE) if APP_SESSIONS_TABLE else None
 identity_profiles_table = dynamodb.Table(IDENTITY_PROFILES_TABLE) if IDENTITY_PROFILES_TABLE else None
 s3_client = boto3.client("s3") if REMOTE_PAYLOADS_BUCKET else None
+LOGGER = logging.getLogger(__name__)
 
 
 def _json_default(value):
@@ -161,16 +164,119 @@ def _auth_failure():
     return response(401, "connector_unauthorized")
 
 
+CONNECTOR_AUTH_DIAGNOSTIC_EVENT = "pairing_v3_connector_auth_rejected"
+CONNECTOR_AUTH_NUMBER_COMPATIBILITY_EVENT = "pairing_v3_connector_auth_number_compatibility"
+CONNECTOR_AUTH_REASON_FALLBACK = "CONNECTOR_AUTH_REJECTED_UNCLASSIFIED"
+CONNECTOR_AUTH_REASON_CATEGORIES = frozenset({
+    "AUTH_STORAGE_UNAVAILABLE",
+    "CONNECTOR_ID_MISSING",
+    "REQUEST_BODY_INVALID",
+    "BODY_CONNECTOR_MISMATCH",
+    "CONNECTOR_NOT_FOUND",
+    "CONNECTOR_STATE_INVALID",
+    "PLUGIN_PUBLIC_KEY_INVALID",
+    "PLUGIN_FINGERPRINT_INVALID",
+    "PLUGIN_INSTANCE_INVALID",
+    "PLUGIN_KEY_ID_MISMATCH",
+    "PLUGIN_TIMESTAMP_INVALID",
+    "PLUGIN_NONCE_INVALID",
+    "REQUEST_CANONICALIZATION_INVALID",
+    "PLUGIN_SIGNATURE_INVALID",
+    "PLUGIN_NONCE_REPLAY",
+    "PLUGIN_NONCE_STORAGE_FAILURE",
+    CONNECTOR_AUTH_REASON_FALLBACK,
+})
+
+
+def _connector_auth_route_category(event):
+    path = normalized_path(event)
+    if path == "/v3/remote-requests/claim":
+        return "remote_request_claim"
+    if re.fullmatch(r"/v3/remote-requests/[^/]+/complete", path):
+        return "remote_request_complete"
+    if re.fullmatch(r"/v3/remote-requests/[^/]+/fail", path):
+        return "remote_request_fail"
+    if re.fullmatch(r"/v3/home-connectors/[^/]+/heartbeat", path):
+        return "connector_heartbeat"
+    return "connector_request"
+
+
+def _connector_auth_rejected(event, reason, connector_id=""):
+    """Emit bounded connector-auth diagnosis while preserving a null result."""
+    try:
+        category = reason if reason in CONNECTOR_AUTH_REASON_CATEGORIES else CONNECTOR_AUTH_REASON_FALLBACK
+        connector_fingerprint = hashlib.sha256(
+            f"pairing-v3-connector-control-auth-v1:{connector_id}".encode("utf-8")
+        ).hexdigest()[:24] if connector_id else ""
+        LOGGER.warning(json.dumps({
+            "event": CONNECTOR_AUTH_DIAGNOSTIC_EVENT,
+            "reason_category": category,
+            "route_category": _connector_auth_route_category(event),
+            "method": method_for(event),
+            "connector_fingerprint": connector_fingerprint,
+            "timestamp": utc_now_iso(),
+        }, sort_keys=True, separators=(",", ":")))
+    except Exception:
+        # Diagnostic failure must never alter the existing fail-closed decision.
+        pass
+    return None
+
+
+def _raw_event_json_body(event):
+    raw_body = event.get("body") or "{}"
+    if event.get("isBase64Encoded"):
+        raw_body = base64.b64decode(raw_body).decode("utf-8")
+    if not isinstance(raw_body, str):
+        raise PairingV3CryptoError("JSON body must be text")
+    return raw_body
+
+
+def _connector_request_transcript(event, body_digest, timestamp, nonce, connector_id,
+                                  plugin_instance_id, plugin_key_id, fingerprint):
+    return canonical_transcript("connector-request", (
+        ("httpMethod", method_for(event)),
+        ("canonicalRoute", normalized_path(event)),
+        ("bodyDigest", body_digest),
+        ("timestamp", timestamp),
+        ("nonce", nonce),
+        ("connectorId", connector_id),
+        ("pluginInstanceId", plugin_instance_id),
+        ("pluginKeyId", plugin_key_id),
+        ("pluginPublicKeyFingerprint", fingerprint),
+    ))
+
+
+def _connector_auth_number_compatibility(event, connector_id):
+    try:
+        connector_fingerprint = hashlib.sha256(
+            f"pairing-v3-connector-control-auth-v1:{connector_id}".encode("utf-8")
+        ).hexdigest()[:24]
+        LOGGER.warning(json.dumps({
+            "event": CONNECTOR_AUTH_NUMBER_COMPATIBILITY_EVENT,
+            "route_category": _connector_auth_route_category(event),
+            "method": method_for(event),
+            "connector_fingerprint": connector_fingerprint,
+            "timestamp": utc_now_iso(),
+        }, sort_keys=True, separators=(",", ":")))
+    except Exception:
+        # Observability must not alter a successfully verified request.
+        pass
+
+
 def authenticate_connector(event, connector_id, body, *, allow_revoked=False):
     """Verify the enrolled Ed25519 key and atomically consume the nonce."""
-    if not all((home_connectors_table, app_sessions_table, connector_id)) or not isinstance(body, dict):
-        return None
+    if home_connectors_table is None or app_sessions_table is None:
+        return _connector_auth_rejected(event, "AUTH_STORAGE_UNAVAILABLE", connector_id)
+    if not connector_id:
+        return _connector_auth_rejected(event, "CONNECTOR_ID_MISSING")
+    if not isinstance(body, dict):
+        return _connector_auth_rejected(event, "REQUEST_BODY_INVALID", connector_id)
     body_connector_id = str(body.get("connector_id") or "").strip()
     if body_connector_id and not hmac.compare_digest(body_connector_id, connector_id):
-        return None
+        return _connector_auth_rejected(event, "BODY_CONNECTOR_MISMATCH", connector_id)
     item = home_connectors_table.get_item(Key={"connector_id": connector_id}, ConsistentRead=True).get("Item")
     if not item:
-        return None
+        return _connector_auth_rejected(event, "CONNECTOR_NOT_FOUND", connector_id)
     active = (
         not bool(item.get("revoked"))
         and item.get("auth_state") == "v3_active"
@@ -182,37 +288,60 @@ def authenticate_connector(event, connector_id, body, *, allow_revoked=False):
         and item.get("state") == "revoked"
     )
     if item.get("protocol_version") != PROTOCOL or not (active or (allow_revoked and revoked)):
-        return None
+        return _connector_auth_rejected(event, "CONNECTOR_STATE_INVALID", connector_id)
     try:
         public_key = b64url_decode(str(item.get("plugin_public_key") or ""))
         if len(public_key) != 32:
             raise PairingV3CryptoError("invalid plugin key")
-        fingerprint = str(item.get("plugin_public_key_fingerprint") or "")
-        if not SAFE_FINGERPRINT.fullmatch(fingerprint) or not constant_time_equal(fingerprint, plugin_fingerprint(public_key)):
-            raise PairingV3CryptoError("plugin fingerprint mismatch")
-        plugin_instance_id = str(item.get("plugin_instance_id") or "")
-        plugin_key_id = str(header_value(event, "x-kaevo-plugin-key-id") or "")
-        expected_key_id = str(item.get("plugin_key_id") or "1")
-        if not plugin_instance_id or not plugin_key_id or not hmac.compare_digest(plugin_key_id, expected_key_id):
-            raise PairingV3CryptoError("plugin key id mismatch")
-        timestamp = str(header_value(event, "x-kaevo-plugin-timestamp") or "")
-        if not re.fullmatch(r"\d{13}", timestamp) or abs((int(timestamp) // 1000) - epoch_now()) > PLUGIN_TIMESTAMP_SKEW_SECONDS:
-            raise PairingV3CryptoError("plugin timestamp invalid")
-        nonce = str(header_value(event, "x-kaevo-plugin-nonce") or "")
-        if not SAFE_NONCE.fullmatch(nonce):
-            raise PairingV3CryptoError("plugin nonce invalid")
-        transcript = canonical_transcript("connector-request", (
-            ("httpMethod", method_for(event)),
-            ("canonicalRoute", normalized_path(event)),
-            ("bodyDigest", canonical_json_digest(body)),
-            ("timestamp", timestamp),
-            ("nonce", nonce),
-            ("connectorId", connector_id),
-            ("pluginInstanceId", plugin_instance_id),
-            ("pluginKeyId", plugin_key_id),
-            ("pluginPublicKeyFingerprint", fingerprint),
-        ))
-        verify_ed25519(public_key, transcript, str(header_value(event, "x-kaevo-plugin-signature") or ""))
+    except (PairingV3CryptoError, TypeError, ValueError):
+        return _connector_auth_rejected(event, "PLUGIN_PUBLIC_KEY_INVALID", connector_id)
+    fingerprint = str(item.get("plugin_public_key_fingerprint") or "")
+    try:
+        valid_fingerprint = SAFE_FINGERPRINT.fullmatch(fingerprint) and constant_time_equal(
+            fingerprint, plugin_fingerprint(public_key)
+        )
+    except (PairingV3CryptoError, TypeError, ValueError):
+        valid_fingerprint = False
+    if not valid_fingerprint:
+        return _connector_auth_rejected(event, "PLUGIN_FINGERPRINT_INVALID", connector_id)
+    plugin_instance_id = str(item.get("plugin_instance_id") or "")
+    if not plugin_instance_id:
+        return _connector_auth_rejected(event, "PLUGIN_INSTANCE_INVALID", connector_id)
+    plugin_key_id = str(header_value(event, "x-kaevo-plugin-key-id") or "")
+    expected_key_id = str(item.get("plugin_key_id") or "1")
+    if not plugin_key_id or not hmac.compare_digest(plugin_key_id, expected_key_id):
+        return _connector_auth_rejected(event, "PLUGIN_KEY_ID_MISMATCH", connector_id)
+    timestamp = str(header_value(event, "x-kaevo-plugin-timestamp") or "")
+    if not re.fullmatch(r"\d{13}", timestamp) or abs((int(timestamp) // 1000) - epoch_now()) > PLUGIN_TIMESTAMP_SKEW_SECONDS:
+        return _connector_auth_rejected(event, "PLUGIN_TIMESTAMP_INVALID", connector_id)
+    nonce = str(header_value(event, "x-kaevo-plugin-nonce") or "")
+    if not SAFE_NONCE.fullmatch(nonce):
+        return _connector_auth_rejected(event, "PLUGIN_NONCE_INVALID", connector_id)
+    try:
+        parsed_body_digest = canonical_json_digest(body)
+        transcript = _connector_request_transcript(
+            event, parsed_body_digest, timestamp, nonce, connector_id,
+            plugin_instance_id, plugin_key_id, fingerprint,
+        )
+    except (PairingV3CryptoError, TypeError, ValueError):
+        return _connector_auth_rejected(event, "REQUEST_CANONICALIZATION_INVALID", connector_id)
+    signature = str(header_value(event, "x-kaevo-plugin-signature") or "")
+    try:
+        verify_ed25519(public_key, transcript, signature)
+    except (PairingV3CryptoError, TypeError, ValueError):
+        try:
+            compatibility_digest = canonical_json_digest_preserving_number_lexemes(_raw_event_json_body(event))
+            if hmac.compare_digest(compatibility_digest, parsed_body_digest):
+                raise PairingV3CryptoError("canonical body digest unchanged")
+            compatibility_transcript = _connector_request_transcript(
+                event, compatibility_digest, timestamp, nonce, connector_id,
+                plugin_instance_id, plugin_key_id, fingerprint,
+            )
+            verify_ed25519(public_key, compatibility_transcript, signature)
+        except (PairingV3CryptoError, TypeError, ValueError, UnicodeDecodeError):
+            return _connector_auth_rejected(event, "PLUGIN_SIGNATURE_INVALID", connector_id)
+        _connector_auth_number_compatibility(event, connector_id)
+    try:
         app_sessions_table.put_item(
             Item={
                 "token_hash": f"v3_connector_nonce#{sha256_b64url(f'{connector_id}:{nonce}'.encode('utf-8'))}",
@@ -222,8 +351,12 @@ def authenticate_connector(event, connector_id, body, *, allow_revoked=False):
             ConditionExpression="attribute_not_exists(token_hash)",
         )
         return item
-    except (PairingV3CryptoError, ClientError, TypeError, ValueError):
-        return None
+    except ClientError as error:
+        code = str(error.response.get("Error", {}).get("Code") or "")
+        reason = "PLUGIN_NONCE_REPLAY" if code == "ConditionalCheckFailedException" else "PLUGIN_NONCE_STORAGE_FAILURE"
+        return _connector_auth_rejected(event, reason, connector_id)
+    except (PairingV3CryptoError, TypeError, ValueError):
+        return _connector_auth_rejected(event, "PLUGIN_NONCE_STORAGE_FAILURE", connector_id)
 
 
 def disconnect_connector(event, connector_id):

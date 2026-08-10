@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 
 import pytest
@@ -171,6 +172,27 @@ def signed(route, body, nonce="connectorcontrolnonce0123456789"):
         "X-Kaevo-Plugin-Nonce": nonce,
         "X-Kaevo-Plugin-Signature": pairing_v3.sign_ed25519(PLUGIN_SEED, transcript),
     })
+
+
+def signed_raw(route, raw_body, nonce="connectorrawnumbernonce0123456"):
+    timestamp = str(control.epoch_now() * 1000)
+    transcript = pairing_v3.canonical_transcript("connector-request", (
+        ("httpMethod", "POST"), ("canonicalRoute", route),
+        ("bodyDigest", pairing_v3.canonical_json_digest_preserving_number_lexemes(raw_body)),
+        ("timestamp", timestamp), ("nonce", nonce), ("connectorId", CONNECTOR_ID),
+        ("pluginInstanceId", "plugin-control-01"), ("pluginKeyId", "1"),
+        ("pluginPublicKeyFingerprint", pairing_v3.plugin_fingerprint(pairing_v3.ed25519_public_key_from_seed(PLUGIN_SEED))),
+    ))
+    return {
+        "rawPath": route,
+        "requestContext": {"http": {"method": "POST"}},
+        "headers": {
+            "X-Kaevo-Plugin-Key-Id": "1", "X-Kaevo-Plugin-Timestamp": timestamp,
+            "X-Kaevo-Plugin-Nonce": nonce,
+            "X-Kaevo-Plugin-Signature": pairing_v3.sign_ed25519(PLUGIN_SEED, transcript),
+        },
+        "body": raw_body,
+    }
 
 
 def body(**extra):
@@ -361,6 +383,26 @@ def test_completion_and_failure_transitions_are_consistent(tables):
     assert {"response_json"} <= set_paths
     assert {"response_gzip_base64", "response_s3_key", "response_encoding", "response_stored_bytes"} <= remove_paths
     assert set_paths.isdisjoint(remove_paths)
+
+
+def test_completion_accepts_plugin_digest_that_preserves_provider_number_lexemes(tables, caplog):
+    tables[0].items[CONNECTOR_ID]["profile_id"] = PROFILE_ID
+    tables[3].items["complete-number-1"] = {
+        "request_id": "complete-number-1", "connector_id": CONNECTOR_ID, "profile_id": PROFILE_ID,
+        "status": "in_progress", "request_json": "{}", "expires_at": control.epoch_now() + 60,
+    }
+    route = "/v3/remote-requests/complete-number-1/complete"
+    raw_body = (
+        '{"connector_id":' + json.dumps(CONNECTOR_ID)
+        + ',"response":{"progress":1.2300,"rate":1e+30,"remaining":-0.0}}'
+    )
+
+    with caplog.at_level(logging.WARNING, logger=control.LOGGER.name):
+        result = control.lambda_handler(signed_raw(route, raw_body), None)
+
+    assert result["statusCode"] == 200
+    assert tables[3].items["complete-number-1"]["status"] == "completed"
+    assert any(control.CONNECTOR_AUTH_NUMBER_COMPATIBILITY_EVENT in record.message for record in caplog.records)
 
 
 def test_oversized_completion_does_not_leave_the_request_completing(tables, monkeypatch):

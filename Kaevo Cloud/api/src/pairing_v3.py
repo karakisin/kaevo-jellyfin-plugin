@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import re
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -172,6 +173,126 @@ def verify_ed25519(public_key: bytes, message: bytes, signature: str) -> None:
 
 def canonical_json_digest(value: object) -> str:
     return sha256_b64url(json.dumps(value, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8"))
+
+
+class _RawJsonNumber:
+    """A validated JSON number token whose original spelling must be retained."""
+
+    def __init__(self, token: str):
+        self.token = token
+
+
+def _reject_json_constant(value: str):
+    raise PairingV3CryptoError(f"non-standard JSON number: {value}")
+
+
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise PairingV3CryptoError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _utf16_ordinal_key(value: str) -> bytes:
+    """Match .NET StringComparer.Ordinal's UTF-16 code-unit ordering."""
+    return value.encode("utf-16-be", errors="surrogatepass")
+
+
+def _dotnet_unsafe_relaxed_json_string(value: str) -> str:
+    """Match Utf8JsonWriter with UnsafeRelaxedJsonEscaping for strings."""
+    output = ['"']
+    short_escapes = {
+        '"': '\\"',
+        "\\": "\\\\",
+        "\b": "\\b",
+        "\t": "\\t",
+        "\n": "\\n",
+        "\f": "\\f",
+        "\r": "\\r",
+    }
+    for character in value:
+        escaped = short_escapes.get(character)
+        if escaped is not None:
+            output.append(escaped)
+            continue
+        codepoint = ord(character)
+        category = unicodedata.category(character)
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise PairingV3CryptoError("unpaired JSON string surrogate")
+        if codepoint > 0xFFFF:
+            scalar = codepoint - 0x10000
+            output.append(f"\\u{0xD800 + (scalar >> 10):04X}\\u{0xDC00 + (scalar & 0x3FF):04X}")
+        elif (
+            category in {"Cc", "Co", "Cn", "Zl", "Zp"}
+            or (category == "Zs" and codepoint != 0x20)
+        ):
+            output.append(f"\\u{codepoint:04X}")
+        else:
+            output.append(character)
+    output.append('"')
+    return "".join(output)
+
+
+def _canonical_raw_json(value: object, output: list[str]) -> None:
+    if value is None:
+        output.append("null")
+    elif value is True:
+        output.append("true")
+    elif value is False:
+        output.append("false")
+    elif isinstance(value, _RawJsonNumber):
+        output.append(value.token)
+    elif isinstance(value, str):
+        output.append(_dotnet_unsafe_relaxed_json_string(value))
+    elif isinstance(value, list):
+        output.append("[")
+        for index, item in enumerate(value):
+            if index:
+                output.append(",")
+            _canonical_raw_json(item, output)
+        output.append("]")
+    elif isinstance(value, dict):
+        output.append("{")
+        for index, key in enumerate(sorted(value, key=_utf16_ordinal_key)):
+            if index:
+                output.append(",")
+            output.append(_dotnet_unsafe_relaxed_json_string(key))
+            output.append(":")
+            _canonical_raw_json(value[key], output)
+        output.append("}")
+    else:
+        raise PairingV3CryptoError("unsupported JSON value")
+
+
+def canonical_json_digest_preserving_number_lexemes(raw_json: str) -> str:
+    """Canonicalize exact JSON while retaining the sender's number lexemes.
+
+    System.Text.Json preserves provider number spellings and applies
+    UnsafeRelaxedJsonEscaping when a JsonElement is written to the plugin's
+    canonical stream.  Python's normal json.loads then json.dumps path does not
+    match either behavior.  This strict parser retains only validated number
+    tokens, rejects duplicate keys and non-standard constants, and reproduces
+    the plugin's string escaping and recursive key ordering.
+    """
+    if not isinstance(raw_json, str):
+        raise PairingV3CryptoError("JSON body must be text")
+    try:
+        parsed = json.loads(
+            raw_json,
+            parse_int=_RawJsonNumber,
+            parse_float=_RawJsonNumber,
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_unique_json_object,
+        )
+        output: list[str] = []
+        _canonical_raw_json(parsed, output)
+        return sha256_b64url("".join(output).encode("utf-8"))
+    except PairingV3CryptoError:
+        raise
+    except (json.JSONDecodeError, TypeError, UnicodeError, ValueError) as error:
+        raise PairingV3CryptoError("invalid JSON body") from error
 
 
 def sign_authorization(seed: bytes, key_id: str, claims: dict) -> str:

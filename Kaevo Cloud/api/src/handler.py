@@ -94,6 +94,7 @@ from pairing_v3 import (
     b64url_encode as pairing_v3_b64url_encode,
     canonical_transcript as pairing_v3_canonical_transcript,
     canonical_json_digest as pairing_v3_canonical_json_digest,
+    canonical_json_digest_preserving_number_lexemes as pairing_v3_canonical_json_digest_preserving_number_lexemes,
     canonical_uuid as pairing_v3_canonical_uuid,
     constant_time_equal as pairing_v3_constant_time_equal,
     ed25519_public_key_from_seed,
@@ -523,6 +524,102 @@ def _protected_identity_session_rejected(event, reason, *, item=None, installati
         pass
 
 
+PAIRING_V3_CONNECTOR_AUTH_DIAGNOSTIC_EVENT = "pairing_v3_connector_auth_rejected"
+PAIRING_V3_CONNECTOR_AUTH_NUMBER_COMPATIBILITY_EVENT = "pairing_v3_connector_auth_number_compatibility"
+PAIRING_V3_CONNECTOR_AUTH_REASON_FALLBACK = "CONNECTOR_AUTH_REJECTED_UNCLASSIFIED"
+PAIRING_V3_CONNECTOR_AUTH_REASON_CATEGORIES = frozenset({
+    "AUTH_STORAGE_UNAVAILABLE",
+    "CONNECTOR_ID_MISSING",
+    "REQUEST_BODY_INVALID",
+    "BODY_CONNECTOR_MISMATCH",
+    "CONNECTOR_NOT_FOUND",
+    "CONNECTOR_REVOKED",
+    "CONNECTOR_STATE_INVALID",
+    "PLUGIN_PUBLIC_KEY_INVALID",
+    "PLUGIN_FINGERPRINT_INVALID",
+    "PLUGIN_INSTANCE_INVALID",
+    "PLUGIN_KEY_ID_MISMATCH",
+    "PLUGIN_TIMESTAMP_INVALID",
+    "PLUGIN_NONCE_INVALID",
+    "REQUEST_CANONICALIZATION_INVALID",
+    "PLUGIN_SIGNATURE_INVALID",
+    "PLUGIN_NONCE_REPLAY",
+    "PLUGIN_NONCE_STORAGE_FAILURE",
+    PAIRING_V3_CONNECTOR_AUTH_REASON_FALLBACK,
+})
+
+
+def _pairing_v3_connector_route_category(event):
+    path = normalized_path(event)
+    if path == "/v3/remote-requests/claim":
+        return "remote_request_claim"
+    if re.fullmatch(r"/v3/remote-requests/[^/]+/complete", path):
+        return "remote_request_complete"
+    if re.fullmatch(r"/v3/remote-requests/[^/]+/fail", path):
+        return "remote_request_fail"
+    if re.fullmatch(r"/v3/home-connectors/[^/]+/heartbeat", path):
+        return "connector_heartbeat"
+    return "connector_request"
+
+
+def _pairing_v3_connector_auth_rejected(event, reason, connector_id=""):
+    """Emit bounded connector-auth diagnosis while preserving a false result."""
+    try:
+        category = reason if reason in PAIRING_V3_CONNECTOR_AUTH_REASON_CATEGORIES else PAIRING_V3_CONNECTOR_AUTH_REASON_FALLBACK
+        LOGGER.warning(json.dumps({
+            "event": PAIRING_V3_CONNECTOR_AUTH_DIAGNOSTIC_EVENT,
+            "reason_category": category,
+            "route_category": _pairing_v3_connector_route_category(event),
+            "method": method_for(event),
+            "connector_fingerprint": secret_hash(f"pairing-v3-connector-auth-v1:{connector_id}")[:24] if connector_id else "",
+            "lambda_request_fingerprint": str((event or {}).get("_kaevo_lambda_request_fingerprint") or ""),
+            "timestamp": utc_now_iso(),
+        }, sort_keys=True, separators=(",", ":")))
+    except Exception:
+        # Diagnostic failure must never alter the existing fail-closed decision.
+        pass
+    return False
+
+
+def _pairing_v3_raw_event_json_body(event):
+    raw_body = event.get("body") or "{}"
+    if event.get("isBase64Encoded"):
+        raw_body = base64.b64decode(raw_body).decode("utf-8")
+    if not isinstance(raw_body, str):
+        raise PairingV3CryptoError("JSON body must be text")
+    return raw_body
+
+
+def _pairing_v3_connector_request_transcript(event, body_digest, timestamp, nonce, connector_id,
+                                             plugin_instance_id, plugin_key_id, fingerprint):
+    return pairing_v3_canonical_transcript("connector-request", (
+        ("httpMethod", method_for(event).upper()),
+        ("canonicalRoute", normalized_path(event)),
+        ("bodyDigest", body_digest),
+        ("timestamp", timestamp),
+        ("nonce", nonce),
+        ("connectorId", connector_id),
+        ("pluginInstanceId", plugin_instance_id),
+        ("pluginKeyId", plugin_key_id),
+        ("pluginPublicKeyFingerprint", fingerprint),
+    ))
+
+
+def _pairing_v3_connector_auth_number_compatibility(event, connector_id):
+    try:
+        LOGGER.warning(json.dumps({
+            "event": PAIRING_V3_CONNECTOR_AUTH_NUMBER_COMPATIBILITY_EVENT,
+            "route_category": _pairing_v3_connector_route_category(event),
+            "method": method_for(event),
+            "connector_fingerprint": secret_hash(f"pairing-v3-connector-auth-v1:{connector_id}")[:24],
+            "lambda_request_fingerprint": str((event or {}).get("_kaevo_lambda_request_fingerprint") or ""),
+            "timestamp": utc_now_iso(),
+        }, sort_keys=True, separators=(",", ":")))
+    except Exception:
+        # Observability must not alter a successfully verified request.
+        pass
+
+
 def app_bearer_token(event):
     authorization = str(header_value(event, "authorization") or "")
     if authorization.lower().startswith("bearer "):
@@ -848,7 +945,7 @@ def _normalized_self_profile_access(*, claims, resolved_role, normalized_members
         or access_role == HouseholdAccessRole.OWNER.value
     )
     access_level = "manage" if is_household_owner or access_role == "admin" else "switch"
-    return [{
+    self_access = {
         "profile_id": profile_id,
         "profile_type": profile_type,
         "display_name": display_name,
@@ -880,7 +977,16 @@ def _normalized_self_profile_access(*, claims, resolved_role, normalized_members
         # Self is always a valid viewer. Explicit household audience grants
         # are added later after exact, same-household records are read back.
         "allowed_viewing_profile_ids": [profile_id],
-    }]
+    }
+    # Return the exact Seerr provider edge only for the authenticated self
+    # profile. Other accessible household profiles never expose their Seerr
+    # identity here. This lets clients attribute a provider request without
+    # comparing mutable names or avatars.
+    if str(profile.get("seerr_binding_state") or "") == "active":
+        seerr_user_id = _normalized_seerr_user_id(profile.get("seerr_user_id"))
+        if seerr_user_id:
+            self_access["seerr_user_id"] = seerr_user_id
+    return [self_access]
 
 
 def _profile_switch_pin_configured(profile):
@@ -5473,6 +5579,56 @@ def require_profile_auth(event, profile_id):
     )
 
 
+def authorize_protected_owner_download_command(event, profile_id):
+    """Authorize an exact same-household target from protected owner authority.
+
+    The queue mutation is initiated by the native app session rather than a
+    Gateway Cognito identity. Resolve the protected DPoP-bound session first,
+    then re-read the canonical owner and target profiles by immutable ID. An
+    owner may control a household member's visible request, but never a target
+    outside the session's exact active household.
+    """
+    if require_dev_key(event):
+        return None
+    session, error_response = household_manager_bound_session(event)
+    if error_response:
+        return error_response
+    if str(session.get("household_access_role") or "").strip().lower() != "owner":
+        return response(403, {"state": "owner_required"})
+    if identity_profiles_table is None:
+        return response(503, {"state": "identity_context_storage_unavailable"})
+
+    source_profile_id = str(session.get("profile_id") or "").strip()
+    household_id = str(session.get("household_id") or "").strip()
+    if not source_profile_id or not household_id:
+        return response(403, {"state": "owner_authority_missing"})
+
+    source = identity_profiles_table.get_item(
+        Key={"profile_id": source_profile_id},
+        ConsistentRead=True,
+    ).get("Item")
+    if not (
+        isinstance(source, dict)
+        and source.get("state") == "active"
+        and hmac.compare_digest(str(source.get("profile_id") or ""), source_profile_id)
+        and hmac.compare_digest(str(source.get("household_id") or ""), household_id)
+    ):
+        return response(403, {"state": "owner_authority_missing"})
+
+    target = source if hmac.compare_digest(source_profile_id, profile_id) else identity_profiles_table.get_item(
+        Key={"profile_id": profile_id},
+        ConsistentRead=True,
+    ).get("Item")
+    if not (
+        isinstance(target, dict)
+        and target.get("state") == "active"
+        and hmac.compare_digest(str(target.get("profile_id") or ""), profile_id)
+        and hmac.compare_digest(str(target.get("household_id") or ""), household_id)
+    ):
+        return response(404, {"state": "target_not_found"})
+    return None
+
+
 def base64url_encode(value):
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
@@ -5618,56 +5774,90 @@ def require_pairing_v3_connector_auth(event, connector_id, body):
     connector identity, plugin instance, key version, timestamp, and nonce.
     A verified nonce is recorded before the operation is allowed to proceed.
     """
-    if home_connectors_table is None or app_sessions_table is None or not connector_id or not isinstance(body, dict):
-        return False
+    if home_connectors_table is None or app_sessions_table is None:
+        return _pairing_v3_connector_auth_rejected(event, "AUTH_STORAGE_UNAVAILABLE", connector_id)
+    if not connector_id:
+        return _pairing_v3_connector_auth_rejected(event, "CONNECTOR_ID_MISSING")
+    if not isinstance(body, dict):
+        return _pairing_v3_connector_auth_rejected(event, "REQUEST_BODY_INVALID", connector_id)
     body_connector_id = str(body.get("connector_id") or "").strip()
     if body_connector_id and not hmac.compare_digest(body_connector_id, connector_id):
-        return False
+        return _pairing_v3_connector_auth_rejected(event, "BODY_CONNECTOR_MISMATCH", connector_id)
     item = home_connectors_table.get_item(Key={"connector_id": connector_id}, ConsistentRead=True).get("Item")
-    if not item or bool_value(item.get("revoked"), False):
-        return False
+    if not item:
+        return _pairing_v3_connector_auth_rejected(event, "CONNECTOR_NOT_FOUND", connector_id)
+    if bool_value(item.get("revoked"), False):
+        return _pairing_v3_connector_auth_rejected(event, "CONNECTOR_REVOKED", connector_id)
     if item.get("protocol_version") != PAIRING_V3_PROTOCOL or item.get("auth_state") != "v3_active" or item.get("state") != "active":
-        return False
+        return _pairing_v3_connector_auth_rejected(event, "CONNECTOR_STATE_INVALID", connector_id)
     try:
         public_key = pairing_v3_b64url_decode(str(item.get("plugin_public_key") or ""))
         if len(public_key) != 32:
             raise PairingV3CryptoError("invalid plugin key")
-        fingerprint = str(item.get("plugin_public_key_fingerprint") or "")
-        if not SAFE_PAIRING_V3_FINGERPRINT.fullmatch(fingerprint) or not pairing_v3_constant_time_equal(
+    except (PairingV3CryptoError, TypeError, ValueError):
+        return _pairing_v3_connector_auth_rejected(event, "PLUGIN_PUBLIC_KEY_INVALID", connector_id)
+    fingerprint = str(item.get("plugin_public_key_fingerprint") or "")
+    try:
+        valid_fingerprint = SAFE_PAIRING_V3_FINGERPRINT.fullmatch(fingerprint) and pairing_v3_constant_time_equal(
             fingerprint, pairing_v3_plugin_fingerprint(public_key)
-        ):
-            raise PairingV3CryptoError("plugin fingerprint mismatch")
+        )
+    except (PairingV3CryptoError, TypeError, ValueError):
+        valid_fingerprint = False
+    if not valid_fingerprint:
+        return _pairing_v3_connector_auth_rejected(event, "PLUGIN_FINGERPRINT_INVALID", connector_id)
+    try:
         plugin_instance_id = pairing_v3_text(item.get("plugin_instance_id"))
-        plugin_key_id = str(header_value(event, "x-kaevo-plugin-key-id") or "")
-        expected_key_id = str(item.get("plugin_key_id") or "1")
-        if not plugin_key_id or not hmac.compare_digest(plugin_key_id, expected_key_id):
-            raise PairingV3CryptoError("plugin key id mismatch")
-        timestamp = str(header_value(event, "x-kaevo-plugin-timestamp") or "")
-        if not re.fullmatch(r"\d{13}", timestamp) or abs((int(timestamp) // 1000) - epoch_now()) > PAIRING_V3_PLUGIN_TIMESTAMP_SKEW_SECONDS:
-            raise PairingV3CryptoError("plugin timestamp invalid")
-        nonce = str(header_value(event, "x-kaevo-plugin-nonce") or "")
-        if not SAFE_PAIRING_V3_NONCE.fullmatch(nonce):
-            raise PairingV3CryptoError("plugin nonce invalid")
-        transcript = pairing_v3_canonical_transcript("connector-request", (
-            ("httpMethod", method_for(event).upper()),
-            ("canonicalRoute", normalized_path(event)),
-            ("bodyDigest", pairing_v3_canonical_json_digest(body)),
-            ("timestamp", timestamp),
-            ("nonce", nonce),
-            ("connectorId", connector_id),
-            ("pluginInstanceId", plugin_instance_id),
-            ("pluginKeyId", plugin_key_id),
-            ("pluginPublicKeyFingerprint", fingerprint),
-        ))
-        pairing_v3_verify_ed25519(public_key, transcript, str(header_value(event, "x-kaevo-plugin-signature") or ""))
+    except (PairingV3CryptoError, TypeError, ValueError):
+        return _pairing_v3_connector_auth_rejected(event, "PLUGIN_INSTANCE_INVALID", connector_id)
+    plugin_key_id = str(header_value(event, "x-kaevo-plugin-key-id") or "")
+    expected_key_id = str(item.get("plugin_key_id") or "1")
+    if not plugin_key_id or not hmac.compare_digest(plugin_key_id, expected_key_id):
+        return _pairing_v3_connector_auth_rejected(event, "PLUGIN_KEY_ID_MISMATCH", connector_id)
+    timestamp = str(header_value(event, "x-kaevo-plugin-timestamp") or "")
+    if not re.fullmatch(r"\d{13}", timestamp) or abs((int(timestamp) // 1000) - epoch_now()) > PAIRING_V3_PLUGIN_TIMESTAMP_SKEW_SECONDS:
+        return _pairing_v3_connector_auth_rejected(event, "PLUGIN_TIMESTAMP_INVALID", connector_id)
+    nonce = str(header_value(event, "x-kaevo-plugin-nonce") or "")
+    if not SAFE_PAIRING_V3_NONCE.fullmatch(nonce):
+        return _pairing_v3_connector_auth_rejected(event, "PLUGIN_NONCE_INVALID", connector_id)
+    try:
+        parsed_body_digest = pairing_v3_canonical_json_digest(body)
+        transcript = _pairing_v3_connector_request_transcript(
+            event, parsed_body_digest, timestamp, nonce, connector_id,
+            plugin_instance_id, plugin_key_id, fingerprint,
+        )
+    except (PairingV3CryptoError, TypeError, ValueError):
+        return _pairing_v3_connector_auth_rejected(event, "REQUEST_CANONICALIZATION_INVALID", connector_id)
+    signature = str(header_value(event, "x-kaevo-plugin-signature") or "")
+    try:
+        pairing_v3_verify_ed25519(public_key, transcript, signature)
+    except (PairingV3CryptoError, TypeError, ValueError):
+        try:
+            compatibility_digest = pairing_v3_canonical_json_digest_preserving_number_lexemes(
+                _pairing_v3_raw_event_json_body(event)
+            )
+            if hmac.compare_digest(compatibility_digest, parsed_body_digest):
+                raise PairingV3CryptoError("canonical body digest unchanged")
+            compatibility_transcript = _pairing_v3_connector_request_transcript(
+                event, compatibility_digest, timestamp, nonce, connector_id,
+                plugin_instance_id, plugin_key_id, fingerprint,
+            )
+            pairing_v3_verify_ed25519(public_key, compatibility_transcript, signature)
+        except (PairingV3CryptoError, TypeError, ValueError, UnicodeDecodeError):
+            return _pairing_v3_connector_auth_rejected(event, "PLUGIN_SIGNATURE_INVALID", connector_id)
+        _pairing_v3_connector_auth_number_compatibility(event, connector_id)
+    try:
         app_sessions_table.put_item(Item={
             "token_hash": pairing_v3_key("v3_connector_nonce", f"{connector_id}:{nonce}"),
             "record_type": "pairing_v3_connector_nonce",
             "expires_at": epoch_now() + PAIRING_V3_TERMINAL_RETENTION_SECONDS,
         }, ConditionExpression="attribute_not_exists(token_hash)")
         return True
-    except (PairingV3CryptoError, ClientError, TypeError, ValueError):
-        return False
+    except ClientError as error:
+        code = str(error.response.get("Error", {}).get("Code") or "")
+        reason = "PLUGIN_NONCE_REPLAY" if code == "ConditionalCheckFailedException" else "PLUGIN_NONCE_STORAGE_FAILURE"
+        return _pairing_v3_connector_auth_rejected(event, reason, connector_id)
+    except (PairingV3CryptoError, TypeError, ValueError):
+        return _pairing_v3_connector_auth_rejected(event, "PLUGIN_NONCE_STORAGE_FAILURE", connector_id)
 
 
 def parse_json_body(event):
@@ -10419,6 +10609,7 @@ REMOTE_COMMAND_ID_NAMESPACE = uuid.UUID("dd84f037-4c25-4b21-a393-6971989adddf")
 SAFE_JELLYFIN_ITEM_ID = re.compile(r"^[0-9a-fA-F]{32}$")
 SAFE_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 SAFE_APPROVAL_TOKEN = re.compile(r"^[A-Za-z0-9_-]{24,128}$")
+SAFE_DOWNLOAD_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 SUPPORTED_LOCAL_PROVIDERS = {
     "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr"
 }
@@ -10736,6 +10927,36 @@ def normalize_remote_command(operation, parameters):
             "body": {"request_id": request_id}
         }, ""
 
+    if operation == "downloaders.set_queue_state":
+        arr_kind = str(parameters.get("arr_kind") or "").strip().lower()
+        arr_queue_id = positive_int(parameters.get("arr_queue_id"))
+        arr_download_client_id = positive_int(parameters.get("arr_download_client_id"))
+        download_id = str(parameters.get("download_id") or "").strip()
+        target_state = str(parameters.get("target_state") or "").strip().lower()
+        if arr_kind not in {"sonarr", "radarr"}:
+            return None, "arr_kind must be sonarr or radarr"
+        if arr_queue_id is None:
+            return None, "arr_queue_id must be a positive integer"
+        if arr_download_client_id is None:
+            return None, "arr_download_client_id must be a positive integer"
+        if not SAFE_DOWNLOAD_IDENTIFIER.fullmatch(download_id):
+            return None, "download_id is invalid"
+        if target_state not in {"paused", "running"}:
+            return None, "target_state must be paused or running"
+        return {
+            "provider": "home_server",
+            "method": "COMMAND",
+            "path": "/commands/downloaders.set_queue_state",
+            "query": {},
+            "body": {
+                "arr_kind": arr_kind,
+                "arr_queue_id": arr_queue_id,
+                "arr_download_client_id": arr_download_client_id,
+                "download_id": download_id,
+                "target_state": target_state,
+            },
+        }, ""
+
     if operation == "sonarr.episode_inventory":
         tvdb_id = positive_int(parameters.get("tvdb_id"))
         if tvdb_id is None:
@@ -10903,6 +11124,11 @@ def remote_request_priority(request_payload):
 
     if method == "COMMAND" and path == "/commands/jellyfin.prepare_playback":
         return 0
+    if method == "COMMAND" and path == "/commands/downloaders.set_queue_state":
+        # A user explicitly pressed Start or Pause. Keep it ahead of ordinary
+        # provider work, while preserving playback preparation as the top
+        # priority.
+        return 1
     if method == "COMMAND" and path in {
         "/commands/jellyfin.playback_started",
         "/commands/jellyfin.playback_progress",
@@ -11275,7 +11501,12 @@ def create_remote_command(event):
         "seerr.create_request",
         "sonarr.episode_inventory",
     }
-    if not require_dev_key(event):
+    owner_authorized_operations = {"downloaders.set_queue_state"}
+    if operation in owner_authorized_operations:
+        owner_error = authorize_protected_owner_download_command(event, profile_id)
+        if owner_error:
+            return owner_error
+    elif not require_dev_key(event):
         if operation not in profile_authorized_operations or not require_profile_auth(event, profile_id):
             return response(401, {"state": "unauthorized"})
     if not SAFE_IDEMPOTENCY_KEY.fullmatch(idempotency_key):
@@ -11452,7 +11683,21 @@ def get_remote_request(event, path):
 
     if not item:
         return response(404, {"state": "not_found", "request_id": request_id})
-    if not require_profile_auth(event, str(item.get("profile_id") or "")):
+    profile_id = str(item.get("profile_id") or "")
+    try:
+        request_payload = json.loads(str(item.get("request_json") or "{}"))
+    except json.JSONDecodeError:
+        request_payload = {}
+    is_owner_download_command = (
+        isinstance(request_payload, dict)
+        and request_payload.get("method") == "COMMAND"
+        and request_payload.get("path") == "/commands/downloaders.set_queue_state"
+    )
+    if is_owner_download_command:
+        owner_error = authorize_protected_owner_download_command(event, profile_id)
+        if owner_error:
+            return owner_error
+    elif not require_profile_auth(event, profile_id):
         return response(401, {"state": "unauthorized"})
 
     return response(200, public_remote_request_item(item, include_payload=True))
