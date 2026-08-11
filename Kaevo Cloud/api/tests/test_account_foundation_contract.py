@@ -113,7 +113,12 @@ class Table:
         if ":owner_principal_id" in values:
             item["owner_principal_id"] = values[":owner_principal_id"]
         if ":targets" in values:
-            item["watching_profile_ids"] = list(values[":targets"])
+            target_field = (
+                "switch_profile_ids"
+                if "switch_profile_ids" in UpdateExpression
+                else "watching_profile_ids"
+            )
+            item[target_field] = list(values[":targets"])
         if ":updated" in values:
             item["updated_at"] = values[":updated"]
         if ":epoch" in values:
@@ -987,6 +992,139 @@ def test_owner_updates_exact_watching_targets_without_changing_switch_authority(
     stored = handler.identity_profiles_table.items["profile-1"]
     assert stored["watching_profile_ids"] == ["profile-viewer-2"]
     assert stored["switch_profile_ids"] == ["profile-switch-only"]
+
+
+def test_owner_recovers_exact_parent_managed_kid_as_switch_and_view_target(monkeypatch):
+    owner_profile = {
+        "profile_id": "profile-owner",
+        "household_id": "household-1",
+        "household_access_role": "owner",
+        "state": "active",
+    }
+    kid_controls = {
+        "version": 1,
+        "is_enabled": True,
+        "preset": "olderKids",
+        "hide_unrated_content": True,
+        "blocked_genres": ["horror"],
+        "blocked_tags": [],
+        "allowed_tags": ["kaevo-kids-approved"],
+        "exceptions": [],
+    }
+    monkeypatch.setattr(handler, "identity_profiles_table", Table("profile_id", [
+        owner_profile,
+        {
+            "profile_id": "profile-kid",
+            "household_id": "household-1",
+            "owner_principal_id": "principal-owner",
+            "display_name": "Kid",
+            "profile_type": "kid",
+            "state": "active",
+            "managed_by_owner": True,
+            "parental_controls": kid_controls,
+        },
+        {
+            "profile_id": "profile-other-household",
+            "household_id": "household-2",
+            "owner_principal_id": "principal-owner",
+            "display_name": "Other",
+            "profile_type": "kid",
+            "state": "active",
+            "managed_by_owner": True,
+        },
+    ]))
+
+    resolved = handler._authorized_parent_managed_profile_access(
+        principal={
+            "principal_id": "principal-owner",
+            "profile_ids": ["profile-owner", "profile-kid", "profile-other-household"],
+        },
+        source_profile=owner_profile,
+        household_id="household-1",
+        is_household_owner=True,
+    )
+
+    assert resolved == [{
+        "profile_id": "profile-kid",
+        "profile_type": "kid",
+        "display_name": "Kid",
+        "access_level": "switch",
+        "status": "active",
+        "switch_protection": "not_configured",
+        "parental_controls": kid_controls,
+    }]
+    assert handler._authorized_parent_managed_profile_access(
+        principal={"principal_id": "principal-owner", "profile_ids": ["profile-kid"]},
+        source_profile=owner_profile,
+        household_id="household-1",
+        is_household_owner=False,
+    ) == []
+
+
+def test_owner_roster_reads_back_parent_managed_kid_access_without_membership_or_seat(monkeypatch):
+    tables, _transaction_client, session = install_normalized_profile_context(monkeypatch)
+    membership_id = household_membership_id("acct_1", "household-1")
+    membership = tables["household-memberships"].items[("household-1", membership_id)]
+    membership["profile_id"] = "profile-1"
+    owner = handler.identity_profiles_table.items["profile-1"]
+    owner.update({
+        "display_name": "Owner",
+        "role": "owner",
+        "canonical_role": "owner",
+        "household_access_role": "owner",
+        "switch_profile_ids": ["profile-kid"],
+        "watching_profile_ids": ["profile-kid"],
+    })
+    principal = handler.principals_table.items[session["principal_id"]]
+    principal["profile_ids"] = ["profile-1", "profile-kid"]
+    handler.identity_profiles_table.put_item(Item={
+        "profile_id": "profile-kid",
+        "account_id": "acct_1",
+        "household_id": "household-1",
+        "owner_principal_id": session["principal_id"],
+        "display_name": "Kid",
+        "profile_type": "kid",
+        "role": "child",
+        "canonical_role": "child",
+        "household_access_role": "member",
+        "cloud_access_enabled": False,
+        "managed_by_owner": True,
+        "state": "active",
+        "switch_profile_ids": [],
+        "watching_profile_ids": [],
+        "jellyfin_binding_state": "active",
+        "jellyfin_user_id": "jellyfin-kid",
+        "seerr_binding_state": "active",
+        "seerr_user_id": "seerr-kid",
+    })
+
+    switch_result = handler.update_profile_switch_targets_v3(
+        {"body": json.dumps({"profile_ids": ["profile-1"]})},
+        "/v3/identity/profiles/profile-kid/switch-targets",
+    )
+    watching_result = handler.update_profile_watching_targets_v3(
+        {"body": json.dumps({"profile_ids": ["profile-1"]})},
+        "/v3/identity/profiles/profile-kid/watching-targets",
+    )
+    roster_result = handler.list_household_profiles_v3({})
+
+    assert switch_result["statusCode"] == 200
+    assert watching_result["statusCode"] == 200
+    assert roster_result["statusCode"] == 200
+    roster = {
+        item["profile_id"]: item
+        for item in json.loads(roster_result["body"])["profiles"]
+    }
+    assert roster["profile-kid"]["allowed_profile_switch_targets"] == ["profile-1"]
+    assert roster["profile-kid"]["allowed_watching_targets"] == ["profile-1"]
+    assert roster["profile-kid"]["cloud_access_enabled"] is False
+    assert all(
+        str(item.get("profile_id") or "") != "profile-kid"
+        for item in tables["household-memberships"].items.values()
+    )
+    stored_kid = handler.identity_profiles_table.items["profile-kid"]
+    assert stored_kid["jellyfin_user_id"] == "jellyfin-kid"
+    assert stored_kid["seerr_user_id"] == "seerr-kid"
 
 
 def test_parental_controls_wire_contract_matches_ios_and_rejects_coerced_ids():

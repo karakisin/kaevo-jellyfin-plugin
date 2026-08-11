@@ -840,6 +840,20 @@ def identity_me_v3(event, *, verified_session=None):
             household_id=claims.household_id,
         ):
             profile_access_by_id.setdefault(str(item["profile_id"]), item)
+        # Parent-managed kids are attached to the Owner principal at creation
+        # time and have no child credential of their own. Recover that exact,
+        # canonical relationship for older records whose Owner profile did
+        # not yet receive explicit switch/watch target lists.
+        parent_managed_access = _authorized_parent_managed_profile_access(
+            principal=principal,
+            source_profile=profile,
+            household_id=claims.household_id,
+            is_household_owner=(
+                str(getattr(resolved_role, "value", resolved_role)) == CanonicalRole.OWNER.value
+            ),
+        )
+        for item in parent_managed_access:
+            profile_access_by_id.setdefault(str(item["profile_id"]), item)
         # Viewer selection is intentionally narrower than profile switching.
         # It is only a presentation/playback audience grant and never lets a
         # member enter, edit, or otherwise assume another profile.
@@ -847,6 +861,17 @@ def identity_me_v3(event, *, verified_session=None):
             source_profile=profile,
             household_id=claims.household_id,
         )
+        viewing_access_by_id = {
+            str(item.get("profile_id") or ""): item
+            for item in viewing_access
+            if str(item.get("profile_id") or "")
+        }
+        for item in parent_managed_access:
+            viewing_access_by_id.setdefault(str(item["profile_id"]), {
+                **item,
+                "access_level": "view",
+            })
+        viewing_access = list(viewing_access_by_id.values())
         self_profile_id = str(profile.get("profile_id") or "").strip()
         viewing_profile_ids = [self_profile_id] if self_profile_id else []
         viewing_profile_ids.extend(
@@ -1048,6 +1073,59 @@ def _authorized_switch_target_access(*, source_profile, household_id):
             "access_level": "switch",
             "status": "active",
             "switch_protection": _profile_switch_protection(target),
+            "parental_controls": target.get("parental_controls"),
+        })
+    return resolved
+
+
+def _authorized_parent_managed_profile_access(
+    *, principal, source_profile, household_id, is_household_owner,
+):
+    """Recover exact Owner-managed child profiles without widening access.
+
+    Older parent-managed profiles were appended to the Owner principal but
+    were not also appended to the Owner profile's switch/watch lists. The
+    principal record is already the authenticated, strongly-read authority
+    used by identity V3. Only canonical children whose owner pointer matches
+    that exact principal are projected here.
+    """
+    if not is_household_owner or not isinstance(principal, dict) or not isinstance(source_profile, dict):
+        return []
+    principal_id = str(principal.get("principal_id") or "").strip()
+    source_profile_id = str(source_profile.get("profile_id") or "").strip()
+    candidates = principal.get("profile_ids") or []
+    if not principal_id or not isinstance(candidates, list) or len(candidates) > 64:
+        return []
+    resolved = []
+    seen = set()
+    for value in candidates:
+        profile_id = str(value or "").strip()
+        if not profile_id or profile_id == source_profile_id or profile_id in seen:
+            continue
+        seen.add(profile_id)
+        target = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+        if not (
+            isinstance(target, dict)
+            and target.get("state") == "active"
+            and bool_value(target.get("managed_by_owner"), False)
+            and str(target.get("owner_principal_id") or "") == principal_id
+            and str(target.get("household_id") or "") == household_id
+            and str(target.get("profile_type") or "").strip().lower() in {"child", "kid"}
+        ):
+            continue
+        display_name = str(target.get("display_name") or "").strip()
+        if not display_name:
+            continue
+        resolved.append({
+            "profile_id": profile_id,
+            "profile_type": str(target.get("profile_type") or "").strip().lower(),
+            "display_name": display_name,
+            "access_level": "switch",
+            "status": "active",
+            "switch_protection": _profile_switch_protection(target),
+            "parental_controls": target.get("parental_controls"),
         })
     return resolved
 
@@ -1976,6 +2054,81 @@ def _public_household_profile_roster_item(profile, *, canonical_role, household_
     }
 
 
+def _parent_managed_household_profile_roster_items(*, session, context):
+    """Project exact Owner-managed kids without inventing a Cloud seat.
+
+    Parent-managed kids intentionally have no HouseholdMembership until they
+    receive and redeem their own device invitation. The Owner principal's
+    exact ``profile_ids`` edge remains the authority for showing those kids in
+    profile editors; names, avatars, and broad table reads are never used.
+    """
+    household = (context or {}).get("household") or {}
+    if str(household.get("canonical_role") or "") != CanonicalRole.OWNER.value:
+        return []
+    household_id = str(household.get("household_id") or "").strip()
+    principal_id = str((session or {}).get("principal_id") or "").strip()
+    source_profile_id = str((session or {}).get("profile_id") or "").strip()
+    account_id = str((session or {}).get("account_id") or "").strip()
+    if not all((household_id, principal_id, source_profile_id, account_id)):
+        return []
+    principal = principals_table.get_item(
+        Key={"principal_id": principal_id}, ConsistentRead=True,
+    ).get("Item")
+    source_profile = identity_profiles_table.get_item(
+        Key={"profile_id": source_profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if not (
+        isinstance(principal, dict)
+        and principal.get("state") == "active"
+        and str(principal.get("principal_id") or "") == principal_id
+        and str(principal.get("account_id") or "") == account_id
+        and str(principal.get("household_id") or "") == household_id
+        and isinstance(source_profile, dict)
+        and source_profile.get("state") == "active"
+        and str(source_profile.get("profile_id") or "") == source_profile_id
+        and str(source_profile.get("account_id") or "") == account_id
+        and str(source_profile.get("household_id") or "") == household_id
+        and str(source_profile.get("owner_principal_id") or "") == principal_id
+    ):
+        return []
+
+    roster = []
+    for access in _authorized_parent_managed_profile_access(
+        principal=principal,
+        source_profile=source_profile,
+        household_id=household_id,
+        is_household_owner=True,
+    ):
+        profile_id = str(access.get("profile_id") or "").strip()
+        target = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+        if not (
+            isinstance(target, dict)
+            and target.get("state") == "active"
+            and str(target.get("profile_id") or "") == profile_id
+            and str(target.get("account_id") or "") == account_id
+            and str(target.get("household_id") or "") == household_id
+            and str(target.get("owner_principal_id") or "") == principal_id
+            and bool_value(target.get("managed_by_owner"), False)
+        ):
+            continue
+        try:
+            # A roster projection must not turn a no-membership kid into an
+            # apparent Cloud seat, including older records missing the field.
+            roster_profile = {**target, "cloud_access_enabled": False}
+            roster.append(_public_household_profile_roster_item(
+                roster_profile,
+                canonical_role=str(target.get("canonical_role") or CanonicalRole.CHILD.value),
+                household_access_role=str(
+                    target.get("household_access_role") or HouseholdAccessRole.MEMBER.value
+                ),
+            ))
+        except AccountFoundationError:
+            continue
+    return roster
+
+
 def list_household_profiles_v3(event):
     """Return the canonical active roster for a server-authorized manager.
 
@@ -2098,6 +2251,15 @@ def list_household_profiles_v3(event):
             )
         except AccountFoundationError:
             continue
+        roster_by_profile_id[item["profile_id"]] = item
+
+    # Parent-managed kids are canonical household profiles but deliberately
+    # are not seat-bearing HouseholdMembership records. Include their exact
+    # stored policy in Owner readback so editor saves remain visible without
+    # changing invitation, credential, or Cloud-seat semantics.
+    for item in _parent_managed_household_profile_roster_items(
+        session=session, context=context,
+    ):
         roster_by_profile_id[item["profile_id"]] = item
 
     profiles = sorted(roster_by_profile_id.values(), key=lambda item: (
@@ -9045,6 +9207,30 @@ def create_parent_managed_kid_profile(
                     ":profile": [profile_id],
                     ":owner_profile": str(session.get("profile_id") or ""),
                     ":managed_profile": profile_id,
+                },
+            }},
+            {"Update": {
+                "TableName": identity_profiles_table.name,
+                "Key": {"profile_id": str(session.get("profile_id") or "")},
+                "UpdateExpression": (
+                    "SET switch_profile_ids = list_append(if_not_exists(switch_profile_ids, :empty), :profile), "
+                    "watching_profile_ids = list_append(if_not_exists(watching_profile_ids, :empty), :profile), "
+                    "updated_at = :updated, updated_at_epoch = :epoch"
+                ),
+                "ConditionExpression": (
+                    "#state = :active AND household_id = :household "
+                    "AND NOT contains(switch_profile_ids, :managed_profile) "
+                    "AND NOT contains(watching_profile_ids, :managed_profile)"
+                ),
+                "ExpressionAttributeNames": {"#state": "state"},
+                "ExpressionAttributeValues": {
+                    ":empty": [],
+                    ":profile": [profile_id],
+                    ":managed_profile": profile_id,
+                    ":updated": created_at,
+                    ":epoch": epoch_now(),
+                    ":active": "active",
+                    ":household": str(session.get("household_id") or ""),
                 },
             }},
         ])

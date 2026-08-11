@@ -184,6 +184,11 @@ def test_parent_managed_kid_profile_creates_no_invitation_or_child_credential(mo
     assert profile["managed_by_owner"] is True
     assert "member_principal_id" not in profile
     assert transaction[2]["Update"]["Key"] == {"principal_id": "principal-owner"}
+    assert transaction[3]["Update"]["Key"] == {"profile_id": "profile-owner"}
+    owner_update = transaction[3]["Update"]
+    assert "switch_profile_ids" in owner_update["UpdateExpression"]
+    assert "watching_profile_ids" in owner_update["UpdateExpression"]
+    assert owner_update["ExpressionAttributeValues"][":profile"] == [payload["profile_id"]]
 
 
 def test_owner_can_assign_exact_watching_targets_during_parent_managed_creation(monkeypatch):
