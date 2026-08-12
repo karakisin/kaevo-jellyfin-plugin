@@ -953,6 +953,7 @@ def test_identity_me_exposes_only_the_exact_normalized_self_profile_for_replacem
         "status": "active",
         "is_self": True,
         "request_access_enabled": True,
+        "cloud_access_enabled": True,
         "parental_controls": None,
         "switch_protection": "not_configured",
         "allowed_viewing_profile_ids": ["profile-1"],
@@ -1092,6 +1093,7 @@ def test_owner_recovers_exact_parent_managed_kid_as_switch_and_view_target(monke
         "access_level": "switch",
         "status": "active",
         "switch_protection": "not_configured",
+        "cloud_access_enabled": False,
         "parental_controls": kid_controls,
     }]
     assert handler._authorized_parent_managed_profile_access(
@@ -1100,6 +1102,16 @@ def test_owner_recovers_exact_parent_managed_kid_as_switch_and_view_target(monke
         household_id="household-1",
         is_household_owner=False,
     ) == []
+    owner_profile["switch_profile_ids"] = ["profile-kid"]
+    owner_profile["watching_profile_ids"] = ["profile-kid"]
+    assert handler._authorized_switch_target_access(
+        source_profile=owner_profile,
+        household_id="household-1",
+    )[0]["cloud_access_enabled"] is False
+    assert handler._authorized_viewing_profile_access(
+        source_profile=owner_profile,
+        household_id="household-1",
+    )[0]["cloud_access_enabled"] is False
 
 
 def test_owner_roster_reads_back_parent_managed_kid_access_without_membership_or_seat(monkeypatch):
@@ -1228,6 +1240,7 @@ def test_watching_targets_are_owner_only_and_resolve_exact_same_household_ids(mo
         "display_name": "Exact Viewer",
         "access_level": "view",
         "status": "active",
+        "cloud_access_enabled": True,
         "parental_controls": None,
         "switch_protection": "not_configured",
     }

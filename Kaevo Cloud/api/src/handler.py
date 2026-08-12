@@ -1172,6 +1172,7 @@ def _normalized_self_profile_access(*, claims, resolved_role, normalized_members
             ),
             False,
         ),
+        "cloud_access_enabled": _profile_cloud_access_enabled(profile),
         "parental_controls": normalized_membership.get(
             "parental_controls",
             profile.get("parental_controls"),
@@ -1207,6 +1208,16 @@ def _profile_switch_protection(profile):
     if str((profile or {}).get("household_access_role") or "").lower() == HouseholdAccessRole.OWNER.value:
         return "owner_direct"
     return "pin_required" if _profile_switch_pin_configured(profile) else "not_configured"
+
+
+def _profile_cloud_access_enabled(profile):
+    """Preserve no-seat parent-managed children, including legacy records."""
+    if not isinstance(profile, dict):
+        return True
+    return bool_value(
+        profile.get("cloud_access_enabled"),
+        not bool_value(profile.get("managed_by_owner"), False),
+    )
 
 
 def _authorized_switch_target_access(*, source_profile, household_id):
@@ -1250,6 +1261,7 @@ def _authorized_switch_target_access(*, source_profile, household_id):
             "access_level": "switch",
             "status": "active",
             "switch_protection": _profile_switch_protection(target),
+            "cloud_access_enabled": _profile_cloud_access_enabled(target),
             "parental_controls": target.get("parental_controls"),
         })
     return resolved
@@ -1302,6 +1314,9 @@ def _authorized_parent_managed_profile_access(
             "access_level": "switch",
             "status": "active",
             "switch_protection": _profile_switch_protection(target),
+            # Parent-managed children intentionally have no device membership
+            # or Cloud seat until an invitation is redeemed.
+            "cloud_access_enabled": False,
             "parental_controls": target.get("parental_controls"),
         })
     return resolved
@@ -1346,6 +1361,7 @@ def _authorized_viewing_profile_access(*, source_profile, household_id):
             "display_name": display_name,
             "access_level": "view",
             "status": "active",
+            "cloud_access_enabled": _profile_cloud_access_enabled(target),
             "parental_controls": target.get("parental_controls"),
         })
     return resolved
@@ -3827,6 +3843,22 @@ def save_profile_jellyfin_binding_v3(event, path):
     if repair_from_consumed:
         if canonical is None:
             return response(404, {"state": "profile_jellyfin_binding_target_missing"})
+        retained_connector_id = str(canonical.get("jellyfin_connector_id") or "")
+        retained_user_id = _normalized_jellyfin_user_id(
+            canonical.get("jellyfin_user_id")
+        )
+        retained_is_active = (
+            str(canonical.get("jellyfin_binding_state") or "") == "active"
+            and retained_connector_id
+            and retained_user_id
+            and any(
+                isinstance(item, dict)
+                and hmac.compare_digest(
+                    str(item.get("connector_id") or ""), retained_connector_id,
+                )
+                for item in connectors
+            )
+        )
         member_principal_id = str(canonical.get("member_principal_id") or "")
         candidates = []
         for invitation in _household_invitation_records(household_id):
@@ -3858,7 +3890,18 @@ def save_profile_jellyfin_binding_v3(event, path):
                 "state": "profile_jellyfin_binding_source_ambiguous",
             })
         if candidates:
+            # A consumed invitation is the stronger historical source. The
+            # existing conflict checks below must compare it against any
+            # retained canonical edge and refuse disagreement.
             _invitation, connector_id, user_id = candidates[0]
+        elif retained_is_active:
+            # Parent-managed kids have no consumed invitation or member
+            # principal. Their canonical profile is nevertheless the durable
+            # server-owned binding record written by provisioning. Accept that
+            # exact active edge idempotently instead of asking the plugin to
+            # rediscover an identity Cloud already knows.
+            connector_id = retained_connector_id
+            user_id = retained_user_id
         else:
             recovered = _recover_profile_jellyfin_binding_from_connector(
                 profile_id, connectors,
@@ -5915,6 +5958,61 @@ def require_profile_auth(event, profile_id):
         session
         and profile_id
         and hmac.compare_digest(str(session.get("profile_id") or ""), str(profile_id))
+    )
+
+
+def require_profile_switch_auth(event, profile_id):
+    """Authorize the signed-in profile or one exact switch-granted target.
+
+    Profile Switching changes the viewing/content identity, not the Cognito or
+    household principal behind the protected app session.  Media reads and
+    playback commands may therefore act as an explicitly granted target while
+    account, device, settings, and administrative routes continue to require
+    the session's own profile.  Every non-self decision is a strongly-read,
+    immutable-ID edge; a display name or household roster never grants access.
+    """
+    target_profile_id = str(profile_id or "").strip()
+    if require_dev_key(event):
+        return True
+    # A protected request's DPoP proof is one-time. Authenticate exactly once
+    # and reuse that verified session for both the self and switch-target
+    # decisions. A second authentication would correctly reject the consumed
+    # JTI as a replay.
+    session = authenticated_app_session(event)
+    source_profile_id = str((session or {}).get("profile_id") or "").strip()
+    household_id = str((session or {}).get("household_id") or "").strip()
+    if not session or not target_profile_id or not source_profile_id:
+        return False
+    if hmac.compare_digest(source_profile_id, target_profile_id):
+        return True
+    if identity_profiles_table is None or not household_id:
+        return False
+    try:
+        source = identity_profiles_table.get_item(
+            Key={"profile_id": source_profile_id}, ConsistentRead=True,
+        ).get("Item")
+        target = identity_profiles_table.get_item(
+            Key={"profile_id": target_profile_id}, ConsistentRead=True,
+        ).get("Item")
+    except Exception:
+        return False
+    if not (
+        isinstance(source, dict)
+        and isinstance(target, dict)
+        and source.get("state") == "active"
+        and target.get("state") == "active"
+        and hmac.compare_digest(str(source.get("profile_id") or ""), source_profile_id)
+        and hmac.compare_digest(str(target.get("profile_id") or ""), target_profile_id)
+        and hmac.compare_digest(str(source.get("household_id") or ""), household_id)
+        and hmac.compare_digest(str(target.get("household_id") or ""), household_id)
+    ):
+        return False
+    granted = source.get("switch_profile_ids") or []
+    if not isinstance(granted, list) or len(granted) > 64:
+        return False
+    return any(
+        hmac.compare_digest(str(candidate or ""), target_profile_id)
+        for candidate in granted
     )
 
 
@@ -11053,7 +11151,7 @@ def get_home_connector_status(event):
 
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "profile_id query parameter is required"})
-    if not require_profile_auth(event, profile_id):
+    if not require_profile_switch_auth(event, profile_id):
         return response(401, {"state": "unauthorized"})
 
     connectors = [
@@ -11080,7 +11178,7 @@ def get_remote_routes(event):
 
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "profile_id query parameter is required"})
-    if not require_profile_auth(event, profile_id):
+    if not require_profile_switch_auth(event, profile_id):
         return response(401, {"state": "unauthorized"})
 
     connectors = [
@@ -11945,7 +12043,7 @@ def create_remote_request(event):
 
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "profile_id is required"})
-    if not require_profile_auth(event, profile_id):
+    if not require_profile_switch_auth(event, profile_id):
         return response(401, {"state": "unauthorized"})
 
     if method != "GET":
@@ -12040,6 +12138,14 @@ def create_remote_command(event):
         "sonarr.episode_inventory",
     }
     owner_authorized_operations = {"downloaders.set_queue_state"}
+    switch_authorized_operations = {
+        "jellyfin.prepare_playback",
+        "jellyfin.playback_started",
+        "jellyfin.playback_progress",
+        "jellyfin.playback_stopped",
+        "seerr.create_request",
+        "sonarr.episode_inventory",
+    }
     protected_profile_session = None
     if operation in owner_authorized_operations:
         owner_error = authorize_protected_owner_download_command(event, profile_id)
@@ -12048,16 +12154,11 @@ def create_remote_command(event):
     elif not require_dev_key(event):
         if operation not in profile_authorized_operations:
             return response(401, {"state": "unauthorized"})
-        if operation == "jellyfin.prepare_playback":
-            protected_profile_session = authenticated_app_session(event)
-            if not (
-                protected_profile_session
-                and hmac.compare_digest(
-                    str(protected_profile_session.get("profile_id") or ""),
-                    profile_id,
-                )
-            ):
+        if operation in switch_authorized_operations:
+            if not require_profile_switch_auth(event, profile_id):
                 return response(401, {"state": "unauthorized"})
+            if operation == "jellyfin.prepare_playback":
+                protected_profile_session = authenticated_app_session(event)
         elif not require_profile_auth(event, profile_id):
             return response(401, {"state": "unauthorized"})
     if not SAFE_IDEMPOTENCY_KEY.fullmatch(idempotency_key):
@@ -12365,8 +12466,29 @@ def get_remote_request(event, path):
         owner_error = authorize_protected_owner_download_command(event, profile_id)
         if owner_error:
             return owner_error
-    elif not require_profile_auth(event, profile_id):
-        return response(401, {"state": "unauthorized"})
+    else:
+        switch_authorized_paths = {
+            "/commands/jellyfin.prepare_playback",
+            "/commands/jellyfin.playback_started",
+            "/commands/jellyfin.playback_progress",
+            "/commands/jellyfin.playback_stopped",
+            "/commands/seerr.create_request",
+            "/commands/sonarr.episode_inventory",
+        }
+        permits_switch = (
+            isinstance(request_payload, dict)
+            and (
+                request_payload.get("method") == "GET"
+                or request_payload.get("path") in switch_authorized_paths
+            )
+        )
+        authorized = (
+            require_profile_switch_auth(event, profile_id)
+            if permits_switch
+            else require_profile_auth(event, profile_id)
+        )
+        if not authorized:
+            return response(401, {"state": "unauthorized"})
 
     return response(200, public_remote_request_item(item, include_payload=True))
 
@@ -12709,7 +12831,7 @@ def get_remote_image(event, path):
         return response(400, {"state": "bad_request", "message": "only jellyfin images are supported"})
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "profile_id is required"})
-    if not require_profile_auth(event, profile_id):
+    if not require_profile_switch_auth(event, profile_id):
         return response(401, {"state": "unauthorized"})
     if not item_id or "/" in item_id or ".." in item_id or ":" in item_id:
         return response(400, {"state": "bad_request", "message": "invalid item id"})

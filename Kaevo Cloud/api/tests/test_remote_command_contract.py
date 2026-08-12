@@ -286,7 +286,10 @@ def test_seerr_create_command_derives_the_bound_requester_not_the_client(monkeyp
     monkeypatch.setattr(handler, "remote_requests_table", remote_requests)
     monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
     monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
-    monkeypatch.setattr(handler, "require_profile_auth", lambda _event, profile_id: profile_id == "profile-1")
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "profile_id": "profile-1",
+        "household_id": "household-1",
+    })
     monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda _: {"connector_id": "connector-1"})
 
     result = handler.create_remote_command({
@@ -486,11 +489,10 @@ def test_seerr_create_request_is_available_only_to_the_exact_scoped_profile_sess
     monkeypatch.setattr(handler, "remote_requests_table", remote_requests)
     monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
     monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
-    monkeypatch.setattr(
-        handler,
-        "require_profile_auth",
-        lambda _event, profile_id: profile_id == "profile-1",
-    )
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "profile_id": "profile-1",
+        "household_id": "household-1",
+    })
     monkeypatch.setattr(
         handler,
         "latest_online_connector_for_profile",

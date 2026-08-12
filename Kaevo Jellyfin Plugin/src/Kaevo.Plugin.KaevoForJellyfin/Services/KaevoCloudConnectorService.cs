@@ -15,7 +15,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.88";
+    private const string PluginVersion = "0.2.89";
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
@@ -2259,6 +2259,48 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         bool? isResumable,
         CancellationToken cancellationToken)
     {
+        var request = BuildMainSnapshotItemsRequest(
+            userId,
+            includeItemTypes,
+            limit,
+            isResumable);
+        return SendLocalAsync(
+            configuration,
+            secrets,
+            HttpMethod.Get,
+            request.Path,
+            request.Query,
+            null,
+            cancellationToken);
+    }
+
+    internal static (string Path, IReadOnlyDictionary<string, JsonElement> Query) BuildMainSnapshotItemsRequest(
+        string userId,
+        string includeItemTypes,
+        int limit,
+        bool? isResumable)
+    {
+        if (isResumable == true)
+        {
+            // Jellyfin's supported Continue Watching surface is
+            // /UserItems/Resume. IsResumable on /Users/{id}/Items is not an
+            // equivalent filter and can return ordinary zero-progress items.
+            // Keep the canonical bound user ID in this connector-owned query.
+            return ("/UserItems/Resume", new Dictionary<string, JsonElement>
+            {
+                ["userId"] = JsonSerializer.SerializeToElement(userId),
+                ["startIndex"] = JsonSerializer.SerializeToElement(0),
+                ["limit"] = JsonSerializer.SerializeToElement(limit),
+                ["mediaTypes"] = JsonSerializer.SerializeToElement("Video"),
+                ["fields"] = JsonSerializer.SerializeToElement("Overview,Genres,Studios,People,MediaSources,MediaStreams,ProviderIds,PrimaryImageAspectRatio"),
+                ["enableUserData"] = JsonSerializer.SerializeToElement(true),
+                ["enableImages"] = JsonSerializer.SerializeToElement(true),
+                ["imageTypeLimit"] = JsonSerializer.SerializeToElement(1),
+                ["enableImageTypes"] = JsonSerializer.SerializeToElement("Primary,Backdrop,Logo"),
+                ["excludeActiveSessions"] = JsonSerializer.SerializeToElement(true)
+            });
+        }
+
         var query = new Dictionary<string, JsonElement>
         {
             ["Recursive"] = JsonSerializer.SerializeToElement(true),
@@ -2277,7 +2319,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             query["IsResumable"] = JsonSerializer.SerializeToElement(isResumable.Value);
         }
 
-        return SendLocalAsync(configuration, secrets, HttpMethod.Get, $"/Users/{userId}/Items", query, null, cancellationToken);
+        return ($"/Users/{userId}/Items", query);
     }
 
     private async Task<CommandResult> SendLocalAsync(

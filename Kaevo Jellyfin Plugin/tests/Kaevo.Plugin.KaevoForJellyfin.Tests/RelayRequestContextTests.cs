@@ -71,6 +71,42 @@ public sealed class RelayRequestContextTests
     }
 
     [Fact]
+    public void MainSnapshotContinueWatchingUsesCanonicalBoundUserResumeRoute()
+    {
+        const string userId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var request = KaevoCloudConnectorService.BuildMainSnapshotItemsRequest(
+            userId,
+            "Movie,Episode",
+            20,
+            true);
+
+        Assert.Equal("/UserItems/Resume", request.Path);
+        Assert.Equal(userId, request.Query["userId"].GetString());
+        Assert.Equal(0, request.Query["startIndex"].GetInt32());
+        Assert.Equal(20, request.Query["limit"].GetInt32());
+        Assert.Equal("Video", request.Query["mediaTypes"].GetString());
+        Assert.True(request.Query["enableUserData"].GetBoolean());
+        Assert.True(request.Query["excludeActiveSessions"].GetBoolean());
+        Assert.DoesNotContain("IsResumable", request.Query.Keys);
+    }
+
+    [Fact]
+    public void MainSnapshotCatalogStillUsesExactUserItemsRoute()
+    {
+        const string userId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var request = KaevoCloudConnectorService.BuildMainSnapshotItemsRequest(
+            userId,
+            "Movie",
+            80,
+            null);
+
+        Assert.Equal($"/Users/{userId}/Items", request.Path);
+        Assert.Equal("Movie", request.Query["IncludeItemTypes"].GetString());
+        Assert.False(request.Query.ContainsKey("userId"));
+        Assert.False(request.Query.ContainsKey("IsResumable"));
+    }
+
+    [Fact]
     public void ClaimedRequestDeserializesAndPersistsExactProviderBinding()
     {
         const string profileId = "profile-member-1";

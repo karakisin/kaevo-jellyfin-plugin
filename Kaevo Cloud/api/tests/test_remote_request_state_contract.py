@@ -116,6 +116,105 @@ def request_item(request_id, status, expires_at=None):
     }
 
 
+def test_switch_auth_accepts_only_exact_source_grant_in_same_household(monkeypatch):
+    class Profiles:
+        records = {
+            "profile-source": {
+                "profile_id": "profile-source",
+                "household_id": "household-1",
+                "state": "active",
+                "switch_profile_ids": ["profile-target"],
+            },
+            "profile-target": {
+                "profile_id": "profile-target",
+                "household_id": "household-1",
+                "state": "active",
+            },
+            "profile-ungranted": {
+                "profile_id": "profile-ungranted",
+                "household_id": "household-1",
+                "state": "active",
+            },
+            "profile-foreign": {
+                "profile_id": "profile-foreign",
+                "household_id": "household-2",
+                "state": "active",
+            },
+        }
+
+        def get_item(self, *, Key, ConsistentRead):
+            assert ConsistentRead is True
+            item = self.records.get(Key["profile_id"])
+            return {"Item": dict(item)} if item else {}
+
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
+    authentication_count = 0
+
+    def authenticate_once(_event):
+        nonlocal authentication_count
+        authentication_count += 1
+        assert authentication_count == 1, "one DPoP proof must not be authenticated twice"
+        return {
+            "profile_id": "profile-source",
+            "household_id": "household-1",
+        }
+
+    monkeypatch.setattr(handler, "authenticated_app_session", authenticate_once)
+
+    assert handler.require_profile_switch_auth({}, "profile-target") is True
+    assert authentication_count == 1
+
+
+def test_switch_auth_rejects_ungranted_and_foreign_targets(monkeypatch):
+    class Profiles:
+        records = {
+            "profile-source": {
+                "profile_id": "profile-source",
+                "household_id": "household-1",
+                "state": "active",
+                "switch_profile_ids": ["profile-target"],
+            },
+            "profile-ungranted": {
+                "profile_id": "profile-ungranted",
+                "household_id": "household-1",
+                "state": "active",
+            },
+            "profile-foreign": {
+                "profile_id": "profile-foreign",
+                "household_id": "household-2",
+                "state": "active",
+            },
+        }
+
+        def get_item(self, *, Key, ConsistentRead):
+            assert ConsistentRead is True
+            item = self.records.get(Key["profile_id"])
+            return {"Item": dict(item)} if item else {}
+
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "profile_id": "profile-source",
+        "household_id": "household-1",
+    })
+
+    assert handler.require_profile_switch_auth({}, "profile-ungranted") is False
+    assert handler.require_profile_switch_auth({}, "profile-foreign") is False
+
+
+def test_switch_auth_accepts_self_without_reading_profile_graph(monkeypatch):
+    class UnreadableProfiles:
+        def get_item(self, **_kwargs):
+            raise AssertionError("self authorization must not read the switch graph")
+
+    monkeypatch.setattr(handler, "identity_profiles_table", UnreadableProfiles())
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "profile_id": "profile-source",
+        "household_id": "household-1",
+    })
+
+    assert handler.require_profile_switch_auth({}, "profile-source") is True
+
+
 def test_expired_pending_request_cannot_be_claimed(monkeypatch):
     table = FakeRemoteRequests([request_item("expired", "pending", handler.epoch_now() - 1)])
     monkeypatch.setattr(handler, "remote_requests_table", table)
@@ -365,7 +464,10 @@ def test_remote_metadata_request_enforces_admin_scope_before_queueing(monkeypatc
         "seerr_user_id": "42",
         "household_access_role": "admin",
     }))
-    monkeypatch.setattr(handler, "require_profile_auth", lambda _event, profile_id: profile_id == "profile-admin")
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "profile_id": "profile-admin",
+        "household_id": "household-1",
+    })
     monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda profile_id: {"connector_id": "connector-1"})
 
     result = handler.create_remote_request(event({
@@ -391,7 +493,10 @@ def test_remote_metadata_request_owner_receives_household_scope_before_queueing(
         "seerr_user_id": "42",
         "household_access_role": "owner",
     }))
-    monkeypatch.setattr(handler, "require_profile_auth", lambda _event, profile_id: profile_id == "profile-owner")
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "profile_id": "profile-owner",
+        "household_id": "household-1",
+    })
     monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda profile_id: {"connector_id": "connector-1"})
 
     result = handler.create_remote_request(event({
@@ -420,7 +525,10 @@ def test_remote_jellyfin_metadata_rewrites_client_identity_to_exact_profile_bind
         "jellyfin_connector_id": "connector-1",
         "jellyfin_user_id": bound_user_id,
     }))
-    monkeypatch.setattr(handler, "require_profile_auth", lambda _event, value: value == profile_id)
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "profile_id": profile_id,
+        "household_id": "household-1",
+    })
     monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda _profile_id: {"connector_id": "connector-1"})
 
     result = handler.create_remote_request(event({
@@ -444,7 +552,10 @@ def test_remote_jellyfin_metadata_requires_exact_profile_binding(monkeypatch):
         "state": "active",
         "jellyfin_binding_state": "inactive",
     }))
-    monkeypatch.setattr(handler, "require_profile_auth", lambda *_: True)
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "profile_id": "profile-member",
+        "household_id": "household-1",
+    })
     monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda _profile_id: {"connector_id": "connector-1"})
 
     result = handler.create_remote_request(event({
