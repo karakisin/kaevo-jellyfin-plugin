@@ -2,12 +2,16 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Kaevo.Plugin.KaevoForJellyfin.Configuration;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.Session;
+using MediaBrowser.Model.Session;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -15,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.89";
+    private const string PluginVersion = "0.2.90";
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
@@ -37,6 +41,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private readonly KaevoSecretStore _secretStore;
     private readonly KaevoCloudState _state;
     private readonly ILibraryManager _libraryManager;
+    private readonly IUserManager _userManager;
+    private readonly ISessionManager _sessionManager;
+    private readonly ITranscodeManager _transcodeManager;
     private readonly KaevoOptimizerCoordinator _optimizer;
     private readonly ILogger<KaevoCloudConnectorService> _logger;
     private readonly KaevoProviderTransport _providerTransport;
@@ -50,6 +57,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         KaevoSecretStore secretStore,
         KaevoCloudState state,
         ILibraryManager libraryManager,
+        IUserManager userManager,
+        ISessionManager sessionManager,
+        ITranscodeManager transcodeManager,
         KaevoOptimizerCoordinator optimizer,
         KaevoProviderTransport providerTransport,
         KaevoConnectorLifecycleStore lifecycleStore,
@@ -60,6 +70,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         _secretStore = secretStore;
         _state = state;
         _libraryManager = libraryManager;
+        _userManager = userManager;
+        _sessionManager = sessionManager;
+        _transcodeManager = transcodeManager;
         _optimizer = optimizer;
         _providerTransport = providerTransport;
         _lifecycleStore = lifecycleStore;
@@ -855,30 +868,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 throw new InvalidOperationException("remotePlaybackDisabled");
             }
 
-            var itemId = RequireItemId(parameters);
-            var mediaSourceId = RequireString(parameters, "media_source_id", 128);
-            var playSessionId = RequireString(parameters, "play_session_id", 128);
-            var positionTicks = parameters.TryGetValue("position_ticks", out var ticksElement)
-                && ticksElement.TryGetInt64(out var ticks) && ticks >= 0 ? ticks : 0;
-            var isPaused = parameters.TryGetValue("is_paused", out var pausedElement)
-                && (pausedElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
-                && pausedElement.GetBoolean();
-            var endpoint = operation switch
+            var playback = BuildBoundPlaybackRequest(configuration, request, operation, parameters);
+            await ReportBoundPlaybackAsync(playback, cancellationToken).ConfigureAwait(false);
+            return CompleteCommand(request, operation, new
             {
-                "jellyfin.playback_started" => "/Sessions/Playing",
-                "jellyfin.playback_progress" => "/Sessions/Playing/Progress",
-                _ => "/Sessions/Playing/Stopped"
-            };
-            await SendLocalAsync(configuration, secrets, HttpMethod.Post, endpoint, null, new
-            {
-                ItemId = itemId,
-                MediaSourceId = mediaSourceId,
-                PlaySessionId = playSessionId,
-                PositionTicks = positionTicks,
-                IsPaused = isPaused,
-                CanSeek = true
-            }, cancellationToken).ConfigureAwait(false);
-            return CompleteCommand(request, operation, new { item_id = itemId, position_ticks = positionTicks, applied = true });
+                item_id = playback.ItemId.ToString("N"),
+                position_ticks = playback.PositionTicks,
+                applied = true
+            });
         }
 
         if (operation == "provider.health")
@@ -1013,6 +1010,117 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
 
         throw new InvalidOperationException("remoteCommandNotAllowed");
+    }
+
+    internal static BoundPlaybackRequest BuildBoundPlaybackRequest(
+        PluginConfiguration configuration,
+        CloudRequest request,
+        string operation,
+        IReadOnlyDictionary<string, JsonElement> parameters)
+    {
+        var jellyfinUserId = RequireBoundJellyfinUserId(
+            configuration,
+            request,
+            "profileJellyfinBindingMissing");
+        var itemId = Guid.ParseExact(RequireItemId(parameters), "N");
+        var mediaSourceId = RequireString(parameters, "media_source_id", 128);
+        var playSessionId = RequireString(parameters, "play_session_id", 128);
+        var positionTicks = parameters.TryGetValue("position_ticks", out var ticksElement)
+            && ticksElement.TryGetInt64(out var ticks) && ticks >= 0 ? ticks : 0;
+        var isPaused = parameters.TryGetValue("is_paused", out var pausedElement)
+            && (pausedElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            && pausedElement.GetBoolean();
+        if (operation is not ("jellyfin.playback_started" or "jellyfin.playback_progress" or "jellyfin.playback_stopped"))
+        {
+            throw new InvalidOperationException("remoteCommandNotAllowed");
+        }
+
+        var sessionKey = Encoding.UTF8.GetBytes($"{jellyfinUserId}:{playSessionId}");
+        var deviceId = Convert.ToHexString(SHA256.HashData(sessionKey)).ToLowerInvariant();
+        return new BoundPlaybackRequest(
+            operation,
+            jellyfinUserId,
+            deviceId,
+            itemId,
+            mediaSourceId,
+            playSessionId,
+            positionTicks,
+            isPaused);
+    }
+
+    internal static object BuildPlaybackInfo(
+        BoundPlaybackRequest playback,
+        string sessionId,
+        PlayMethod playMethod)
+        => playback.Operation switch
+        {
+            "jellyfin.playback_started" => new PlaybackStartInfo
+            {
+                ItemId = playback.ItemId,
+                MediaSourceId = playback.MediaSourceId,
+                PlaySessionId = playback.PlaySessionId,
+                PositionTicks = playback.PositionTicks,
+                IsPaused = playback.IsPaused,
+                CanSeek = true,
+                PlayMethod = playMethod,
+                SessionId = sessionId
+            },
+            "jellyfin.playback_progress" => new PlaybackProgressInfo
+            {
+                ItemId = playback.ItemId,
+                MediaSourceId = playback.MediaSourceId,
+                PlaySessionId = playback.PlaySessionId,
+                PositionTicks = playback.PositionTicks,
+                IsPaused = playback.IsPaused,
+                CanSeek = true,
+                PlayMethod = playMethod,
+                SessionId = sessionId
+            },
+            "jellyfin.playback_stopped" => new PlaybackStopInfo
+            {
+                ItemId = playback.ItemId,
+                MediaSourceId = playback.MediaSourceId,
+                PlaySessionId = playback.PlaySessionId,
+                PositionTicks = playback.PositionTicks,
+                SessionId = sessionId
+            },
+            _ => throw new InvalidOperationException("remoteCommandNotAllowed")
+        };
+
+    private async Task ReportBoundPlaybackAsync(
+        BoundPlaybackRequest playback,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var user = _userManager.GetUserById(Guid.ParseExact(playback.JellyfinUserId, "N"));
+        if (user is null)
+        {
+            throw new InvalidOperationException("profileJellyfinBindingMissing");
+        }
+
+        var session = await _sessionManager.LogSessionActivity(
+            "Kaevo",
+            PluginVersion,
+            playback.DeviceId,
+            "Kaevo iOS",
+            IPAddress.Loopback.ToString(),
+            user).ConfigureAwait(false);
+        var playMethod = _transcodeManager.GetTranscodingJob(playback.PlaySessionId) is null
+            ? PlayMethod.DirectPlay
+            : PlayMethod.Transcode;
+        var info = BuildPlaybackInfo(playback, session.Id, playMethod);
+        switch (info)
+        {
+            case PlaybackStartInfo start:
+                await _sessionManager.OnPlaybackStart(start).ConfigureAwait(false);
+                break;
+            case PlaybackProgressInfo progress:
+                await _sessionManager.OnPlaybackProgress(progress).ConfigureAwait(false);
+                break;
+            case PlaybackStopInfo stopped:
+                await _sessionManager.OnPlaybackStopped(stopped).ConfigureAwait(false);
+                break;
+        }
     }
 
     internal static string RecoverExactProfileJellyfinUserId(
@@ -3102,6 +3210,16 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             _bodyAcknowledged.Dispose();
         }
     }
+
+    internal sealed record BoundPlaybackRequest(
+        string Operation,
+        string JellyfinUserId,
+        string DeviceId,
+        Guid ItemId,
+        string MediaSourceId,
+        string PlaySessionId,
+        long PositionTicks,
+        bool IsPaused);
 
     private sealed record CommandResult(int Status, JsonElement Payload, bool Truncated);
     private sealed record ProviderReachability(bool Ok, bool Configured, string Version, string? Reason);

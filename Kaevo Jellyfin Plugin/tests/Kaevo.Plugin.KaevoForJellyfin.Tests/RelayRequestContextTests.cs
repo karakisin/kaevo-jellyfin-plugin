@@ -1,4 +1,6 @@
+using Kaevo.Plugin.KaevoForJellyfin.Configuration;
 using Kaevo.Plugin.KaevoForJellyfin.Services;
+using MediaBrowser.Model.Session;
 using System.Text.Json;
 using Xunit;
 
@@ -104,6 +106,93 @@ public sealed class RelayRequestContextTests
         Assert.Equal("Movie", request.Query["IncludeItemTypes"].GetString());
         Assert.False(request.Query.ContainsKey("userId"));
         Assert.False(request.Query.ContainsKey("IsResumable"));
+    }
+
+    [Fact]
+    public void PlaybackProgressUsesExactProfileBindingAndOwnedSessionIdentity()
+    {
+        const string profileId = "profile-member-1";
+        const string userId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var configuration = new PluginConfiguration
+        {
+            ProfileJellyfinBindingsJson = "{\"profile-member-1\":\"" + userId + "\"}"
+        };
+        var request = new CloudRequest(
+            "request-1", "COMMAND", "home_server", "/commands/jellyfin.playback_progress",
+            null, "jellyfin.playback_progress", null, profileId);
+        var parameters = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+            "{\"item_id\":\"11111111111111111111111111111111\",\"media_source_id\":\"media-1\",\"play_session_id\":\"session-1\",\"position_ticks\":21469465561,\"is_paused\":true}")!;
+
+        var playback = KaevoCloudConnectorService.BuildBoundPlaybackRequest(
+            configuration,
+            request,
+            "jellyfin.playback_progress",
+            parameters);
+        var info = Assert.IsType<PlaybackProgressInfo>(
+            KaevoCloudConnectorService.BuildPlaybackInfo(
+                playback,
+                "jellyfin-session-1",
+                PlayMethod.DirectPlay));
+
+        Assert.Equal(userId, playback.JellyfinUserId);
+        Assert.Equal(64, playback.DeviceId.Length);
+        Assert.Equal(Guid.ParseExact("11111111111111111111111111111111", "N"), info.ItemId);
+        Assert.Equal(21_469_465_561, info.PositionTicks);
+        Assert.True(info.IsPaused);
+        Assert.True(info.CanSeek);
+        Assert.Equal(PlayMethod.DirectPlay, info.PlayMethod);
+        Assert.Equal("jellyfin-session-1", info.SessionId);
+    }
+
+    [Fact]
+    public void PlaybackSessionIdentityCannotCollideAcrossBoundUsers()
+    {
+        const string ownerUserId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string memberUserId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var configuration = new PluginConfiguration
+        {
+            ProfileJellyfinBindingsJson = "{\"profile-owner-1\":\"" + ownerUserId
+                + "\",\"profile-member-1\":\"" + memberUserId + "\"}"
+        };
+        var parameters = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+            "{\"item_id\":\"11111111111111111111111111111111\",\"media_source_id\":\"media-1\",\"play_session_id\":\"shared-session\",\"position_ticks\":10000000}")!;
+        var owner = KaevoCloudConnectorService.BuildBoundPlaybackRequest(
+            configuration,
+            new CloudRequest("request-1", "COMMAND", "home_server", "/commands/jellyfin.playback_started", null, "jellyfin.playback_started", null, "profile-owner-1"),
+            "jellyfin.playback_started",
+            parameters);
+        var member = KaevoCloudConnectorService.BuildBoundPlaybackRequest(
+            configuration,
+            new CloudRequest("request-2", "COMMAND", "home_server", "/commands/jellyfin.playback_started", null, "jellyfin.playback_started", null, "profile-member-1"),
+            "jellyfin.playback_started",
+            parameters);
+
+        Assert.NotEqual(owner.DeviceId, member.DeviceId);
+    }
+
+    [Fact]
+    public void PlaybackNeverFallsBackToConnectorOwnerBinding()
+    {
+        var configuration = new PluginConfiguration
+        {
+            ProfileId = "profile-owner-1",
+            JellyfinUserId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ProfileJellyfinBindingsJson = "{\"profile-owner-1\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+        };
+        var request = new CloudRequest(
+            "request-1", "COMMAND", "home_server", "/commands/jellyfin.playback_stopped",
+            null, "jellyfin.playback_stopped", null, "profile-member-1");
+        var parameters = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+            "{\"item_id\":\"11111111111111111111111111111111\",\"media_source_id\":\"media-1\",\"play_session_id\":\"session-1\",\"position_ticks\":10000000}")!;
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            KaevoCloudConnectorService.BuildBoundPlaybackRequest(
+                configuration,
+                request,
+                "jellyfin.playback_stopped",
+                parameters));
+
+        Assert.Equal("profileJellyfinBindingMissing", error.Message);
     }
 
     [Fact]

@@ -5961,6 +5961,68 @@ def require_profile_auth(event, profile_id):
     )
 
 
+def _session_authorizes_parent_managed_switch(session, source, target, household_id):
+    """Accept only the authenticated Owner's exact canonical managed child.
+
+    Identity V3 already projects legacy parent-managed children through the
+    Owner principal when the older Owner profile omitted the same child from
+    ``switch_profile_ids``. Protected media authorization must honor that
+    exact server-owned edge too, without widening access to an arbitrary
+    household profile or authenticating the one-time DPoP proof again.
+    """
+    if principals_table is None:
+        return False
+    principal_id = str((session or {}).get("principal_id") or "").strip()
+    account_id = str((session or {}).get("account_id") or "").strip()
+    source_profile_id = str((source or {}).get("profile_id") or "").strip()
+    target_profile_id = str((target or {}).get("profile_id") or "").strip()
+    if not (
+        principal_id
+        and account_id
+        and source_profile_id
+        and target_profile_id
+        and bool_value((target or {}).get("managed_by_owner"), False)
+        and str((target or {}).get("profile_type") or "").strip().lower() in {"child", "kid"}
+        and hmac.compare_digest(
+            str((target or {}).get("owner_principal_id") or ""), principal_id,
+        )
+        and hmac.compare_digest(str((source or {}).get("account_id") or ""), account_id)
+        and hmac.compare_digest(str((target or {}).get("account_id") or ""), account_id)
+    ):
+        return False
+    try:
+        principal = principals_table.get_item(
+            Key={"principal_id": principal_id}, ConsistentRead=True,
+        ).get("Item")
+    except Exception:
+        return False
+    if not (
+        isinstance(principal, dict)
+        and principal.get("state") == "active"
+        and not bool_value(principal.get("revoked"), False)
+        and hmac.compare_digest(str(principal.get("principal_id") or ""), principal_id)
+        and hmac.compare_digest(str(principal.get("account_id") or ""), account_id)
+        and hmac.compare_digest(str(principal.get("household_id") or ""), household_id)
+    ):
+        return False
+    canonical_role = str(
+        principal.get("canonical_role") or principal.get("role") or ""
+    ).strip().lower()
+    access_role = str(
+        principal.get("household_access_role")
+        or ("owner" if canonical_role == "owner" else "member")
+    ).strip().lower()
+    if canonical_role != "owner" or access_role != "owner":
+        return False
+    profile_ids = principal.get("profile_ids") or []
+    if not isinstance(profile_ids, list) or len(profile_ids) > 64:
+        return False
+    return all(any(
+        hmac.compare_digest(str(candidate or ""), required_profile_id)
+        for candidate in profile_ids
+    ) for required_profile_id in (source_profile_id, target_profile_id))
+
+
 def require_profile_switch_auth(event, profile_id):
     """Authorize the signed-in profile or one exact switch-granted target.
 
@@ -6010,9 +6072,13 @@ def require_profile_switch_auth(event, profile_id):
     granted = source.get("switch_profile_ids") or []
     if not isinstance(granted, list) or len(granted) > 64:
         return False
-    return any(
+    if any(
         hmac.compare_digest(str(candidate or ""), target_profile_id)
         for candidate in granted
+    ):
+        return True
+    return _session_authorizes_parent_managed_switch(
+        session, source, target, household_id,
     )
 
 

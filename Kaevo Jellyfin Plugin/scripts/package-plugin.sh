@@ -41,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Uses each authorized switched profile's exact Jellyfin binding for media access and Continue Watching, including Jellyfin's canonical resume endpoint.",
+  "changelog": "Attributes playback progress to each switched profile's exact Jellyfin user so Continue Watching remains profile-specific.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",

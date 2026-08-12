@@ -215,6 +215,99 @@ def test_switch_auth_accepts_self_without_reading_profile_graph(monkeypatch):
     assert handler.require_profile_switch_auth({}, "profile-source") is True
 
 
+def test_switch_auth_accepts_only_exact_owner_managed_kid_edge(monkeypatch):
+    class Profiles:
+        records = {
+            "profile-source": {
+                "profile_id": "profile-source",
+                "account_id": "account-1",
+                "household_id": "household-1",
+                "state": "active",
+                "switch_profile_ids": [],
+            },
+            "profile-kid": {
+                "profile_id": "profile-kid",
+                "account_id": "account-1",
+                "household_id": "household-1",
+                "state": "active",
+                "profile_type": "kid",
+                "managed_by_owner": True,
+                "owner_principal_id": "principal-owner",
+            },
+        }
+
+        def get_item(self, *, Key, ConsistentRead):
+            assert ConsistentRead is True
+            item = self.records.get(Key["profile_id"])
+            return {"Item": dict(item)} if item else {}
+
+    class Principals:
+        def get_item(self, *, Key, ConsistentRead):
+            assert Key == {"principal_id": "principal-owner"}
+            assert ConsistentRead is True
+            return {"Item": {
+                "principal_id": "principal-owner",
+                "account_id": "account-1",
+                "household_id": "household-1",
+                "role": "owner",
+                "state": "active",
+                "profile_ids": ["profile-source", "profile-kid"],
+            }}
+
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
+    monkeypatch.setattr(handler, "principals_table", Principals())
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "profile_id": "profile-source",
+        "principal_id": "principal-owner",
+        "account_id": "account-1",
+        "household_id": "household-1",
+    })
+
+    assert handler.require_profile_switch_auth({}, "profile-kid") is True
+
+
+def test_switch_auth_rejects_managed_kid_without_exact_owner_pointer(monkeypatch):
+    class Profiles:
+        records = {
+            "profile-source": {
+                "profile_id": "profile-source",
+                "account_id": "account-1",
+                "household_id": "household-1",
+                "state": "active",
+                "switch_profile_ids": [],
+            },
+            "profile-kid": {
+                "profile_id": "profile-kid",
+                "account_id": "account-1",
+                "household_id": "household-1",
+                "state": "active",
+                "profile_type": "kid",
+                "managed_by_owner": True,
+                "owner_principal_id": "different-principal",
+            },
+        }
+
+        def get_item(self, *, Key, ConsistentRead):
+            assert ConsistentRead is True
+            item = self.records.get(Key["profile_id"])
+            return {"Item": dict(item)} if item else {}
+
+    class UnreadablePrincipals:
+        def get_item(self, **_kwargs):
+            raise AssertionError("mismatched owner pointer must fail before principal read")
+
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
+    monkeypatch.setattr(handler, "principals_table", UnreadablePrincipals())
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "profile_id": "profile-source",
+        "principal_id": "principal-owner",
+        "account_id": "account-1",
+        "household_id": "household-1",
+    })
+
+    assert handler.require_profile_switch_auth({}, "profile-kid") is False
+
+
 def test_expired_pending_request_cannot_be_claimed(monkeypatch):
     table = FakeRemoteRequests([request_item("expired", "pending", handler.epoch_now() - 1)])
     monkeypatch.setattr(handler, "remote_requests_table", table)
