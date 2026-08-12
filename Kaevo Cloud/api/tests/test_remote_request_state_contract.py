@@ -76,6 +76,16 @@ class ExactProfileTable:
         return {"Item": dict(self.item)}
 
 
+class ExactConnectorTable:
+    def __init__(self, item):
+        self.item = dict(item)
+
+    def get_item(self, *, Key, **_):
+        if Key["connector_id"] != self.item["connector_id"]:
+            return {}
+        return {"Item": dict(self.item)}
+
+
 class ExactHouseholdMembershipTable:
     def __init__(self, item):
         self.item = dict(item)
@@ -158,6 +168,94 @@ def test_large_completion_stores_only_under_the_bounded_remote_response_prefix(m
     assert completed["statusCode"] == 200
     assert set(storage.objects) == {("bound-test-bucket", expected_key)}
     assert table.items[request_id]["response_s3_key"] == expected_key
+
+
+def test_prepare_completion_embeds_one_exact_short_lived_playback_grant(monkeypatch):
+    request_id = "prepare-playback"
+    item = request_item(request_id, "in_progress")
+    item["request_json"] = json.dumps({
+        "provider": "home_server",
+        "method": "COMMAND",
+        "path": "/commands/jellyfin.prepare_playback",
+        "query": {},
+        "body": {
+            "item_id": "a" * 32,
+            "device_id": "ios-device-1",
+            "max_bitrate": 20_000_000,
+        },
+    })
+    table = FakeRemoteRequests([item])
+    connector = {
+        "connector_id": "connector-1",
+        "auth_state": "active",
+        "playback_grant_key": "h" * 48,
+    }
+    monkeypatch.setattr(handler, "remote_requests_table", table)
+    monkeypatch.setattr(handler, "home_connectors_table", ExactConnectorTable(connector))
+    monkeypatch.setattr(handler, "require_connector_auth", lambda _event, connector_id: connector_id == "connector-1")
+    monkeypatch.setattr(handler, "PLAYBACK_GRANT_SIGNING_KEY", "x" * 48)
+    monkeypatch.setattr(handler, "PLAYBACK_RELAY_PUBLIC_URL", "https://relay.test")
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _: ({
+        "cloud_enabled": True,
+        "subscription_state": "active",
+    }, None))
+
+    completed = handler.complete_remote_request(
+        event({
+            "connector_id": "connector-1",
+            "response": {"result": {
+                "item_id": "a" * 32,
+                "media_source_id": "source-1",
+                "playback_session_id": "session-1",
+                "mode": "transcode",
+                "max_bitrate": 20_000_000,
+            }},
+        }),
+        f"/v1/remote-requests/{request_id}/complete",
+    )
+
+    assert completed["statusCode"] == 200
+    stored = json.loads(table.items[request_id]["response_json"])
+    grant = stored["result"]["playback_grant"]
+    assert grant["state"] == "issued"
+    assert grant["connector_id"] == "connector-1"
+    assert grant["expires_at"] - handler.epoch_now() <= 120
+    assert grant["relay_base_url"].startswith("https://relay.test/v1/playback/")
+    assert "grant" not in grant
+
+
+def test_prepare_completion_does_not_grant_mismatched_item_or_bitrate(monkeypatch):
+    item = request_item("prepare-mismatch", "in_progress")
+    item["request_json"] = json.dumps({
+        "method": "COMMAND",
+        "path": "/commands/jellyfin.prepare_playback",
+        "body": {
+            "item_id": "a" * 32,
+            "device_id": "ios-device-1",
+            "max_bitrate": 10_000_000,
+        },
+    })
+    monkeypatch.setattr(handler, "home_connectors_table", ExactConnectorTable({
+        "connector_id": "connector-1",
+        "auth_state": "active",
+        "playback_grant_key": "h" * 48,
+    }))
+    monkeypatch.setattr(handler, "PLAYBACK_GRANT_SIGNING_KEY", "x" * 48)
+    monkeypatch.setattr(handler, "PLAYBACK_RELAY_PUBLIC_URL", "https://relay.test")
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _: ({
+        "cloud_enabled": True,
+        "subscription_state": "active",
+    }, None))
+
+    response_payload = {"result": {
+        "item_id": "b" * 32,
+        "media_source_id": "source-1",
+        "playback_session_id": "session-1",
+        "mode": "transcode",
+        "max_bitrate": 20_000_000,
+    }}
+
+    assert handler._completion_with_embedded_playback_grant(item, response_payload) == response_payload
 
 
 def test_admin_seerr_request_list_keeps_only_its_matching_exact_scope(monkeypatch):

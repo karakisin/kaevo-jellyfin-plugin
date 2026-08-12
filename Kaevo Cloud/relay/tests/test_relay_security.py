@@ -13,11 +13,14 @@ import kaevo_relay.app as relay_module
 from kaevo_relay.app import (
     ConnectorChannel,
     ConnectorRegistry,
+    FamilySyncChannel,
+    FamilySyncRegistry,
     GrantRegistry,
     MAX_CHUNK_BYTES,
     grant_token_from_path,
     rewrite_hls_playlist,
     split_grant_token,
+    validate_family_sync_ticket,
 )
 from kaevo_relay.security import verify_signed_token
 
@@ -73,6 +76,105 @@ def test_connector_ticket_cannot_be_used_as_playback_grant():
     signed = token({"v": 1, "type": "connector_relay", "connector_id": "connector-1", "nbf": 995, "exp": 1100})
     with pytest.raises(ValueError, match="relayPlaybackGrantRequired"):
         registry.resolve(signed)
+
+
+def family_sync_claims(*, role, profile_id="profile-1"):
+    claims = {
+        "v": 1,
+        "type": "family_sync_live",
+        "role": role,
+        "profile_id": profile_id,
+        "household_id": "household-1",
+        "installation_id": f"installation-{profile_id}",
+        "nbf": 995,
+        "exp": 1120,
+    }
+    if role == "publisher":
+        claims.update({
+            "provider": "jellyfin",
+            "item_id": "0123456789abcdef0123456789abcdef",
+            "media_type": "movie",
+            "session_id": "session-1",
+            "session_started_at_epoch_milliseconds": 1_000_000,
+            "allowed_profile_ids": ["profile-1", "profile-2"],
+            "audience_profile_ids": ["profile-1", "profile-2"],
+        })
+    return claims
+
+
+def test_family_sync_ticket_is_distinct_from_connector_and_playback_grants(monkeypatch):
+    monkeypatch.setattr(relay_module, "SIGNING_KEY", KEY)
+    current = int(time.time())
+    live_claims = {**family_sync_claims(role="publisher"), "nbf": current - 5, "exp": current + 120}
+    claims = validate_family_sync_ticket(token(live_claims))
+    assert claims["role"] == "publisher"
+    with pytest.raises(ValueError, match="familySyncLiveTicketRequired"):
+        validate_family_sync_ticket(token({**playback_payload(), "nbf": current - 5, "exp": current + 120}))
+
+
+class LiveObserverWebSocket:
+    def __init__(self):
+        self.sent = []
+
+    async def send_text(self, payload):
+        self.sent.append(json.loads(payload))
+
+
+@pytest.mark.asyncio
+async def test_family_sync_fanout_filters_exact_audience_and_rejects_old_owner():
+    now = [1000.0]
+    registry = FamilySyncRegistry(clock=lambda: now[0])
+    publisher = FamilySyncChannel(websocket=LiveObserverWebSocket(), claims=family_sync_claims(role="publisher"))
+    first_socket = LiveObserverWebSocket()
+    second_socket = LiveObserverWebSocket()
+    unrelated_socket = LiveObserverWebSocket()
+    registry.add(FamilySyncChannel(websocket=first_socket, claims=family_sync_claims(role="observer", profile_id="profile-1")))
+    registry.add(FamilySyncChannel(websocket=second_socket, claims=family_sync_claims(role="observer", profile_id="profile-2")))
+    registry.add(FamilySyncChannel(websocket=unrelated_socket, claims={
+        **family_sync_claims(role="observer", profile_id="profile-3"),
+        "household_id": "household-2",
+    }))
+    message = {
+        "type": "progress",
+        "sequence": 2,
+        "position_seconds": 12.5,
+        "runtime_seconds": 7200,
+        "selected_viewer_profile_ids": ["profile-1", "profile-2"],
+        "departed_viewer_profile_ids": [],
+        "playback_state": "active",
+    }
+
+    assert await registry.publish(publisher, message) == 2
+    assert first_socket.sent[0]["source_profile_id"] == "profile-1"
+    assert second_socket.sent[0]["viewer_profile_ids"] == ["profile-1", "profile-2"]
+    assert unrelated_socket.sent == []
+
+    # Same-session and older-session packets cannot roll either observer back.
+    assert await registry.publish(publisher, {**message, "sequence": 1}) == 0
+    older = FamilySyncChannel(websocket=LiveObserverWebSocket(), claims={
+        **family_sync_claims(role="publisher"),
+        "session_started_at_epoch_milliseconds": 999_999,
+        "session_id": "older-session",
+    })
+    assert await registry.publish(older, {**message, "sequence": 99}) == 0
+    assert len(first_socket.sent) == 1
+    assert len(second_socket.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_family_sync_publisher_cannot_widen_signed_audience():
+    registry = FamilySyncRegistry(clock=lambda: 1000.0)
+    publisher = FamilySyncChannel(websocket=LiveObserverWebSocket(), claims=family_sync_claims(role="publisher"))
+    with pytest.raises(ValueError, match="familySyncLiveSelectionUnauthorized"):
+        await registry.publish(publisher, {
+            "type": "progress",
+            "sequence": 1,
+            "position_seconds": 1,
+            "runtime_seconds": 100,
+            "selected_viewer_profile_ids": ["profile-1", "profile-3"],
+            "departed_viewer_profile_ids": [],
+            "playback_state": "active",
+        })
 
 
 def test_avfoundation_safe_grant_path_round_trips_and_rewrites_playlists():

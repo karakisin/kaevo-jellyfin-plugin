@@ -297,11 +297,121 @@ def profile_avatar_cloud_allowed(event, profile_id):
     return bool_value(entitlements.get("cloud_enabled"), False)
 
 
+def profile_avatar_read_authorized(event, profile_id):
+    """Authorize one exact avatar through the protected profile-access graph.
+
+    Reads may target an active profile that the authenticated canonical
+    profile may explicitly switch to or select for Who's Watching. This is the
+    same immutable-ID, same-household boundary used to materialize profile
+    presentation shells; a display name, local roster, or broad household scan
+    never grants access.
+    """
+    if require_dev_key(event):
+        return True
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return False
+    source_profile_id = str(session.get("profile_id") or "").strip()
+    target_profile_id = str(profile_id or "").strip()
+    household_id = str(session.get("household_id") or "").strip()
+    if not source_profile_id or not target_profile_id or not household_id:
+        return False
+    if hmac.compare_digest(source_profile_id, target_profile_id):
+        return True
+    if identity_profiles_table is None:
+        return False
+    source_profile = identity_profiles_table.get_item(
+        Key={"profile_id": source_profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if not (
+        isinstance(source_profile, dict)
+        and source_profile.get("state") == "active"
+        and hmac.compare_digest(
+            str(source_profile.get("profile_id") or ""), source_profile_id,
+        )
+        and hmac.compare_digest(
+            str(source_profile.get("household_id") or ""), household_id,
+        )
+    ):
+        return False
+
+    access = _authorized_switch_target_access(
+        source_profile=source_profile,
+        household_id=household_id,
+    )
+    access.extend(_authorized_viewing_profile_access(
+        source_profile=source_profile,
+        household_id=household_id,
+    ))
+    if principals_table is not None:
+        principal_id = str(session.get("principal_id") or "").strip()
+        principal = principals_table.get_item(
+            Key={"principal_id": principal_id}, ConsistentRead=True,
+        ).get("Item") if principal_id else None
+        access.extend(_authorized_parent_managed_profile_access(
+            principal=principal,
+            source_profile=source_profile,
+            household_id=household_id,
+            is_household_owner=(
+                str(session.get("role") or "").strip().lower()
+                == CanonicalRole.OWNER.value
+            ),
+        ))
+    return any(
+        hmac.compare_digest(str(item.get("profile_id") or ""), target_profile_id)
+        for item in access if isinstance(item, dict)
+    )
+
+
+def profile_avatar_write_authority(event, profile_id):
+    """Resolve an exact avatar writer without granting writes to viewers.
+
+    A profile may always write its own photo. Household Owners and Admins may
+    additionally manage an exact, active profile in their current household,
+    which matches the native Manage Profiles surface and lets a manager seed
+    legacy local photos for profiles without their own device. Profile Switch
+    and Who's Watching grants remain read-only.
+    """
+    if require_dev_key(event):
+        return "self"
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return ""
+    source_profile_id = str(session.get("profile_id") or "").strip()
+    target_profile_id = str(profile_id or "").strip()
+    household_id = str(session.get("household_id") or "").strip()
+    if not source_profile_id or not target_profile_id or not household_id:
+        return ""
+    if hmac.compare_digest(source_profile_id, target_profile_id):
+        return "self"
+
+    manager, manager_error = household_manager_bound_session(
+        event,
+        verified_session=session,
+    )
+    if manager_error or not manager or identity_profiles_table is None:
+        return ""
+    target = identity_profiles_table.get_item(
+        Key={"profile_id": target_profile_id}, ConsistentRead=True,
+    ).get("Item")
+    return "household-manager" if (
+        isinstance(target, dict)
+        and target.get("state") == "active"
+        and hmac.compare_digest(
+            str(target.get("profile_id") or ""), target_profile_id,
+        )
+        and hmac.compare_digest(
+            str(target.get("household_id") or ""), household_id,
+        )
+    ) else ""
+
+
 def put_profile_avatar(event, path):
     profile_id = extract_profile_id_from_avatar_path(path)
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "invalid profile avatar path"})
-    if not require_profile_auth(event, profile_id):
+    write_authority = profile_avatar_write_authority(event, profile_id)
+    if not write_authority:
         return response(401, {"state": "unauthorized"})
     if not profile_avatar_cloud_allowed(event, profile_id):
         return response(403, {"state": "cloud_inactive", "message": "Cloud Access is required for profile photo sync"})
@@ -320,14 +430,50 @@ def put_profile_avatar(event, path):
         return response(400, {"state": "bad_request", "message": "profile photo must be a JPEG"})
 
     updated_at = utc_now_iso()
-    s3_client.put_object(
+    put_arguments = dict(
         Bucket=PROFILE_AVATARS_BUCKET,
         Key=profile_avatar_key(profile_id),
         Body=image_data,
         ContentType="image/jpeg",
         CacheControl="private, max-age=300",
-        Metadata={"profile-id-hash": hashlib.sha256(profile_id.encode("utf-8")).hexdigest(), "updated-at": updated_at}
+        Metadata={
+            "profile-id-hash": hashlib.sha256(profile_id.encode("utf-8")).hexdigest(),
+            "updated-at": updated_at,
+            "uploader-authority": write_authority,
+        },
     )
+    if write_authority == "household-manager":
+        try:
+            existing = s3_client.head_object(
+                Bucket=PROFILE_AVATARS_BUCKET,
+                Key=profile_avatar_key(profile_id),
+            )
+        except ClientError as error:
+            if str(error.response.get("Error", {}).get("Code")) in {"NoSuchKey", "NotFound", "404"}:
+                put_arguments["IfNoneMatch"] = "*"
+            else:
+                raise
+        else:
+            existing_authority = str(
+                (existing.get("Metadata") or {}).get("uploader-authority") or "self"
+            ).strip().lower()
+            if existing_authority != "household-manager":
+                return response(409, {
+                    "state": "profile_avatar_user_authoritative",
+                    "message": "The profile user's photo is authoritative.",
+                })
+            existing_etag = str(existing.get("ETag") or "").strip()
+            if not existing_etag:
+                return response(409, {"state": "profile_avatar_changed"})
+            put_arguments["IfMatch"] = existing_etag
+    try:
+        s3_client.put_object(**put_arguments)
+    except ClientError as error:
+        if str(error.response.get("Error", {}).get("Code")) in {
+            "ConditionalRequestConflict", "PreconditionFailed", "409", "412",
+        }:
+            return response(409, {"state": "profile_avatar_changed"})
+        raise
     return response(200, {"state": "saved", "profile_id": profile_id, "updated_at": updated_at})
 
 
@@ -335,7 +481,7 @@ def get_profile_avatar(event, path):
     profile_id = extract_profile_id_from_avatar_path(path)
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "invalid profile avatar path"})
-    if not require_profile_auth(event, profile_id):
+    if not profile_avatar_read_authorized(event, profile_id):
         return response(401, {"state": "unauthorized"})
     if not profile_avatar_cloud_allowed(event, profile_id):
         return response(403, {"state": "cloud_inactive", "message": "Cloud Access is required for profile photo sync"})
@@ -361,13 +507,44 @@ def delete_profile_avatar(event, path):
     profile_id = extract_profile_id_from_avatar_path(path)
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "invalid profile avatar path"})
-    if not require_profile_auth(event, profile_id):
+    write_authority = profile_avatar_write_authority(event, profile_id)
+    if not write_authority:
         return response(401, {"state": "unauthorized"})
     if not profile_avatar_cloud_allowed(event, profile_id):
         return response(403, {"state": "cloud_inactive", "message": "Cloud Access is required for profile photo sync"})
     if not PROFILE_AVATARS_BUCKET or s3_client is None:
         return response(503, {"state": "unavailable", "message": "profile avatar storage is not configured"})
-    s3_client.delete_object(Bucket=PROFILE_AVATARS_BUCKET, Key=profile_avatar_key(profile_id))
+    delete_arguments = {
+        "Bucket": PROFILE_AVATARS_BUCKET,
+        "Key": profile_avatar_key(profile_id),
+    }
+    if write_authority == "household-manager":
+        try:
+            existing = s3_client.head_object(**delete_arguments)
+        except ClientError as error:
+            if str(error.response.get("Error", {}).get("Code")) in {"NoSuchKey", "NotFound", "404"}:
+                return response(200, {"state": "deleted", "profile_id": profile_id})
+            raise
+        existing_authority = str(
+            (existing.get("Metadata") or {}).get("uploader-authority") or "self"
+        ).strip().lower()
+        if existing_authority != "household-manager":
+            return response(409, {
+                "state": "profile_avatar_user_authoritative",
+                "message": "The profile user's photo is authoritative.",
+            })
+        existing_etag = str(existing.get("ETag") or "").strip()
+        if not existing_etag:
+            return response(409, {"state": "profile_avatar_changed"})
+        delete_arguments["IfMatch"] = existing_etag
+    try:
+        s3_client.delete_object(**delete_arguments)
+    except ClientError as error:
+        if str(error.response.get("Error", {}).get("Code")) in {
+            "ConditionalRequestConflict", "PreconditionFailed", "409", "412",
+        }:
+            return response(409, {"state": "profile_avatar_changed"})
+        raise
     return response(200, {"state": "deleted", "profile_id": profile_id})
 
 PROVIDER_SETTING_KEYS = [
@@ -6220,6 +6397,7 @@ def recent_events(event):
 HOUSEHOLD_PROGRESS_EVENT_TYPE = "household_playback_progress"
 HOUSEHOLD_PROGRESS_EVENT_PREFIX = "household-progress"
 HOUSEHOLD_PROGRESS_MAX_POSITION_SECONDS = 172_800
+FAMILY_SYNC_LIVE_TICKET_SECONDS = 300
 
 
 def _household_progress_seconds(value):
@@ -6242,11 +6420,11 @@ def _household_progress_authorized_source(event):
     the household edge used for the explicit Who's Watching audience.
     """
     if identity_profiles_table is None:
-        return None, None, response(503, {"state": "identity_context_storage_unavailable"})
+        return None, None, None, response(503, {"state": "identity_context_storage_unavailable"})
     session = authenticated_app_session(event)
     profile_id = str((session or {}).get("profile_id") or "").strip()
     if not profile_id:
-        return None, None, response(401, {"state": "protected_session_required"})
+        return None, None, None, response(401, {"state": "protected_session_required"})
     source = identity_profiles_table.get_item(
         Key={"profile_id": profile_id}, ConsistentRead=True,
     ).get("Item")
@@ -6257,8 +6435,12 @@ def _household_progress_authorized_source(event):
         and str(source.get("profile_id") or "") == profile_id
         and household_id
     ):
-        return None, None, response(401, {"state": "identity_context_invalid"})
-    return source, household_id, None
+        return None, None, None, response(401, {"state": "identity_context_invalid"})
+    # Return the already verified DPoP-bound session with the canonical
+    # profile context. A request-bound DPoP proof is single-use by design;
+    # callers must not authenticate the same request again to recover its
+    # installation binding.
+    return source, household_id, session, None
 
 
 def _household_progress_authorized_target_ids(*, source_profile, household_id):
@@ -6307,6 +6489,7 @@ def _household_progress_payload(body, *, source_profile, household_id):
     runtime_seconds = _household_progress_seconds(body.get("runtime_seconds"))
     selected_ids = body.get("selected_viewer_profile_ids")
     departed_ids = body.get("departed_viewer_profile_ids") or []
+    playback_state = str(body.get("playback_state") or "unknown").strip().lower()
 
     if provider != "jellyfin" or not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
         return None, "invalid_media_identity"
@@ -6322,6 +6505,8 @@ def _household_progress_payload(body, *, source_profile, household_id):
         return None, "invalid_viewer_selection"
     if not isinstance(departed_ids, list) or len(departed_ids) > 64:
         return None, "invalid_departed_viewers"
+    if playback_state not in {"active", "paused", "stopped", "completed", "unknown"}:
+        return None, "invalid_playback_state"
 
     source_profile_id = str(source_profile.get("profile_id") or "").strip()
     requested_ids = []
@@ -6365,7 +6550,128 @@ def _household_progress_payload(body, *, source_profile, household_id):
         "runtime_seconds": runtime_seconds,
         "selected_viewer_profile_ids": sorted(requested_ids),
         "departed_viewer_profile_ids": sorted(departed_profile_ids),
+        "playback_state": playback_state,
     }, None
+
+
+def create_family_sync_live_ticket(event):
+    """Issue a short-lived relay ticket from the protected app session.
+
+    The relay never receives the app-session bearer or DPoP key. Cloud derives
+    the immutable profile, household, and installation claims here, then signs
+    the smallest capability needed by an observer or one exact playback
+    session. Publisher audiences come only from the current Who's Watching
+    grant plus this item's existing Family Sync membership.
+    """
+    if len(PLAYBACK_GRANT_SIGNING_KEY) < 32 or not PLAYBACK_RELAY_PUBLIC_URL:
+        return response(503, {"state": "family_sync_live_unavailable"})
+    body = parse_json_body(event)
+    if not isinstance(body, dict):
+        return response(400, {"state": "bad_request", "message": "invalid JSON body"})
+    source_profile, household_id, session, failure = _household_progress_authorized_source(event)
+    if failure:
+        return failure
+    installation_id = str((session or {}).get("installation_id") or "").strip()
+    if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(installation_id):
+        return response(401, {"state": "protected_installation_required"})
+
+    role = str(body.get("role") or "").strip().lower()
+    if role not in {"observer", "publisher"}:
+        return response(400, {"state": "invalid_live_role"})
+
+    source_profile_id = str(source_profile.get("profile_id") or "").strip()
+    now = epoch_now()
+    claims = {
+        "v": 1,
+        "type": "family_sync_live",
+        "role": role,
+        "profile_id": source_profile_id,
+        "household_id": household_id,
+        "installation_id": installation_id,
+        "nonce": secrets.token_urlsafe(24),
+        "iat": now,
+        "nbf": now - 5,
+        "exp": now + FAMILY_SYNC_LIVE_TICKET_SECONDS,
+    }
+
+    if role == "publisher":
+        provider = str(body.get("provider") or "").strip().lower()
+        item_id = str(body.get("item_id") or "").strip().lower()
+        playback_session_id = str(body.get("session_id") or "").strip()
+        media_type = str(body.get("media_type") or "").strip().lower()
+        session_started_at = positive_int(
+            body.get("session_started_at_epoch_milliseconds"),
+            maximum=(now + 86_400) * 1_000,
+        )
+        selected_ids = body.get("selected_viewer_profile_ids")
+        if provider != "jellyfin" or not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
+            return response(400, {"state": "invalid_media_identity"})
+        if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(playback_session_id):
+            return response(400, {"state": "invalid_session_id"})
+        if media_type not in {"movie", "episode", "other"}:
+            return response(400, {"state": "invalid_media_type"})
+        if session_started_at is None:
+            return response(400, {"state": "invalid_progress"})
+        if not isinstance(selected_ids, list) or not selected_ids or len(selected_ids) > 64:
+            return response(400, {"state": "invalid_viewer_selection"})
+
+        requested_ids = []
+        for value in selected_ids:
+            profile_id = str(value or "").strip()
+            if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(profile_id) or profile_id in requested_ids:
+                return response(400, {"state": "invalid_viewer_selection"})
+            requested_ids.append(profile_id)
+        if source_profile_id not in requested_ids:
+            return response(400, {"state": "active_profile_required"})
+
+        allowed_ids = {source_profile_id}
+        allowed_ids.update(_household_progress_authorized_target_ids(
+            source_profile=source_profile,
+            household_id=household_id,
+        ))
+        if not set(requested_ids).issubset(allowed_ids):
+            return response(403, {"state": "viewer_selection_not_authorized"})
+
+        event_key = "#".join((HOUSEHOLD_PROGRESS_EVENT_PREFIX, provider, item_id))
+        existing = events_table.get_item(
+            Key={"profile_id": source_profile_id, "event_key": event_key},
+            ConsistentRead=True,
+        ).get("Item") if events_table is not None else None
+        existing_metadata = parse_json_field((existing or {}).get("metadata_json"), {})
+        existing_family_ids = existing_metadata.get("family_sync_profile_ids") or []
+        audience_ids = {
+            str(value or "").strip() for value in existing_family_ids
+            if str(value or "").strip() in allowed_ids
+        } if isinstance(existing_family_ids, list) else set()
+        if len(requested_ids) > 1:
+            audience_ids.update(requested_ids)
+        if not audience_ids:
+            audience_ids.add(source_profile_id)
+
+        claims.update({
+            "provider": provider,
+            "item_id": item_id,
+            "session_id": playback_session_id,
+            "media_type": media_type,
+            "session_started_at_epoch_milliseconds": session_started_at,
+            "allowed_profile_ids": sorted(allowed_ids),
+            "audience_profile_ids": sorted(audience_ids),
+        })
+
+    ticket = sign_playback_grant(claims)
+    if ticket is None:
+        return response(503, {"state": "family_sync_live_unavailable"})
+    relay_base = PLAYBACK_RELAY_PUBLIC_URL.rstrip("/")
+    websocket_base = re.sub(r"^https://", "wss://", relay_base, count=1)
+    if websocket_base == relay_base:
+        return response(503, {"state": "family_sync_live_unavailable"})
+    return response(201, {
+        "state": "issued",
+        "relay_ticket": ticket,
+        "websocket_url": f"{websocket_base}/v1/family-sync",
+        "expires_at": claims["exp"],
+        "audience_profile_ids": claims.get("audience_profile_ids") or [source_profile_id],
+    })
 
 
 def save_household_progress(event):
@@ -6380,7 +6686,7 @@ def save_household_progress(event):
     body = parse_json_body(event)
     if body is None:
         return response(400, {"state": "bad_request", "message": "invalid JSON body"})
-    source_profile, household_id, failure = _household_progress_authorized_source(event)
+    source_profile, household_id, _, failure = _household_progress_authorized_source(event)
     if failure:
         return failure
     progress, error = _household_progress_payload(
@@ -6409,19 +6715,57 @@ def save_household_progress(event):
     session_viewer_profile_ids = sorted(set(
         progress["selected_viewer_profile_ids"] + progress["departed_viewer_profile_ids"]
     ))
+    event_key = "#".join((
+        HOUSEHOLD_PROGRESS_EVENT_PREFIX,
+        progress["provider"],
+        progress["item_id"],
+    ))
+
+    # Family Sync membership is established only by an explicit multi-viewer
+    # selection for this exact media item. A later solo session updates that
+    # person's checkpoint without discovering unrelated household histories or
+    # erasing the item's existing Family Sync relationship.
+    family_sync_profile_ids = set()
     for profile_id in session_viewer_profile_ids:
-        event_key = "#".join((
-            HOUSEHOLD_PROGRESS_EVENT_PREFIX,
-            progress["provider"],
-            progress["item_id"],
-        ))
+        existing = events_table.get_item(
+            Key={"profile_id": profile_id, "event_key": event_key},
+            ConsistentRead=True,
+        ).get("Item")
+        if not isinstance(existing, dict):
+            continue
+        existing_metadata = parse_json_field(existing.get("metadata_json"), {})
+        existing_family_ids = existing_metadata.get("family_sync_profile_ids") or []
+        if isinstance(existing_family_ids, list):
+            family_sync_profile_ids.update(
+                str(value or "").strip() for value in existing_family_ids
+            )
+    if len(session_viewer_profile_ids) > 1:
+        family_sync_profile_ids.update(session_viewer_profile_ids)
+
+    currently_allowed_ids = {str(source_profile.get("profile_id") or "").strip()}
+    currently_allowed_ids.update(_household_progress_authorized_target_ids(
+        source_profile=source_profile,
+        household_id=household_id,
+    ))
+    family_sync_profile_ids = sorted(
+        profile_id for profile_id in family_sync_profile_ids
+        if profile_id and profile_id in currently_allowed_ids
+    )
+
+    for profile_id in session_viewer_profile_ids:
         metadata = {
             "media_type": progress["media_type"],
             "position_seconds": progress["position_seconds"],
             "runtime_seconds": progress["runtime_seconds"],
             "viewer_profile_ids": session_viewer_profile_ids,
+            "family_sync_profile_ids": family_sync_profile_ids,
             "source_profile_id": str(source_profile.get("profile_id") or ""),
             "is_currently_selected": profile_id in progress["selected_viewer_profile_ids"],
+            "playback_state": (
+                progress["playback_state"]
+                if profile_id in progress["selected_viewer_profile_ids"]
+                else "stopped"
+            ),
         }
         try:
             events_table.update_item(
@@ -6498,11 +6842,18 @@ def _household_progress_viewer_snapshots(*, source_profile, household_id, item, 
         source_profile=source_profile,
         household_id=household_id,
     ))
-    # A later solo session must not hide a still-authorized co-viewer's last
-    # checkpoint. Current owner-managed grants are the authorization source;
-    # a prior playback roster is only historical metadata and is never used to
-    # discover or authorize an identity.
-    viewer_ids = sorted(allowed_ids)
+    family_sync_ids = metadata.get("family_sync_profile_ids") or []
+    if not isinstance(family_sync_ids, list):
+        family_sync_ids = []
+    # Exact-item membership is the discovery boundary. Current owner-managed
+    # grants remain the authorization boundary, so a revoked profile is never
+    # exposed even if it remains in historical metadata.
+    viewer_ids = sorted({
+        str(value or "").strip() for value in family_sync_ids
+        if str(value or "").strip() in allowed_ids
+    })
+    if len(viewer_ids) < 2:
+        return []
 
     snapshots = []
     for viewer_profile_id in viewer_ids:
@@ -6526,6 +6877,7 @@ def _household_progress_viewer_snapshots(*, source_profile, household_id, item, 
             "position_seconds": position_seconds,
             "runtime_seconds": _household_progress_seconds(candidate_metadata.get("runtime_seconds")),
             "is_currently_selected": bool(candidate_metadata.get("is_currently_selected")),
+            "playback_state": str(candidate_metadata.get("playback_state") or "unknown"),
             "updated_at": str(candidate.get("received_at") or ""),
         })
     return snapshots
@@ -6535,7 +6887,7 @@ def get_household_progress(event):
     """Return the active profile's rows plus exact authorized viewer checkpoints."""
     if events_table is None:
         return response(503, {"state": "household_progress_storage_unavailable"})
-    source_profile, household_id, failure = _household_progress_authorized_source(event)
+    source_profile, household_id, _, failure = _household_progress_authorized_source(event)
     if failure:
         return failure
     profile_id = str(source_profile.get("profile_id") or "")
@@ -6558,7 +6910,7 @@ def get_household_progress(event):
             "media_type": str(metadata.get("media_type") or "other"),
             "position_seconds": metadata.get("position_seconds"),
             "runtime_seconds": metadata.get("runtime_seconds"),
-            "viewer_profile_ids": metadata.get("viewer_profile_ids") or [],
+            "viewer_profile_ids": metadata.get("family_sync_profile_ids") or [],
             "session_id": str(item.get("session_id") or ""),
             "updated_at": str(item.get("received_at") or ""),
             "viewer_progress": _household_progress_viewer_snapshots(
@@ -7861,14 +8213,14 @@ def owner_bound_session(event):
     return session, None
 
 
-def household_manager_bound_session(event):
+def household_manager_bound_session(event, *, verified_session=None):
     """Authorize Owner/Admin operations from live server-owned authority.
 
     The access token proves the principal and device binding. Household
     authority is read consistently from the active principal record so a
     stale or modified client cannot promote itself by changing local state.
     """
-    session = authenticated_app_session(event)
+    session = verified_session or authenticated_app_session(event)
     if not session or session.get("record_type") != "access":
         return None, response(401, {"state": "household_manager_session_required"})
     if principals_table is None:
@@ -11688,12 +12040,25 @@ def create_remote_command(event):
         "sonarr.episode_inventory",
     }
     owner_authorized_operations = {"downloaders.set_queue_state"}
+    protected_profile_session = None
     if operation in owner_authorized_operations:
         owner_error = authorize_protected_owner_download_command(event, profile_id)
         if owner_error:
             return owner_error
     elif not require_dev_key(event):
-        if operation not in profile_authorized_operations or not require_profile_auth(event, profile_id):
+        if operation not in profile_authorized_operations:
+            return response(401, {"state": "unauthorized"})
+        if operation == "jellyfin.prepare_playback":
+            protected_profile_session = authenticated_app_session(event)
+            if not (
+                protected_profile_session
+                and hmac.compare_digest(
+                    str(protected_profile_session.get("profile_id") or ""),
+                    profile_id,
+                )
+            ):
+                return response(401, {"state": "unauthorized"})
+        elif not require_profile_auth(event, profile_id):
             return response(401, {"state": "unauthorized"})
     if not SAFE_IDEMPOTENCY_KEY.fullmatch(idempotency_key):
         return response(400, {"state": "bad_request", "message": "idempotency_key must be 8-128 safe characters"})
@@ -11701,6 +12066,19 @@ def create_remote_command(event):
     request_payload, error = normalize_remote_command(operation, parameters)
     if request_payload is None:
         return response(400, {"state": "bad_request", "message": error})
+    if (
+        operation == "jellyfin.prepare_playback"
+        and protected_profile_session
+        and protected_profile_session.get("record_type") == "access"
+        and not hmac.compare_digest(
+            str(protected_profile_session.get("device_id") or ""),
+            str(request_payload.get("body", {}).get("device_id") or ""),
+        )
+    ):
+        # Deliberately opaque: the caller must never learn whether another
+        # installation exists, and a connector-prepared grant must remain
+        # bound to the DPoP session's exact device.
+        return response(404, {"state": "target_not_found"})
 
     connector = latest_online_connector_for_profile(profile_id)
     if not connector:
@@ -11759,6 +12137,58 @@ def create_remote_command(event):
     })
 
 
+def _issued_playback_grant(
+    *, profile_id, device_id, item_id, media_source_id,
+    playback_session_id, mode, max_bitrate, connector,
+):
+    """Mint one exact, short-lived relay capability after caller validation."""
+    pairing_v3_connector = pairing_v3_connector_can_issue_playback_grants(connector)
+    if not pairing_v3_connector and (
+        connector.get("auth_state") != "active" or not connector.get("playback_grant_key")
+    ):
+        return None
+    now = epoch_now()
+    payload = {
+        "v": 1,
+        "grant_id": str(uuid.uuid4()),
+        "nonce": secrets.token_urlsafe(24),
+        "profile_id": profile_id,
+        "device_id": device_id,
+        "connector_id": str(connector.get("connector_id")),
+        "item_id": item_id,
+        "media_source_id": media_source_id,
+        "playback_session_id": playback_session_id,
+        "mode": mode,
+        "max_bitrate": max_bitrate,
+        "max_concurrent": 1,
+        "iat": now,
+        "nbf": now - 5,
+        "exp": now + PLAYBACK_GRANT_TTL_SECONDS,
+    }
+    try:
+        payload = (
+            pairing_v3_playback_grant_payload(payload)
+            if pairing_v3_connector
+            else add_home_connector_signature(payload, connector["playback_grant_key"])
+        )
+    except PairingV3CryptoError:
+        return None
+    token = sign_playback_grant(payload)
+    if token is None:
+        return None
+    return {
+        "state": "issued",
+        "grant": token,
+        "grant_id": payload["grant_id"],
+        "expires_at": payload["exp"],
+        "connector_id": payload["connector_id"],
+        "relay_base_url": (
+            f"{PLAYBACK_RELAY_PUBLIC_URL}/v1/playback/{avfoundation_safe_grant_path(token)}"
+            if PLAYBACK_RELAY_PUBLIC_URL else ""
+        ),
+    }
+
+
 def create_playback_grant(event):
     body = parse_json_body(event)
     if body is None:
@@ -11808,52 +12238,104 @@ def create_playback_grant(event):
     connector = latest_online_connector_for_profile(profile_id)
     if not connector:
         return response(409, {"state": "connector_unavailable"})
-    pairing_v3_connector = pairing_v3_connector_can_issue_playback_grants(connector)
-    if not pairing_v3_connector and (
-        connector.get("auth_state") != "active" or not connector.get("playback_grant_key")
-    ):
-        return response(409, {"state": "connector_unavailable"})
     max_bitrate = positive_int(body.get("max_bitrate") or 40_000_000, maximum=100_000_000)
     if max_bitrate is None:
         return response(400, {"state": "bad_request", "message": "invalid max_bitrate"})
-    now = epoch_now()
-    payload = {
-        "v": 1,
-        "grant_id": str(uuid.uuid4()),
-        "nonce": secrets.token_urlsafe(24),
-        "profile_id": profile_id,
-        "device_id": device_id,
-        "connector_id": str(connector.get("connector_id")),
-        "item_id": item_id,
-        "media_source_id": media_source_id,
-        "playback_session_id": playback_session_id,
-        "mode": mode,
-        "max_bitrate": max_bitrate,
-        "max_concurrent": 1,
-        "iat": now,
-        "nbf": now - 5,
-        "exp": now + PLAYBACK_GRANT_TTL_SECONDS
-    }
-    try:
-        payload = (
-            pairing_v3_playback_grant_payload(payload)
-            if pairing_v3_connector
-            else add_home_connector_signature(payload, connector["playback_grant_key"])
-        )
-    except PairingV3CryptoError:
-        return response(503, {"state": "playback_grants_not_configured"})
-    token = sign_playback_grant(payload)
-    return response(201, {
-        "state": "issued",
-        "grant": token,
-        "grant_id": payload["grant_id"],
-        "expires_at": payload["exp"],
-        "connector_id": payload["connector_id"],
-        "relay_base_url": (
-            f"{PLAYBACK_RELAY_PUBLIC_URL}/v1/playback/{avfoundation_safe_grant_path(token)}"
-            if PLAYBACK_RELAY_PUBLIC_URL else ""
-        )
-    })
+    issued = _issued_playback_grant(
+        profile_id=profile_id,
+        device_id=device_id,
+        item_id=item_id,
+        media_source_id=media_source_id,
+        playback_session_id=playback_session_id,
+        mode=mode,
+        max_bitrate=max_bitrate,
+        connector=connector,
+    )
+    if issued is None:
+        return response(409, {"state": "connector_unavailable"})
+    return response(201, issued)
+
+
+def _completion_with_embedded_playback_grant(item, response_payload):
+    """Attach a grant to one authenticated prepare-playback completion.
+
+    The connector completion and the original protected command jointly own
+    every claim. Invalid or stale context fails closed to the existing
+    separately-authorized grant endpoint; it never blocks recording the
+    connector's completion.
+    """
+    if not isinstance(response_payload, dict) or home_connectors_table is None:
+        return response_payload
+    request_payload = parse_json_field(item.get("request_json"), {})
+    request_body = request_payload.get("body") if isinstance(request_payload, dict) else None
+    result = response_payload.get("result")
+    if not (
+        request_payload.get("method") == "COMMAND"
+        and request_payload.get("path") == "/commands/jellyfin.prepare_playback"
+        and isinstance(request_body, dict)
+        and isinstance(result, dict)
+    ):
+        return response_payload
+
+    profile_id = str(item.get("profile_id") or "").strip()
+    connector_id = str(item.get("connector_id") or "").strip()
+    device_id = str(request_body.get("device_id") or "").strip()
+    requested_item_id = str(request_body.get("item_id") or "").strip().lower()
+    item_id = str(result.get("item_id") or "").strip().lower()
+    media_source_id = str(result.get("media_source_id") or "").strip()
+    playback_session_id = str(result.get("playback_session_id") or "").strip()
+    mode = str(result.get("mode") or "").strip().lower()
+    requested_max_bitrate = positive_int(
+        request_body.get("max_bitrate") or 40_000_000,
+        maximum=100_000_000,
+    )
+    max_bitrate = positive_int(
+        result.get("max_bitrate") or requested_max_bitrate,
+        maximum=100_000_000,
+    )
+    if not (
+        SAFE_PLAYBACK_IDENTIFIER.fullmatch(profile_id)
+        and SAFE_PLAYBACK_IDENTIFIER.fullmatch(device_id)
+        and SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id)
+        and hmac.compare_digest(item_id, requested_item_id)
+        and SAFE_PLAYBACK_IDENTIFIER.fullmatch(media_source_id)
+        and SAFE_PLAYBACK_IDENTIFIER.fullmatch(playback_session_id)
+        and mode in {"direct_play", "remux", "transcode"}
+        and requested_max_bitrate is not None
+        and max_bitrate is not None
+        and max_bitrate <= requested_max_bitrate
+    ):
+        return response_payload
+
+    entitlements, _ = load_entitlements_for_profile(profile_id)
+    if not (
+        bool_value(entitlements.get("cloud_enabled"), False)
+        and str(entitlements.get("subscription_state") or "").lower()
+        in {"active", "trialing", "grace_period"}
+    ):
+        return response_payload
+    connector = home_connectors_table.get_item(
+        Key={"connector_id": connector_id}, ConsistentRead=True,
+    ).get("Item")
+    if not isinstance(connector, dict):
+        return response_payload
+    issued = _issued_playback_grant(
+        profile_id=profile_id,
+        device_id=device_id,
+        item_id=item_id,
+        media_source_id=media_source_id,
+        playback_session_id=playback_session_id,
+        mode=mode,
+        max_bitrate=max_bitrate,
+        connector=connector,
+    )
+    if issued is None or not issued.get("relay_base_url"):
+        return response_payload
+    embedded = dict(issued)
+    embedded.pop("grant", None)
+    updated_result = dict(result)
+    updated_result["playback_grant"] = embedded
+    return {**response_payload, "result": updated_result}
 
 
 def get_remote_request(event, path):
@@ -12016,6 +12498,9 @@ def complete_remote_request(event, path, *, pairing_v3=False):
     response_payload = body.get("response")
     if response_payload is None:
         response_payload = {}
+    response_payload = _completion_with_embedded_playback_grant(
+        item, response_payload,
+    )
 
     encoded_response = json.dumps(response_payload, separators=(",", ":")).encode("utf-8")
     if len(encoded_response) >= REMOTE_RESPONSE_COMPRESS_THRESHOLD_BYTES:
@@ -12291,6 +12776,7 @@ def lambda_handler(event, context):
                 "/v1/events/batch",
                 "/v1/events/recent",
                 "/v1/household-progress",
+                "/v1/household-progress/live-ticket",
                 "/v1/entitlements",
                 "/v1/devices/register",
                 "/v1/devices",
@@ -12637,6 +13123,9 @@ def lambda_handler(event, context):
 
     if method == "GET" and path == "/v1/household-progress":
         return get_household_progress(event)
+
+    if method == "POST" and path == "/v1/household-progress/live-ticket":
+        return create_family_sync_live_ticket(event)
 
     if method == "POST" and path == "/v1/playback/grants":
         return create_playback_grant(event)

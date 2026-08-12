@@ -1342,6 +1342,7 @@ Resources:
           IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
           IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
           HOUSEHOLD_INVITATIONS_TABLE: !Ref KaevoHouseholdInvitationsTable
+          HOUSEHOLD_JOIN_TRANSACTIONS_TABLE: !Ref KaevoHouseholdJoinTransactionsTable
           INSTALLATIONS_TABLE: !Ref KaevoInstallationsTable
           SECURITY_AUDIT_TABLE: !Ref KaevoSecurityAuditTable
           AUDIT_REFERENCE_SECRET_ARN: !Ref KaevoAuditReferenceSecret
@@ -1411,6 +1412,17 @@ Resources:
             TableName: !Ref KaevoIdentityProfilesTable
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoHouseholdInvitationsTable
+        - Statement:
+            - Sid: DeleteExactProfileJoinTransactions
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+              Resource:
+                - !GetAtt KaevoHouseholdJoinTransactionsTable.Arn
+                - !Sub ${KaevoHouseholdJoinTransactionsTable.Arn}/index/invitation_id-created_at_epoch-index
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoInstallationsTable
         - Statement:
@@ -1517,6 +1529,13 @@ Resources:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v1/household-progress
             Method: GET
+
+        HouseholdProgressLiveTicket:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/household-progress/live-ticket
+            Method: POST
 
         GetEntitlements:
           Type: HttpApi

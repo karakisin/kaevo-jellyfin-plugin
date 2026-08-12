@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
+import io
 import json
 import os
 from pathlib import Path
@@ -187,6 +189,39 @@ class TransactionClient:
                     "revocation_reason": values[":reason"],
                 })
             table.items[table.key_for(item)] = item
+
+
+class ProfileAvatarStorage:
+    def __init__(self, image_data=b"\xff\xd8\xffcloud-avatar"):
+        self.image_data = image_data
+        self.metadata = {}
+        self.revision = 1
+
+    def get_object(self, **_kwargs):
+        if self.image_data is None:
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        return {"Body": io.BytesIO(self.image_data)}
+
+    def head_object(self, **_kwargs):
+        if self.image_data is None:
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "HeadObject")
+        return {"Metadata": self.metadata, "ETag": f'"avatar-{self.revision}"'}
+
+    def put_object(self, **kwargs):
+        if kwargs.get("IfNoneMatch") == "*" and self.image_data is not None:
+            raise ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject")
+        if kwargs.get("IfMatch") and kwargs["IfMatch"] != f'"avatar-{self.revision}"':
+            raise ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject")
+        self.image_data = kwargs["Body"]
+        self.metadata = kwargs.get("Metadata") or {}
+        self.revision += 1
+
+    def delete_object(self, **kwargs):
+        if kwargs.get("IfMatch") and kwargs["IfMatch"] != f'"avatar-{self.revision}"':
+            raise ClientError({"Error": {"Code": "PreconditionFailed"}}, "DeleteObject")
+        self.image_data = None
+        self.metadata = {}
+        self.revision += 1
 
 
 def graph(*, role="owner", account_id="acct_1", subject="subject-1"):
@@ -450,6 +485,9 @@ def test_identity_me_rejects_a_session_after_authorization_changes(monkeypatch):
 
 def test_template_declares_additive_account_foundation_storage_and_route():
     template = (Path(__file__).resolve().parents[2] / "infra" / "template.yaml").read_text()
+    main_api_block = template.split("  KaevoCloudApiFunction:", 1)[1].split(
+        "\n  KaevoIdentityV3ApiIntegration:", 1
+    )[0]
     assert "KaevoAccountsTable:" in template
     assert "KaevoAuthIdentitiesTable:" in template
     assert "account_id-created_at_epoch-index" in template
@@ -465,6 +503,9 @@ def test_template_declares_additive_account_foundation_storage_and_route():
     assert "AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable" in template
     assert "KaevoHouseholdMembershipsTable:" in template
     assert "HOUSEHOLD_MEMBERSHIPS_TABLE: !Ref KaevoHouseholdMembershipsTable" in template
+    assert "HOUSEHOLD_JOIN_TRANSACTIONS_TABLE: !Ref KaevoHouseholdJoinTransactionsTable" in main_api_block
+    assert "Sid: DeleteExactProfileJoinTransactions" in main_api_block
+    assert "!Sub ${KaevoHouseholdJoinTransactionsTable.Arn}/index/invitation_id-created_at_epoch-index" in main_api_block
 
 
 def test_existing_account_migration_is_atomic_idempotent_and_returns_identity(monkeypatch):
@@ -1679,6 +1720,262 @@ def test_canonical_member_retention_revokes_access_and_preserves_exact_recovery_
     assert tables["profile-settings"].items
     assert tables["entitlements"].items
     assert tables["devices"].items
+
+
+def test_profile_avatar_read_allows_exact_authorized_viewing_target(monkeypatch):
+    source = {
+        "profile_id": "profile-1",
+        "household_id": "household-1",
+        "profile_type": "adult",
+        "display_name": "Source",
+        "state": "active",
+        "watching_profile_ids": ["profile-viewer"],
+    }
+    target = {
+        "profile_id": "profile-viewer",
+        "household_id": "household-1",
+        "profile_type": "adult",
+        "display_name": "Viewer",
+        "state": "active",
+    }
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "record_type": "access",
+        "principal_id": "subject-1",
+        "profile_id": "profile-1",
+        "household_id": "household-1",
+        "role": "adult",
+    })
+    monkeypatch.setattr(handler, "identity_profiles_table", Table("profile_id", [source, target]))
+    monkeypatch.setattr(handler, "principals_table", Table("principal_id", []))
+    monkeypatch.setattr(handler, "PROFILE_AVATARS_BUCKET", "private-profile-avatars")
+    monkeypatch.setattr(handler, "s3_client", ProfileAvatarStorage())
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _profile_id: ({"cloud_enabled": True}, None))
+
+    result = handler.get_profile_avatar({}, "/v1/profiles/profile-viewer/avatar")
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert body["profile_id"] == "profile-viewer"
+    assert body["jpeg_base64"]
+
+
+@pytest.mark.parametrize("grant_field", ["switch_profile_ids", "watching_profile_ids"])
+def test_profile_avatar_read_allows_exact_switch_or_watching_target(monkeypatch, grant_field):
+    source = {
+        "profile_id": "profile-1",
+        "household_id": "household-1",
+        "profile_type": "adult",
+        "display_name": "Source",
+        "state": "active",
+        grant_field: ["profile-target"],
+    }
+    target = {
+        "profile_id": "profile-target",
+        "household_id": "household-1",
+        "profile_type": "adult",
+        "display_name": "Target",
+        "state": "active",
+    }
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "record_type": "access",
+        "principal_id": "subject-1",
+        "profile_id": "profile-1",
+        "household_id": "household-1",
+        "role": "adult",
+    })
+    monkeypatch.setattr(handler, "identity_profiles_table", Table("profile_id", [source, target]))
+    monkeypatch.setattr(handler, "principals_table", Table("principal_id", []))
+    monkeypatch.setattr(handler, "PROFILE_AVATARS_BUCKET", "private-profile-avatars")
+    monkeypatch.setattr(handler, "s3_client", ProfileAvatarStorage())
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _profile_id: ({"cloud_enabled": True}, None))
+
+    result = handler.get_profile_avatar({}, "/v1/profiles/profile-target/avatar")
+
+    assert result["statusCode"] == 200
+    assert json.loads(result["body"])["profile_id"] == "profile-target"
+
+
+def test_profile_avatar_write_allows_exact_household_manager_target(monkeypatch):
+    target = {
+        "profile_id": "profile-target",
+        "household_id": "household-1",
+        "profile_type": "kid",
+        "display_name": "Target",
+        "state": "active",
+    }
+    session = {
+        "record_type": "access",
+        "principal_id": "subject-1",
+        "account_id": "account-1",
+        "profile_id": "profile-1",
+        "household_id": "household-1",
+        "role": "owner",
+    }
+    principal = {
+        "principal_id": "subject-1",
+        "account_id": "account-1",
+        "household_id": "household-1",
+        "role": "owner",
+        "household_access_role": "owner",
+        "state": "active",
+    }
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: session)
+    monkeypatch.setattr(handler, "identity_profiles_table", Table("profile_id", [target]))
+    monkeypatch.setattr(handler, "principals_table", Table("principal_id", [principal]))
+    monkeypatch.setattr(handler, "PROFILE_AVATARS_BUCKET", "private-profile-avatars")
+    storage = ProfileAvatarStorage(image_data=None)
+    monkeypatch.setattr(handler, "s3_client", storage)
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _profile_id: ({"cloud_enabled": True}, None))
+
+    result = handler.put_profile_avatar(
+        {"body": json.dumps({"jpeg_base64": base64.b64encode(b"\xff\xd8\xffphoto").decode("ascii")})},
+        "/v1/profiles/profile-target/avatar",
+    )
+
+    assert result["statusCode"] == 200
+    assert json.loads(result["body"])["profile_id"] == "profile-target"
+
+
+def test_profile_user_avatar_replaces_manager_fallback_and_cannot_be_reversed(monkeypatch):
+    target = {
+        "profile_id": "profile-target",
+        "household_id": "household-1",
+        "profile_type": "adult",
+        "display_name": "Target",
+        "state": "active",
+    }
+    manager_session = {
+        "record_type": "access",
+        "principal_id": "subject-owner",
+        "account_id": "account-owner",
+        "profile_id": "profile-owner",
+        "household_id": "household-1",
+        "role": "owner",
+    }
+    self_session = {
+        **manager_session,
+        "principal_id": "subject-target",
+        "account_id": "account-target",
+        "profile_id": "profile-target",
+        "role": "adult",
+    }
+    session_state = {"value": manager_session}
+    principal = {
+        "principal_id": "subject-owner",
+        "account_id": "account-owner",
+        "household_id": "household-1",
+        "role": "owner",
+        "household_access_role": "owner",
+        "state": "active",
+    }
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: session_state["value"])
+    monkeypatch.setattr(handler, "identity_profiles_table", Table("profile_id", [target]))
+    monkeypatch.setattr(handler, "principals_table", Table("principal_id", [principal]))
+    monkeypatch.setattr(handler, "PROFILE_AVATARS_BUCKET", "private-profile-avatars")
+    storage = ProfileAvatarStorage(image_data=None)
+    monkeypatch.setattr(handler, "s3_client", storage)
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _profile_id: ({"cloud_enabled": True}, None))
+
+    def upload(image_data):
+        return handler.put_profile_avatar(
+            {"body": json.dumps({"jpeg_base64": base64.b64encode(image_data).decode("ascii")})},
+            "/v1/profiles/profile-target/avatar",
+        )
+
+    assert upload(b"\xff\xd8\xffmanager")["statusCode"] == 200
+    assert storage.metadata["uploader-authority"] == "household-manager"
+
+    session_state["value"] = self_session
+    assert upload(b"\xff\xd8\xffuser")["statusCode"] == 200
+    assert storage.metadata["uploader-authority"] == "self"
+
+    session_state["value"] = manager_session
+    manager_retry = upload(b"\xff\xd8\xffmanager-new")
+    assert manager_retry["statusCode"] == 409
+    assert json.loads(manager_retry["body"])["state"] == "profile_avatar_user_authoritative"
+    assert storage.image_data == b"\xff\xd8\xffuser"
+
+
+@pytest.mark.parametrize("target_household", ["household-1", "household-2"])
+def test_profile_avatar_write_denies_viewer_and_cross_household_manager(monkeypatch, target_household):
+    target = {
+        "profile_id": "profile-target",
+        "household_id": target_household,
+        "profile_type": "adult",
+        "display_name": "Target",
+        "state": "active",
+    }
+    is_manager = target_household == "household-2"
+    session = {
+        "record_type": "access",
+        "principal_id": "subject-1",
+        "account_id": "account-1",
+        "profile_id": "profile-1",
+        "household_id": "household-1",
+        "role": "owner" if is_manager else "adult",
+    }
+    principal = {
+        "principal_id": "subject-1",
+        "account_id": "account-1",
+        "household_id": "household-1",
+        "role": "owner" if is_manager else "adult",
+        "household_access_role": "owner" if is_manager else "member",
+        "state": "active",
+    }
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: session)
+    monkeypatch.setattr(handler, "identity_profiles_table", Table("profile_id", [target]))
+    monkeypatch.setattr(handler, "principals_table", Table("principal_id", [principal]))
+
+    result = handler.put_profile_avatar(
+        {"body": json.dumps({"jpeg_base64": base64.b64encode(b"\xff\xd8\xffphoto").decode("ascii")})},
+        "/v1/profiles/profile-target/avatar",
+    )
+
+    assert result["statusCode"] == 401
+    assert json.loads(result["body"])["state"] == "unauthorized"
+
+
+@pytest.mark.parametrize(("target", "is_granted"), [
+    ({
+        "profile_id": "profile-ungranted",
+        "household_id": "household-1",
+        "profile_type": "adult",
+        "display_name": "Ungranted",
+        "state": "active",
+    }, False),
+    ({
+        "profile_id": "profile-viewer",
+        "household_id": "household-2",
+        "profile_type": "adult",
+        "display_name": "Cross Household",
+        "state": "active",
+    }, True),
+])
+def test_profile_avatar_read_fails_closed_outside_exact_access(monkeypatch, target, is_granted):
+    source = {
+        "profile_id": "profile-1",
+        "household_id": "household-1",
+        "profile_type": "adult",
+        "display_name": "Source",
+        "state": "active",
+        "watching_profile_ids": [target["profile_id"]] if is_granted else [],
+    }
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "record_type": "access",
+        "principal_id": "subject-1",
+        "profile_id": "profile-1",
+        "household_id": "household-1",
+        "role": "adult",
+    })
+    monkeypatch.setattr(handler, "identity_profiles_table", Table("profile_id", [source, target]))
+    monkeypatch.setattr(handler, "principals_table", Table("principal_id", []))
+
+    result = handler.get_profile_avatar(
+        {}, f"/v1/profiles/{target['profile_id']}/avatar",
+    )
+
+    assert result["statusCode"] == 401
+    assert json.loads(result["body"])["state"] == "unauthorized"
 
 
 def test_canonical_member_deletion_repairs_only_a_missing_exact_owner_edge(monkeypatch):

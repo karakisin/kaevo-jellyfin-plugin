@@ -33,6 +33,8 @@ RESPONSE_START_TIMEOUT_SECONDS = 25
 RESPONSE_BODY_IDLE_TIMEOUT_SECONDS = 60
 HLS_REQUEST_MAX_SECONDS = 90
 CONNECTOR_PING_INTERVAL_SECONDS = 20
+FAMILY_SYNC_PING_INTERVAL_SECONDS = 20
+FAMILY_SYNC_ORDER_TTL_SECONDS = 12 * 60 * 60
 SAFE_RESPONSE_HEADERS = {"content-type", "content-length", "content-range", "accept-ranges", "cache-control"}
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
 SAFE_ITEM_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -243,9 +245,139 @@ class ConnectorRegistry:
         return sum(len(connector_channels) for connector_channels in self.channels.values())
 
 
+@dataclass
+class FamilySyncChannel:
+    websocket: WebSocket
+    claims: dict[str, Any]
+    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        async with self.send_lock:
+            await self.websocket.send_text(json.dumps(payload, separators=(",", ":")))
+
+
+class FamilySyncRegistry:
+    """In-memory live fan-out with durable HTTP progress as its fallback.
+
+    The relay currently runs as one bounded ECS task, so process-local ordering
+    matches the deployed ownership boundary. A task replacement drops sockets;
+    clients reconnect and recover from the existing durable projection rather
+    than treating this transient channel as storage.
+    """
+
+    def __init__(self, *, clock=time.time):
+        self.clock = clock
+        self.channels: dict[str, FamilySyncChannel] = {}
+        self.latest: dict[tuple[str, str, str], tuple[tuple[int, int], float]] = {}
+
+    def add(self, channel: FamilySyncChannel) -> str:
+        channel_id = str(uuid.uuid4())
+        self.channels[channel_id] = channel
+        return channel_id
+
+    def remove(self, channel_id: str) -> None:
+        self.channels.pop(channel_id, None)
+
+    def _prune_ordering(self, now: float) -> None:
+        expired = [key for key, (_, seen_at) in self.latest.items() if now - seen_at > FAMILY_SYNC_ORDER_TTL_SECONDS]
+        for key in expired:
+            self.latest.pop(key, None)
+
+    async def publish(self, sender: FamilySyncChannel, message: dict[str, Any]) -> int:
+        claims = sender.claims
+        sequence = message.get("sequence")
+        position_seconds = message.get("position_seconds")
+        runtime_seconds = message.get("runtime_seconds")
+        selected_ids = message.get("selected_viewer_profile_ids")
+        departed_ids = message.get("departed_viewer_profile_ids") or []
+        playback_state = str(message.get("playback_state") or "").strip().lower()
+
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or not 1 <= sequence <= 2_147_483_647:
+            raise ValueError("familySyncLiveSequenceInvalid")
+        if isinstance(position_seconds, bool) or not isinstance(position_seconds, (int, float)) or not 0 <= position_seconds <= 172_800:
+            raise ValueError("familySyncLivePositionInvalid")
+        if runtime_seconds is not None and (
+            isinstance(runtime_seconds, bool)
+            or not isinstance(runtime_seconds, (int, float))
+            or not position_seconds <= runtime_seconds <= 172_800
+        ):
+            raise ValueError("familySyncLiveRuntimeInvalid")
+        if not isinstance(selected_ids, list) or not selected_ids or len(selected_ids) > 64:
+            raise ValueError("familySyncLiveSelectionInvalid")
+        if not isinstance(departed_ids, list) or len(departed_ids) > 64:
+            raise ValueError("familySyncLiveSelectionInvalid")
+        if playback_state not in {"active", "paused", "stopped", "completed", "unknown"}:
+            raise ValueError("familySyncLiveStateInvalid")
+
+        selected = []
+        departed = []
+        for value in selected_ids:
+            profile_id = str(value or "").strip()
+            if not SAFE_IDENTIFIER.fullmatch(profile_id) or profile_id in selected:
+                raise ValueError("familySyncLiveSelectionInvalid")
+            selected.append(profile_id)
+        for value in departed_ids:
+            profile_id = str(value or "").strip()
+            if not SAFE_IDENTIFIER.fullmatch(profile_id) or profile_id in selected or profile_id in departed:
+                raise ValueError("familySyncLiveSelectionInvalid")
+            departed.append(profile_id)
+
+        source_profile_id = str(claims.get("profile_id") or "")
+        allowed_ids = set(claims.get("allowed_profile_ids") or [])
+        audience_ids = set(claims.get("audience_profile_ids") or [])
+        if source_profile_id not in selected or not set(selected + departed).issubset(allowed_ids):
+            raise ValueError("familySyncLiveSelectionUnauthorized")
+        if not set(selected + departed).issubset(audience_ids):
+            raise ValueError("familySyncLiveAudienceMismatch")
+
+        now = self.clock()
+        self._prune_ordering(now)
+        order = (int(claims["session_started_at_epoch_milliseconds"]), sequence)
+        household_id = str(claims["household_id"])
+        item_id = str(claims["item_id"])
+        recipients = [
+            channel for channel in self.channels.values()
+            if channel.claims.get("role") == "observer"
+            and channel.claims.get("household_id") == household_id
+            and channel.claims.get("profile_id") in audience_ids
+        ]
+        outbound = {
+            "type": "progress",
+            "provider": str(claims["provider"]),
+            "item_id": item_id,
+            "media_type": str(claims["media_type"]),
+            "session_id": str(claims["session_id"]),
+            "session_started_at_epoch_milliseconds": order[0],
+            "sequence": sequence,
+            "source_profile_id": source_profile_id,
+            "viewer_profile_ids": sorted(audience_ids),
+            "selected_viewer_profile_ids": sorted(selected),
+            "departed_viewer_profile_ids": sorted(departed),
+            "position_seconds": float(position_seconds),
+            "runtime_seconds": float(runtime_seconds) if runtime_seconds is not None else None,
+            "playback_state": playback_state,
+            "received_at_epoch_milliseconds": int(now * 1_000),
+        }
+        delivered = 0
+        for recipient in recipients:
+            recipient_profile_id = str(recipient.claims["profile_id"])
+            key = (household_id, item_id, recipient_profile_id)
+            previous = self.latest.get(key)
+            if previous is not None and order <= previous[0]:
+                continue
+            try:
+                await recipient.send_json(outbound)
+            except (RuntimeError, WebSocketDisconnect):
+                continue
+            self.latest[key] = (order, now)
+            delivered += 1
+        return delivered
+
+
 grants = GrantRegistry(SIGNING_KEY)
 connectors = ConnectorRegistry()
-app = FastAPI(title="Kaevo Playback Relay", version="0.2.12")
+family_sync = FamilySyncRegistry()
+app = FastAPI(title="Kaevo Playback Relay", version="0.2.13")
 
 
 @app.get("/health")
@@ -253,9 +385,10 @@ async def health() -> dict[str, Any]:
     return {
         "state": "ok",
         "service": "kaevo-playback-relay",
-        "version": "0.2.12",
+        "version": "0.2.13",
         "connectors": len(connectors.channels),
         "channels": connectors.channel_count,
+        "family_sync_channels": len(family_sync.channels),
     }
 
 
@@ -303,6 +436,97 @@ async def connector_socket(websocket: WebSocket, connector_id: str) -> None:
         connectors.remove(connector_id, channel_id)
         for request_id in list(channel.pending):
             await channel.fail_request(request_id, "connectorDisconnected", notify_connector=False)
+
+
+def validate_family_sync_ticket(ticket: str) -> dict[str, Any]:
+    claims = verify_signed_token(ticket, SIGNING_KEY)
+    if claims.get("type") != "family_sync_live" or claims.get("role") not in {"observer", "publisher"}:
+        raise ValueError("familySyncLiveTicketRequired")
+    for field in ("profile_id", "household_id", "installation_id"):
+        if not SAFE_IDENTIFIER.fullmatch(str(claims.get(field) or "")):
+            raise ValueError("familySyncLiveTicketMalformed")
+    if claims.get("role") == "publisher":
+        if claims.get("provider") != "jellyfin" or not SAFE_ITEM_ID.fullmatch(str(claims.get("item_id") or "")):
+            raise ValueError("familySyncLiveTicketMalformed")
+        for field in ("session_id",):
+            if not SAFE_IDENTIFIER.fullmatch(str(claims.get(field) or "")):
+                raise ValueError("familySyncLiveTicketMalformed")
+        if claims.get("media_type") not in {"movie", "episode", "other"}:
+            raise ValueError("familySyncLiveTicketMalformed")
+        started_at = claims.get("session_started_at_epoch_milliseconds")
+        allowed_ids = claims.get("allowed_profile_ids")
+        audience_ids = claims.get("audience_profile_ids")
+        if isinstance(started_at, bool) or not isinstance(started_at, int) or started_at <= 0:
+            raise ValueError("familySyncLiveTicketMalformed")
+        if not isinstance(allowed_ids, list) or not isinstance(audience_ids, list) or not audience_ids:
+            raise ValueError("familySyncLiveTicketMalformed")
+        if any(not SAFE_IDENTIFIER.fullmatch(str(value or "")) for value in allowed_ids + audience_ids):
+            raise ValueError("familySyncLiveTicketMalformed")
+        if not set(audience_ids).issubset(set(allowed_ids)):
+            raise ValueError("familySyncLiveTicketMalformed")
+    return claims
+
+
+@app.websocket("/v1/family-sync")
+async def family_sync_socket(websocket: WebSocket) -> None:
+    authorization = websocket.headers.get("authorization") or ""
+    ticket = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+    try:
+        claims = validate_family_sync_ticket(ticket)
+    except ValueError:
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
+    channel = FamilySyncChannel(websocket=websocket, claims=claims)
+    channel_id = family_sync.add(channel)
+
+    async def reader() -> None:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                raise WebSocketDisconnect()
+            raw = message.get("text")
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if payload.get("type") == "pong":
+                continue
+            if claims.get("role") != "publisher" or payload.get("type") != "progress":
+                await websocket.close(code=4403)
+                return
+            try:
+                await family_sync.publish(channel, payload)
+            except ValueError:
+                await websocket.close(code=4400)
+                return
+
+    async def heartbeat() -> None:
+        while True:
+            await asyncio.sleep(FAMILY_SYNC_PING_INTERVAL_SECONDS)
+            if time.time() >= int(claims.get("exp") or 0):
+                await websocket.close(code=4401)
+                return
+            await channel.send_json({"type": "ping"})
+
+    try:
+        receive_task = asyncio.create_task(reader())
+        heartbeat_task = asyncio.create_task(heartbeat())
+        done, pending = await asyncio.wait({receive_task, heartbeat_task}, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        for task in done:
+            task.result()
+    except WebSocketDisconnect:
+        pass
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        LOGGER.warning("family_sync_socket_failed category=%s", type(error).__name__)
+    finally:
+        family_sync.remove(channel_id)
 
 
 def split_grant_token(grant_token: str) -> str:

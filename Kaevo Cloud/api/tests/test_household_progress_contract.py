@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
 import json
 import os
 from pathlib import Path
@@ -84,10 +85,10 @@ def configure(monkeypatch):
     return source, events
 
 
-def request_body(*, selected_ids, sequence=1, position_seconds=600, session_started_at_epoch_milliseconds=1_784_000_000_000):
+def request_body(*, selected_ids, sequence=1, position_seconds=600, session_started_at_epoch_milliseconds=1_784_000_000_000, item_id=None, playback_state="active"):
     return {
         "provider": "jellyfin",
-        "item_id": "a" * 32,
+        "item_id": item_id or "a" * 32,
         "session_id": "play-session-001",
         "media_type": "movie",
         "session_started_at_epoch_milliseconds": session_started_at_epoch_milliseconds,
@@ -95,6 +96,7 @@ def request_body(*, selected_ids, sequence=1, position_seconds=600, session_star
         "position_seconds": position_seconds,
         "runtime_seconds": 7_200,
         "selected_viewer_profile_ids": selected_ids,
+        "playback_state": playback_state,
     }
 
 
@@ -112,6 +114,8 @@ def test_progress_projects_only_to_exact_authorized_viewers(monkeypatch):
     }
     stored = json.loads(events.items[("cloud-margaret-002", "household-progress#jellyfin#" + "a" * 32)]["metadata_json"])
     assert stored["viewer_profile_ids"] == ["cloud-jefferson-001", "cloud-margaret-002"]
+    assert stored["family_sync_profile_ids"] == ["cloud-jefferson-001", "cloud-margaret-002"]
+    assert stored["playback_state"] == "active"
     assert "display_name" not in stored
 
 
@@ -180,6 +184,7 @@ def test_departing_authorized_viewer_receives_only_its_final_checkpoint(monkeypa
     departed = json.loads(events.items[("cloud-margaret-002", "household-progress#jellyfin#" + "a" * 32)]["metadata_json"])
     assert departed["viewer_profile_ids"] == ["cloud-jefferson-001", "cloud-margaret-002"]
     assert departed["is_currently_selected"] is False
+    assert departed["playback_state"] == "stopped"
 
 
 def test_progress_read_returns_only_the_authenticated_profiles_rows(monkeypatch):
@@ -201,6 +206,7 @@ def test_progress_read_returns_only_the_authenticated_profiles_rows(monkeypatch)
             "position_seconds": 600.0,
             "runtime_seconds": 7200.0,
             "is_currently_selected": True,
+            "playback_state": "active",
             "updated_at": body["items"][0]["updated_at"],
         },
         {
@@ -208,6 +214,7 @@ def test_progress_read_returns_only_the_authenticated_profiles_rows(monkeypatch)
             "position_seconds": 600.0,
             "runtime_seconds": 7200.0,
             "is_currently_selected": True,
+            "playback_state": "active",
             "updated_at": body["items"][0]["updated_at"],
         },
     ]
@@ -219,9 +226,8 @@ def test_progress_read_keeps_an_authorized_viewer_checkpoint_after_a_solo_sessio
         source["profile_id"], "cloud-margaret-002",
     ]))})["statusCode"] == 202
 
-    # The source profile later writes a meaningful solo checkpoint. Its
-    # historical roster no longer names Margaret, while the current exact
-    # Who's Watching grant still authorizes this checkpoint projection.
+    # The source profile later writes a meaningful solo checkpoint. The exact
+    # item's explicit Family Sync membership remains intact.
     assert handler.save_household_progress({"body": json.dumps(request_body(
         selected_ids=[source["profile_id"]],
         position_seconds=720,
@@ -234,13 +240,133 @@ def test_progress_read_keeps_an_authorized_viewer_checkpoint_after_a_solo_sessio
     assert events.items[(source["profile_id"], "household-progress#jellyfin#" + "a" * 32)]
 
 
-def test_template_exposes_protected_household_progress_read_and_write_routes():
-    template = (HANDLER_PATH.parents[2] / "infra" / "template.yaml").read_text()
-    route_blocks = template.split("Path: /v1/household-progress")
+def test_independent_solo_histories_do_not_create_family_sync(monkeypatch):
+    source, events = configure(monkeypatch)
+    assert handler.save_household_progress({"body": json.dumps(request_body(
+        selected_ids=[source["profile_id"]],
+    ))})["statusCode"] == 202
 
-    assert len(route_blocks) == 3
-    assert "Method: POST" in route_blocks[1].split("\n\n", 1)[0]
-    assert "Method: GET" in route_blocks[2].split("\n\n", 1)[0]
+    event_key = "household-progress#jellyfin#" + "a" * 32
+    events.items[("cloud-margaret-002", event_key)] = {
+        "profile_id": "cloud-margaret-002",
+        "event_key": event_key,
+        "event_id": "independent-session",
+        "event_type": handler.HOUSEHOLD_PROGRESS_EVENT_TYPE,
+        "item_id": "a" * 32,
+        "source": "kaevo_household_sync",
+        "session_id": "margaret-solo",
+        "received_at": "2026-08-11T12:00:00Z",
+        "metadata_json": json.dumps({
+            "position_seconds": 1_200,
+            "runtime_seconds": 7_200,
+            "family_sync_profile_ids": [],
+            "is_currently_selected": False,
+            "playback_state": "stopped",
+        }),
+    }
+
+    item = json.loads(handler.get_household_progress({})["body"])["items"][0]
+    assert item["viewer_profile_ids"] == []
+    assert item["viewer_progress"] == []
+
+
+def test_family_sync_membership_does_not_carry_to_next_episode(monkeypatch):
+    source, _ = configure(monkeypatch)
+    assert handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[
+        source["profile_id"], "cloud-margaret-002",
+    ]))})["statusCode"] == 202
+    assert handler.save_household_progress({"body": json.dumps(request_body(
+        selected_ids=[source["profile_id"]],
+        item_id="b" * 32,
+        session_started_at_epoch_milliseconds=1_784_000_001_000,
+    ))})["statusCode"] == 202
+
+    items = {
+        entry["item_id"]: entry
+        for entry in json.loads(handler.get_household_progress({})["body"])["items"]
+    }
+    assert len(items["a" * 32]["viewer_progress"]) == 2
+    assert items["b" * 32]["viewer_profile_ids"] == []
+    assert items["b" * 32]["viewer_progress"] == []
+
+
+def decode_ticket_payload(ticket):
+    encoded = ticket.split(".", 1)[0]
+    return json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+
+
+def test_live_publisher_ticket_preserves_exact_item_audience(monkeypatch):
+    source, _ = configure(monkeypatch)
+    monkeypatch.setattr(handler, "PLAYBACK_GRANT_SIGNING_KEY", "x" * 32)
+    monkeypatch.setattr(handler, "PLAYBACK_RELAY_PUBLIC_URL", "https://relay.example")
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _: {
+        "profile_id": source["profile_id"],
+        "installation_id": "installation-001",
+    })
+    assert handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[
+        source["profile_id"], "cloud-margaret-002",
+    ]))})["statusCode"] == 202
+
+    ticket_request = request_body(selected_ids=[source["profile_id"]])
+    ticket_request["role"] = "publisher"
+    for field in ("sequence", "position_seconds", "runtime_seconds", "playback_state"):
+        ticket_request.pop(field)
+    result = handler.create_family_sync_live_ticket({"body": json.dumps(ticket_request)})
+
+    assert result["statusCode"] == 201
+    body = json.loads(result["body"])
+    assert body["websocket_url"] == "wss://relay.example/v1/family-sync"
+    claims = decode_ticket_payload(body["relay_ticket"])
+    assert claims["profile_id"] == source["profile_id"]
+    assert claims["installation_id"] == "installation-001"
+    assert claims["audience_profile_ids"] == ["cloud-jefferson-001", "cloud-margaret-002"]
+    assert claims["allowed_profile_ids"] == ["cloud-jefferson-001", "cloud-margaret-002"]
+    assert "display_name" not in claims
+
+
+def test_live_ticket_reuses_the_single_verified_dpop_session(monkeypatch):
+    source, _ = configure(monkeypatch)
+    monkeypatch.setattr(handler, "PLAYBACK_GRANT_SIGNING_KEY", "x" * 32)
+    monkeypatch.setattr(handler, "PLAYBACK_RELAY_PUBLIC_URL", "https://relay.example")
+    authentication_calls = []
+
+    def authenticate_once(_):
+        authentication_calls.append(True)
+        if len(authentication_calls) > 1:
+            return None
+        return {
+            "profile_id": source["profile_id"],
+            "installation_id": "installation-001",
+        }
+
+    monkeypatch.setattr(handler, "authenticated_app_session", authenticate_once)
+    result = handler.create_family_sync_live_ticket({"body": json.dumps({"role": "observer"})})
+
+    assert result["statusCode"] == 201
+    assert len(authentication_calls) == 1
+    claims = decode_ticket_payload(json.loads(result["body"])["relay_ticket"])
+    assert claims["installation_id"] == "installation-001"
+
+
+def test_live_ticket_rejects_ungranted_viewer(monkeypatch):
+    source, _ = configure(monkeypatch)
+    monkeypatch.setattr(handler, "PLAYBACK_GRANT_SIGNING_KEY", "x" * 32)
+    monkeypatch.setattr(handler, "PLAYBACK_RELAY_PUBLIC_URL", "https://relay.example")
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _: {
+        "profile_id": source["profile_id"],
+        "installation_id": "installation-001",
+    })
+    body = request_body(selected_ids=[source["profile_id"], "cloud-unrelated-003"])
+    body["role"] = "publisher"
+    result = handler.create_family_sync_live_ticket({"body": json.dumps(body)})
+    assert result["statusCode"] == 403
+    assert json.loads(result["body"])["state"] == "viewer_selection_not_authorized"
+
+
+def test_template_exposes_protected_household_progress_routes():
+    template = (HANDLER_PATH.parents[2] / "infra" / "template.yaml").read_text()
+    assert template.count("Path: /v1/household-progress\n") == 2
+    assert template.count("Path: /v1/household-progress/live-ticket\n") == 1
 
 
 def test_template_keeps_the_canonical_roster_query_grant_explicit():
