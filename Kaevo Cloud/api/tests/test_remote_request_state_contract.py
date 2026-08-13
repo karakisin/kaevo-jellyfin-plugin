@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
 import json
 import os
 from pathlib import Path
@@ -458,6 +459,14 @@ def test_prepare_completion_embeds_one_exact_short_lived_playback_grant(monkeypa
                 "playback_session_id": "session-1",
                 "mode": "transcode",
                 "max_bitrate": 20_000_000,
+                "trickplay": {
+                    "width": 320,
+                    "height": 180,
+                    "tile_width": 10,
+                    "tile_height": 10,
+                    "thumbnail_count": 40,
+                    "interval": 10000,
+                },
             }},
         }),
         f"/v1/remote-requests/{request_id}/complete",
@@ -471,6 +480,13 @@ def test_prepare_completion_embeds_one_exact_short_lived_playback_grant(monkeypa
     assert grant["expires_at"] - handler.epoch_now() <= 120
     assert grant["relay_base_url"].startswith("https://relay.test/v1/playback/")
     assert "grant" not in grant
+    assert stored["result"]["trickplay"]["width"] == 320
+
+    grant_path = grant["relay_base_url"].split("/v1/playback/", 1)[1]
+    grant_token = "".join(grant_path.split("/"))
+    encoded_claims = grant_token.split(".", 1)[0]
+    claims = json.loads(base64.urlsafe_b64decode(encoded_claims + "=" * (-len(encoded_claims) % 4)))
+    assert claims["trickplay"] == stored["result"]["trickplay"]
 
 
 def test_prepare_completion_does_not_grant_mismatched_item_or_bitrate(monkeypatch):

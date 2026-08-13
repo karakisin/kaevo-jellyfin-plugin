@@ -39,7 +39,58 @@ SAFE_RESPONSE_HEADERS = {"content-type", "content-length", "content-range", "acc
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
 SAFE_ITEM_ID = re.compile(r"^[0-9a-f]{32}$")
 SAFE_GRANT_CHUNK = re.compile(r"^[A-Za-z0-9._-]+$")
+SAFE_TRICKPLAY_TILE = re.compile(r"^[0-9]+\.jpg$")
 LOGGER = logging.getLogger("kaevo.relay")
+
+
+def bounded_trickplay_claim(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    bounds = {
+        "width": 8192,
+        "height": 8192,
+        "tile_width": 100,
+        "tile_height": 100,
+        "thumbnail_count": 1_000_000,
+        "interval": 3_600_000,
+    }
+    return set(value) == set(bounds) and all(
+        not isinstance(value.get(field), bool)
+        and isinstance(value.get(field), int)
+        and 1 <= value[field] <= maximum
+        for field, maximum in bounds.items()
+    )
+
+
+def authorize_playback_video_path(grant: dict[str, Any], video_path: str) -> None:
+    segments = video_path.strip("/").split("/")
+    granted_item_id = str(grant.get("item_id") or "").lower()
+    if not segments or not SAFE_ITEM_ID.fullmatch(granted_item_id) or segments[0].lower() != granted_item_id:
+        raise ValueError("playbackItemMismatch")
+    if len(segments) > 1 and segments[1].lower() == "trickplay":
+        trickplay = grant.get("trickplay")
+        sprite_name = segments[3] if len(segments) == 4 else ""
+        numbered_sprite = SAFE_TRICKPLAY_TILE.fullmatch(sprite_name)
+        maximum_sprite_count = 0
+        if bounded_trickplay_claim(trickplay):
+            thumbnails_per_sprite = trickplay["tile_width"] * trickplay["tile_height"]
+            maximum_sprite_count = (
+                trickplay["thumbnail_count"] + thumbnails_per_sprite - 1
+            ) // thumbnails_per_sprite
+        if (
+            len(segments) != 4
+            or not bounded_trickplay_claim(trickplay)
+            or not segments[2].isdigit()
+            or int(segments[2]) != trickplay["width"]
+            or not (
+                sprite_name.lower() == "tiles.m3u8"
+                or (
+                    numbered_sprite
+                    and int(sprite_name.removesuffix(".jpg")) < maximum_sprite_count
+                )
+            )
+        ):
+            raise ValueError("playbackTrickplayNotAuthorized")
 
 
 @dataclass
@@ -75,6 +126,8 @@ class GrantRegistry:
             raise ValueError("relayPlaybackGrantMalformed")
         max_bitrate = payload.get("max_bitrate")
         if isinstance(max_bitrate, bool) or not isinstance(max_bitrate, int) or not 1 <= max_bitrate <= 100_000_000:
+            raise ValueError("relayPlaybackGrantMalformed")
+        if "trickplay" in payload and not bounded_trickplay_claim(payload["trickplay"]):
             raise ValueError("relayPlaybackGrantMalformed")
         self.active[key] = ActiveGrant(payload=payload, activated_at=now, last_seen_at=now)
         return payload
@@ -565,6 +618,10 @@ async def playback(grant_path: str, video_path: str, request: Request):
         grant = grants.resolve(grant_token)
     except ValueError as error:
         raise HTTPException(status_code=401, detail=str(error)) from None
+    try:
+        authorize_playback_video_path(grant, video_path)
+    except ValueError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from None
     connector_id = str(grant.get("connector_id") or "")
     started_at = time.monotonic()
     channel = await connectors.wait_for_capacity(connector_id)

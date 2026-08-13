@@ -17,6 +17,7 @@ from kaevo_relay.app import (
     FamilySyncRegistry,
     GrantRegistry,
     MAX_CHUNK_BYTES,
+    authorize_playback_video_path,
     grant_token_from_path,
     rewrite_hls_playlist,
     split_grant_token,
@@ -46,6 +47,14 @@ def playback_payload():
         "playback_session_id": "session-1",
         "mode": "transcode",
         "max_bitrate": 8_000_000,
+        "trickplay": {
+            "width": 320,
+            "height": 180,
+            "tile_width": 10,
+            "tile_height": 10,
+            "thumbnail_count": 40,
+            "interval": 10000,
+        },
         "nbf": 995,
         "exp": 1120,
     }
@@ -76,6 +85,22 @@ def test_connector_ticket_cannot_be_used_as_playback_grant():
     signed = token({"v": 1, "type": "connector_relay", "connector_id": "connector-1", "nbf": 995, "exp": 1100})
     with pytest.raises(ValueError, match="relayPlaybackGrantRequired"):
         registry.resolve(signed)
+
+
+def test_playback_path_is_bound_to_exact_item_and_sprite_geometry():
+    grant = playback_payload()
+    item_id = grant["item_id"]
+    authorize_playback_video_path(grant, f"{item_id}/master.m3u8")
+    authorize_playback_video_path(grant, f"{item_id}/Trickplay/320/tiles.m3u8")
+    authorize_playback_video_path(grant, f"{item_id}/Trickplay/320/0.jpg")
+    with pytest.raises(ValueError, match="playbackItemMismatch"):
+        authorize_playback_video_path(grant, f"{'f' * 32}/master.m3u8")
+    with pytest.raises(ValueError, match="playbackTrickplayNotAuthorized"):
+        authorize_playback_video_path(grant, f"{item_id}/Trickplay/640/0.jpg")
+    with pytest.raises(ValueError, match="playbackTrickplayNotAuthorized"):
+        authorize_playback_video_path(grant, f"{item_id}/Trickplay/320/video.ts")
+    with pytest.raises(ValueError, match="playbackTrickplayNotAuthorized"):
+        authorize_playback_video_path(grant, f"{item_id}/Trickplay/320/1.jpg")
 
 
 def family_sync_claims(*, role, profile_id="profile-1"):
@@ -334,7 +359,7 @@ async def test_playback_streams_media_chunk_without_body_ack(monkeypatch):
 
     class StaticGrantRegistry:
         def resolve(self, _token):
-            return {"connector_id": "connector-1"}
+            return playback_payload()
 
     monkeypatch.setattr(relay_module, "grants", StaticGrantRegistry())
     monkeypatch.setattr(relay_module, "connectors", registry)
@@ -387,7 +412,7 @@ async def test_split_grant_route_rewrites_hls_response_for_avfoundation(monkeypa
     class StaticGrantRegistry:
         def resolve(self, candidate):
             assert candidate == signed
-            return {"connector_id": "connector-1"}
+            return playback_payload()
 
     monkeypatch.setattr(relay_module, "grants", StaticGrantRegistry())
     monkeypatch.setattr(relay_module, "connectors", registry)
@@ -431,7 +456,7 @@ async def test_repeated_head_playback_requests_release_connector_slots(monkeypat
 
     class StaticGrantRegistry:
         def resolve(self, _token):
-            return {"connector_id": "connector-1"}
+            return playback_payload()
 
     monkeypatch.setattr(relay_module, "grants", StaticGrantRegistry())
     monkeypatch.setattr(relay_module, "connectors", registry)

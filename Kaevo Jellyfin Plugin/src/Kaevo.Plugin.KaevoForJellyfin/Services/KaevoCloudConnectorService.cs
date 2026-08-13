@@ -19,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.90";
+    private const string PluginVersion = "0.2.91";
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
@@ -2239,6 +2239,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var remux = source.TryGetProperty("SupportsDirectStream", out var streamValue) && streamValue.GetBoolean();
         var mode = compatibilityPlayer ? "direct_play" : remux ? "remux" : "transcode";
         var tracks = KaevoPlaybackTrackCatalog.FromMediaSource(source);
+        var trickplay = KaevoPlaybackTrickplayCatalog.FromItem(root, mediaSourceId)
+            ?? await ReadPlaybackTrickplayMetadataAsync(
+                configuration,
+                secrets,
+                jellyfinUserId,
+                itemId,
+                mediaSourceId,
+                cancellationToken).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
             requestId = request.RequestId,
@@ -2254,9 +2262,46 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 audio_tracks = tracks.AudioTracks,
                 subtitle_tracks = tracks.SubtitleTracks,
                 selected_audio_stream_index = audioStreamIndex ?? tracks.SelectedAudioStreamIndex,
-                selected_subtitle_stream_index = subtitleStreamIndex
+                selected_subtitle_stream_index = subtitleStreamIndex,
+                trickplay
             }
         }, JsonOptions), false);
+    }
+
+    private async Task<KaevoPlaybackTrickplayMetadata?> ReadPlaybackTrickplayMetadataAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string jellyfinUserId,
+        string itemId,
+        string mediaSourceId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var item = await SendLocalAsync(
+                configuration,
+                secrets,
+                HttpMethod.Get,
+                $"/Users/{Uri.EscapeDataString(jellyfinUserId)}/Items/{Uri.EscapeDataString(itemId)}?Fields=Trickplay&EnableImages=false",
+                null,
+                null,
+                cancellationToken).ConfigureAwait(false);
+            return KaevoPlaybackTrickplayCatalog.FromItem(item.Payload, mediaSourceId);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (InvalidOperationException)
+        {
+            // Trickplay is optional. Playback preparation remains valid when
+            // this Jellyfin version or library item has no sprite catalog.
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private async Task<CommandResult> ReadArtworkAsync(

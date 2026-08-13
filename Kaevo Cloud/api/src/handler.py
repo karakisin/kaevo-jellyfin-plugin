@@ -12522,9 +12522,30 @@ def create_remote_command(event):
     })
 
 
+def _bounded_trickplay_metadata(value):
+    """Return only the exact bounded sprite geometry safe for a relay grant."""
+    if not isinstance(value, dict):
+        return None
+    bounds = {
+        "width": 8192,
+        "height": 8192,
+        "tile_width": 100,
+        "tile_height": 100,
+        "thumbnail_count": 1_000_000,
+        "interval": 3_600_000,
+    }
+    normalized = {}
+    for field, maximum in bounds.items():
+        candidate = value.get(field)
+        if isinstance(candidate, bool) or not isinstance(candidate, int) or not 1 <= candidate <= maximum:
+            return None
+        normalized[field] = candidate
+    return normalized
+
+
 def _issued_playback_grant(
     *, profile_id, device_id, item_id, media_source_id,
-    playback_session_id, mode, max_bitrate, connector,
+    playback_session_id, mode, max_bitrate, connector, trickplay=None,
 ):
     """Mint one exact, short-lived relay capability after caller validation."""
     pairing_v3_connector = pairing_v3_connector_can_issue_playback_grants(connector)
@@ -12550,6 +12571,9 @@ def _issued_playback_grant(
         "nbf": now - 5,
         "exp": now + PLAYBACK_GRANT_TTL_SECONDS,
     }
+    normalized_trickplay = _bounded_trickplay_metadata(trickplay)
+    if normalized_trickplay is not None:
+        payload["trickplay"] = normalized_trickplay
     try:
         payload = (
             pairing_v3_playback_grant_payload(payload)
@@ -12630,6 +12654,7 @@ def create_playback_grant(event):
         mode=mode,
         max_bitrate=max_bitrate,
         connector=connector,
+        trickplay=body.get("trickplay"),
     )
     if issued is None:
         return response(409, {"state": "connector_unavailable"})
@@ -12708,6 +12733,7 @@ def _completion_with_embedded_playback_grant(item, response_payload):
         mode=mode,
         max_bitrate=max_bitrate,
         connector=connector,
+        trickplay=result.get("trickplay"),
     )
     if issued is None or not issued.get("relay_base_url"):
         return response_payload
