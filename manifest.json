@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.91.0",
+        "changelog": "Carries exact bounded Jellyfin trickplay metadata through Kaevo Cloud so remote playback can display grant-authorized sprite previews without changing transport or controls.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.91/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "2724907d307aa597c2b945706cc97fa8",
+        "timestamp": "2026-08-13T07:52:15Z"
+      },
+      {
         "version": "0.2.90.0",
         "changelog": "Attributes playback progress to each switched profile's exact Jellyfin user so Continue Watching remains profile-specific.",
         "targetAbi": "10.11.0.0",
