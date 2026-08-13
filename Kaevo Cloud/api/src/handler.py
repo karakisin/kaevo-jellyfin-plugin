@@ -12165,6 +12165,74 @@ def _authorized_seerr_request_query(profile_id, query):
     return scoped, ""
 
 
+def _profile_scoped_seerr_response(profile_id, request_payload, response_payload):
+    """Remove other members' request records from one Seerr response.
+
+    Request-list queries are already scoped before they reach the connector,
+    but Seerr media-detail responses can embed ``mediaInfo.requests`` for
+    multiple users.  Those records also drive the iOS download projection, so
+    the Cloud boundary must apply the same canonical Owner-or-exact-user rule
+    before storing or returning a connector completion.  Provider display
+    names and client-supplied ids are never used for this decision.
+    """
+    if not isinstance(request_payload, dict):
+        return response_payload
+    if str(request_payload.get("provider") or "").lower() != "seerr":
+        return response_payload
+    if not isinstance(response_payload, (dict, list)):
+        return response_payload
+
+    scoped_query, _reason = _authorized_seerr_request_query(profile_id, {})
+    if scoped_query is None:
+        exact_seerr_user_id = None
+        fail_closed = True
+    else:
+        exact_seerr_user_id = str(scoped_query.get("requestedBy") or "").strip()
+        # No requestedBy constraint is the exact canonical Owner scope.
+        if not exact_seerr_user_id:
+            return response_payload
+        fail_closed = False
+
+    def request_belongs_to_profile(record):
+        if fail_closed or not isinstance(record, dict):
+            return False
+        requester = record.get("requestedBy")
+        if not isinstance(requester, dict):
+            return False
+        requester_id = _normalized_seerr_user_id(requester.get("id"))
+        return bool(requester_id) and hmac.compare_digest(
+            requester_id, exact_seerr_user_id,
+        )
+
+    def sanitize(value):
+        if isinstance(value, list):
+            return [sanitize(entry) for entry in value]
+        if not isinstance(value, dict):
+            return value
+
+        sanitized = {key: sanitize(entry) for key, entry in value.items()}
+        media_info = sanitized.get("mediaInfo")
+        if isinstance(media_info, dict) and isinstance(media_info.get("requests"), list):
+            media_info["requests"] = [
+                record for record in media_info["requests"]
+                if request_belongs_to_profile(record)
+            ]
+
+        # Defensively preserve the same scope if a Seerr request-list payload
+        # reaches completion without the provider honoring requestedBy.
+        if (
+            str(request_payload.get("path") or "") == "/api/v1/request"
+            and isinstance(sanitized.get("results"), list)
+        ):
+            sanitized["results"] = [
+                record for record in sanitized["results"]
+                if request_belongs_to_profile(record)
+            ]
+        return sanitized
+
+    return sanitize(response_payload)
+
+
 def _authorized_seerr_requester_for_command(profile_id, connector_id):
     """Return the exact bound Seerr user for one protected create command.
 
@@ -12349,7 +12417,10 @@ def create_remote_command(event):
         "seerr.create_request",
         "sonarr.episode_inventory",
     }
-    owner_authorized_operations = {"downloaders.set_queue_state"}
+    owner_authorized_operations = {
+        "downloaders.set_queue_state",
+        "sonarr.search_episodes",
+    }
     switch_authorized_operations = {
         "jellyfin.prepare_playback",
         "jellyfin.playback_started",
@@ -12665,10 +12736,14 @@ def get_remote_request(event, path):
         request_payload = json.loads(str(item.get("request_json") or "{}"))
     except json.JSONDecodeError:
         request_payload = {}
+    owner_download_command_paths = {
+        "/commands/downloaders.set_queue_state",
+        "/commands/sonarr.search_episodes",
+    }
     is_owner_download_command = (
         isinstance(request_payload, dict)
         and request_payload.get("method") == "COMMAND"
-        and request_payload.get("path") == "/commands/downloaders.set_queue_state"
+        and request_payload.get("path") in owner_download_command_paths
     )
     if is_owner_download_command:
         owner_error = authorize_protected_owner_download_command(event, profile_id)
@@ -12828,6 +12903,11 @@ def complete_remote_request(event, path, *, pairing_v3=False):
     response_payload = body.get("response")
     if response_payload is None:
         response_payload = {}
+    response_payload = _profile_scoped_seerr_response(
+        str(item.get("profile_id") or ""),
+        parse_json_field(item.get("request_json"), {}),
+        response_payload,
+    )
     response_payload = _completion_with_embedded_playback_grant(
         item, response_payload,
     )

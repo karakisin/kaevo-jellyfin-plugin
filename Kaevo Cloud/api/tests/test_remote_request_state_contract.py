@@ -604,6 +604,75 @@ def test_owner_seerr_request_list_uses_exact_membership_without_personal_binding
     assert query == {"take": 50}
 
 
+def test_member_seerr_detail_completion_keeps_only_exact_requester(monkeypatch):
+    request_id = "member-seerr-detail"
+    item = request_item(request_id, "in_progress")
+    item["profile_id"] = "profile-member"
+    item["request_json"] = json.dumps({
+        "provider": "seerr",
+        "method": "GET",
+        "path": "/api/v1/tv/123",
+        "query": {},
+    })
+    table = FakeRemoteRequests([item])
+    monkeypatch.setattr(handler, "remote_requests_table", table)
+    monkeypatch.setattr(handler, "require_connector_auth", lambda _event, connector_id: connector_id == "connector-1")
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable({
+        "profile_id": "profile-member",
+        "state": "active",
+        "seerr_binding_state": "active",
+        "seerr_user_id": "42",
+        "household_access_role": "member",
+    }))
+
+    completed = handler.complete_remote_request(event({
+        "connector_id": "connector-1",
+        "response": {
+            "id": 123,
+            "mediaInfo": {"requests": [
+                {"id": 1, "requestedBy": {"id": 42}},
+                {"id": 2, "requestedBy": {"id": 99}},
+            ]},
+        },
+    }), f"/v1/remote-requests/{request_id}/complete")
+
+    assert completed["statusCode"] == 200
+    stored = json.loads(table.items[request_id]["response_json"])
+    assert [record["id"] for record in stored["mediaInfo"]["requests"]] == [1]
+
+
+def test_owner_seerr_detail_completion_keeps_household_requests(monkeypatch):
+    request_id = "owner-seerr-detail"
+    item = request_item(request_id, "in_progress")
+    item["profile_id"] = "profile-owner"
+    item["request_json"] = json.dumps({
+        "provider": "seerr",
+        "method": "GET",
+        "path": "/api/v1/tv/123",
+        "query": {},
+    })
+    table = FakeRemoteRequests([item])
+    monkeypatch.setattr(handler, "remote_requests_table", table)
+    monkeypatch.setattr(handler, "require_connector_auth", lambda _event, connector_id: connector_id == "connector-1")
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable({
+        "profile_id": "profile-owner",
+        "state": "active",
+        "household_access_role": "owner",
+    }))
+
+    completed = handler.complete_remote_request(event({
+        "connector_id": "connector-1",
+        "response": {"mediaInfo": {"requests": [
+            {"id": 1, "requestedBy": {"id": 42}},
+            {"id": 2, "requestedBy": {"id": 99}},
+        ]}},
+    }), f"/v1/remote-requests/{request_id}/complete")
+
+    assert completed["statusCode"] == 200
+    stored = json.loads(table.items[request_id]["response_json"])
+    assert [record["id"] for record in stored["mediaInfo"]["requests"]] == [1, 2]
+
+
 def test_remote_metadata_request_enforces_admin_scope_before_queueing(monkeypatch):
     table = FakeRemoteRequests([])
     monkeypatch.setattr(handler, "remote_requests_table", table)

@@ -152,6 +152,70 @@ def test_downloader_queue_command_requires_owner_capability(monkeypatch):
     assert denied["statusCode"] == 403
 
 
+def test_sonarr_episode_search_requires_owner_and_owner_can_poll(monkeypatch):
+    class RemoteRequests:
+        def __init__(self):
+            self.items = {}
+
+        def get_item(self, *, Key):
+            item = self.items.get(Key["request_id"])
+            return {"Item": dict(item)} if item else {}
+
+        def put_item(self, *, Item, **_):
+            self.items[Item["request_id"]] = dict(Item)
+
+    requests = RemoteRequests()
+    monkeypatch.setattr(handler, "remote_requests_table", requests)
+    monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
+    monkeypatch.setattr(
+        handler,
+        "authorize_protected_owner_download_command",
+        lambda _event, profile_id: (
+            None
+            if profile_id == "owner-profile"
+            else handler.response(403, {"state": "owner_required"})
+        ),
+    )
+    monkeypatch.setattr(
+        handler,
+        "latest_online_connector_for_profile",
+        lambda _: {"connector_id": "connector-1"},
+    )
+
+    created = handler.create_remote_command({
+        "body": json.dumps({
+            "profile_id": "owner-profile",
+            "operation": "sonarr.search_episodes",
+            "parameters": {"episode_ids": [33, 22, 33]},
+            "idempotency_key": "owner-sonarr-search-1",
+        }),
+    })
+    assert created["statusCode"] == 202
+    request_id, queued = next(iter(requests.items.items()))
+    assert json.loads(queued["request_json"])["path"] == "/commands/sonarr.search_episodes"
+    assert json.loads(queued["request_json"])["body"] == {"episode_ids": [22, 33]}
+
+    denied = handler.create_remote_command({
+        "body": json.dumps({
+            "profile_id": "member-profile",
+            "operation": "sonarr.search_episodes",
+            "parameters": {"episode_ids": [22]},
+            "idempotency_key": "member-sonarr-search-1",
+        }),
+    })
+    assert denied["statusCode"] == 403
+
+    monkeypatch.setattr(
+        handler,
+        "require_profile_auth",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("owner Sonarr polling must retain owner authorization")
+        ),
+    )
+    polled = handler.get_remote_request({}, f"/v1/remote-requests/{request_id}")
+    assert polled["statusCode"] == 200
+
+
 def test_protected_owner_download_command_uses_exact_same_household_profiles(monkeypatch):
     class Profiles:
         def __init__(self):
