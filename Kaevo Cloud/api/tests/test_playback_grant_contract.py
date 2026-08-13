@@ -20,6 +20,16 @@ def event(body):
     return {"headers": {"x-kaevo-dev-key": "dev-key"}, "body": json.dumps(body)}
 
 
+class Profiles:
+    def __init__(self, records):
+        self.records = {item["profile_id"]: dict(item) for item in records}
+
+    def get_item(self, *, Key, ConsistentRead):
+        assert ConsistentRead is True
+        item = self.records.get(Key["profile_id"])
+        return {"Item": dict(item)} if item else {}
+
+
 def test_grant_is_short_lived_bound_and_contains_no_local_url_or_secret(monkeypatch):
     monkeypatch.setattr(handler, "DEV_API_KEY", "dev-key")
     monkeypatch.setattr(handler, "PLAYBACK_GRANT_SIGNING_KEY", "x" * 48)
@@ -42,6 +52,63 @@ def test_grant_is_short_lived_bound_and_contains_no_local_url_or_secret(monkeypa
     grant_path = body["relay_base_url"].split("/v1/playback/", 1)[1]
     assert "".join(grant_path.split("/")) == body["grant"]
     assert max(map(len, grant_path.split("/"))) <= 180
+
+
+def test_grant_reuses_one_verified_session_for_exact_switch_target(monkeypatch):
+    monkeypatch.setattr(handler, "DEV_API_KEY", "")
+    monkeypatch.setattr(handler, "PLAYBACK_GRANT_SIGNING_KEY", "x" * 48)
+    monkeypatch.setattr(handler, "PLAYBACK_RELAY_PUBLIC_URL", "https://relay.test")
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles([
+        {
+            "profile_id": "profile-source",
+            "household_id": "household-1",
+            "state": "active",
+            "switch_profile_ids": ["profile-target"],
+        },
+        {
+            "profile_id": "profile-target",
+            "household_id": "household-1",
+            "state": "active",
+        },
+    ]))
+    authentication_count = 0
+
+    def authenticate_once(_event):
+        nonlocal authentication_count
+        authentication_count += 1
+        assert authentication_count == 1
+        return {
+            "record_type": "access",
+            "profile_id": "profile-source",
+            "household_id": "household-1",
+            "device_id": "device-1",
+        }
+
+    monkeypatch.setattr(handler, "authenticated_app_session", authenticate_once)
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _: ({
+        "cloud_enabled": True,
+        "subscription_state": "active",
+    }, None))
+    monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda _: {
+        "connector_id": "connector-1",
+        "auth_state": "active",
+        "playback_grant_key": "h" * 48,
+    })
+
+    result = handler.create_playback_grant({
+        "headers": {"authorization": "Bearer protected"},
+        "body": json.dumps({
+            "profile_id": "profile-target",
+            "device_id": "device-1",
+            "item_id": "a" * 32,
+            "media_source_id": "source-1",
+            "playback_session_id": "session-1",
+            "mode": "transcode",
+        }),
+    })
+
+    assert result["statusCode"] == 201
+    assert authentication_count == 1
 
 
 def test_grant_requires_active_cloud_subscription(monkeypatch):

@@ -308,6 +308,63 @@ def test_switch_auth_rejects_managed_kid_without_exact_owner_pointer(monkeypatch
     assert handler.require_profile_switch_auth({}, "profile-kid") is False
 
 
+def test_prepare_command_reuses_verified_switch_session_for_device_binding(monkeypatch):
+    class Profiles:
+        records = {
+            "profile-source": {
+                "profile_id": "profile-source",
+                "household_id": "household-1",
+                "state": "active",
+                "switch_profile_ids": ["profile-target"],
+            },
+            "profile-target": {
+                "profile_id": "profile-target",
+                "household_id": "household-1",
+                "state": "active",
+            },
+        }
+
+        def get_item(self, *, Key, ConsistentRead):
+            assert ConsistentRead is True
+            item = self.records.get(Key["profile_id"])
+            return {"Item": dict(item)} if item else {}
+
+    table = FakeRemoteRequests([])
+    monkeypatch.setattr(handler, "remote_requests_table", table)
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
+    monkeypatch.setattr(handler, "latest_online_connector_for_profile", lambda _: {
+        "connector_id": "connector-1",
+    })
+    authentication_count = 0
+
+    def authenticate_once(_event):
+        nonlocal authentication_count
+        authentication_count += 1
+        assert authentication_count == 1
+        return {
+            "record_type": "access",
+            "profile_id": "profile-source",
+            "household_id": "household-1",
+            "device_id": "device-1",
+        }
+
+    monkeypatch.setattr(handler, "authenticated_app_session", authenticate_once)
+    result = handler.create_remote_command(event({
+        "profile_id": "profile-target",
+        "operation": "jellyfin.prepare_playback",
+        "parameters": {
+            "device_id": "device-1",
+            "item_id": "a" * 32,
+            "max_bitrate": 40_000_000,
+        },
+        "idempotency_key": "prepare-target-1",
+    }))
+
+    assert result["statusCode"] == 202
+    assert authentication_count == 1
+    assert len(table.items) == 1
+
+
 def test_expired_pending_request_cannot_be_claimed(monkeypatch):
     table = FakeRemoteRequests([request_item("expired", "pending", handler.epoch_now() - 1)])
     monkeypatch.setattr(handler, "remote_requests_table", table)

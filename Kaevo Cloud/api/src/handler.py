@@ -6023,24 +6023,14 @@ def _session_authorizes_parent_managed_switch(session, source, target, household
     ) for required_profile_id in (source_profile_id, target_profile_id))
 
 
-def require_profile_switch_auth(event, profile_id):
-    """Authorize the signed-in profile or one exact switch-granted target.
+def _verified_session_authorizes_profile_switch(session, profile_id):
+    """Authorize one exact target from an already-verified app session.
 
-    Profile Switching changes the viewing/content identity, not the Cognito or
-    household principal behind the protected app session.  Media reads and
-    playback commands may therefore act as an explicitly granted target while
-    account, device, settings, and administrative routes continue to require
-    the session's own profile.  Every non-self decision is a strongly-read,
-    immutable-ID edge; a display name or household roster never grants access.
+    Protected DPoP proofs are single-use.  Callers which also need the
+    installation or device binding must therefore reuse this verified session
+    instead of authenticating the same request a second time.
     """
     target_profile_id = str(profile_id or "").strip()
-    if require_dev_key(event):
-        return True
-    # A protected request's DPoP proof is one-time. Authenticate exactly once
-    # and reuse that verified session for both the self and switch-target
-    # decisions. A second authentication would correctly reject the consumed
-    # JTI as a replay.
-    session = authenticated_app_session(event)
     source_profile_id = str((session or {}).get("profile_id") or "").strip()
     household_id = str((session or {}).get("household_id") or "").strip()
     if not session or not target_profile_id or not source_profile_id:
@@ -6080,6 +6070,28 @@ def require_profile_switch_auth(event, profile_id):
     return _session_authorizes_parent_managed_switch(
         session, source, target, household_id,
     )
+
+
+def authorize_profile_switch_session(event, profile_id):
+    """Return one authorization decision and its single verified session."""
+    if require_dev_key(event):
+        return True, None
+    session = authenticated_app_session(event)
+    return _verified_session_authorizes_profile_switch(session, profile_id), session
+
+
+def require_profile_switch_auth(event, profile_id):
+    """Authorize the signed-in profile or one exact switch-granted target.
+
+    Profile Switching changes the viewing/content identity, not the Cognito or
+    household principal behind the protected app session.  Media reads and
+    playback commands may therefore act as an explicitly granted target while
+    account, device, settings, and administrative routes continue to require
+    the session's own profile.  Every non-self decision is a strongly-read,
+    immutable-ID edge; a display name or household roster never grants access.
+    """
+    authorized, _ = authorize_profile_switch_session(event, profile_id)
+    return authorized
 
 
 def authorize_protected_owner_download_command(event, profile_id):
@@ -6576,19 +6588,22 @@ def _household_progress_seconds(value):
     return seconds
 
 
-def _household_progress_authorized_source(event):
-    """Resolve the protected session's exact active Cloud profile.
+def _household_progress_authorized_source(event, requested_profile_id=""):
+    """Resolve the exact self or switch-authorized active Cloud profile.
 
-    This deliberately does not accept a source profile from the request. The
-    app session is the authority, while the canonical profile record supplies
-    the household edge used for the explicit Who's Watching audience.
+    The request may identify an immutable target, but the one verified app
+    session and the canonical switch graph remain the authority.  Older
+    clients which omit the target continue to resolve to the session profile.
     """
     if identity_profiles_table is None:
         return None, None, None, response(503, {"state": "identity_context_storage_unavailable"})
     session = authenticated_app_session(event)
-    profile_id = str((session or {}).get("profile_id") or "").strip()
-    if not profile_id:
+    session_profile_id = str((session or {}).get("profile_id") or "").strip()
+    profile_id = str(requested_profile_id or session_profile_id).strip()
+    if not session_profile_id or not profile_id:
         return None, None, None, response(401, {"state": "protected_session_required"})
+    if not _verified_session_authorizes_profile_switch(session, profile_id):
+        return None, None, None, response(403, {"state": "profile_access_not_authorized"})
     source = identity_profiles_table.get_item(
         Key={"profile_id": profile_id}, ConsistentRead=True,
     ).get("Item")
@@ -6732,7 +6747,9 @@ def create_family_sync_live_ticket(event):
     body = parse_json_body(event)
     if not isinstance(body, dict):
         return response(400, {"state": "bad_request", "message": "invalid JSON body"})
-    source_profile, household_id, session, failure = _household_progress_authorized_source(event)
+    source_profile, household_id, session, failure = _household_progress_authorized_source(
+        event, body.get("profile_id"),
+    )
     if failure:
         return failure
     installation_id = str((session or {}).get("installation_id") or "").strip()
@@ -6850,7 +6867,9 @@ def save_household_progress(event):
     body = parse_json_body(event)
     if body is None:
         return response(400, {"state": "bad_request", "message": "invalid JSON body"})
-    source_profile, household_id, _, failure = _household_progress_authorized_source(event)
+    source_profile, household_id, _, failure = _household_progress_authorized_source(
+        event, body.get("profile_id"),
+    )
     if failure:
         return failure
     progress, error = _household_progress_payload(
@@ -7012,15 +7031,22 @@ def _household_progress_viewer_snapshots(*, source_profile, household_id, item, 
     # Exact-item membership is the discovery boundary. Current owner-managed
     # grants remain the authorization boundary, so a revoked profile is never
     # exposed even if it remains in historical metadata.
-    viewer_ids = sorted({
+    family_viewer_ids = {
         str(value or "").strip() for value in family_sync_ids
         if str(value or "").strip() in allowed_ids
-    })
-    if len(viewer_ids) < 2:
-        return []
+    }
+    # The active profile's own row is always part of its authoritative
+    # Continue Watching projection, even for ordinary solo playback. Family
+    # Sync peers remain discoverable only when this exact item has an explicit
+    # multi-viewer relationship. Omitting the active solo checkpoint forced
+    # iOS to fall back to device-local history, which made two phones render
+    # different rows for the same canonical profile.
+    viewer_ids = {active_profile_id}
+    if len(family_viewer_ids) >= 2:
+        viewer_ids.update(family_viewer_ids)
 
     snapshots = []
-    for viewer_profile_id in viewer_ids:
+    for viewer_profile_id in sorted(viewer_ids):
         candidate = item if viewer_profile_id == active_profile_id else events_table.get_item(
             Key={"profile_id": viewer_profile_id, "event_key": event_key},
             ConsistentRead=True,
@@ -7051,7 +7077,9 @@ def get_household_progress(event):
     """Return the active profile's rows plus exact authorized viewer checkpoints."""
     if events_table is None:
         return response(503, {"state": "household_progress_storage_unavailable"})
-    source_profile, household_id, _, failure = _household_progress_authorized_source(event)
+    source_profile, household_id, _, failure = _household_progress_authorized_source(
+        event, query_params(event).get("profile_id"),
+    )
     if failure:
         return failure
     profile_id = str(source_profile.get("profile_id") or "")
@@ -7064,10 +7092,17 @@ def get_household_progress(event):
         Limit=100,
     )
     items = []
+    revision_components = []
     for item in result.get("Items", []):
         if item.get("event_type") != HOUSEHOLD_PROGRESS_EVENT_TYPE:
             continue
         metadata = parse_json_field(item.get("metadata_json"), {})
+        revision_components.append("|".join((
+            str(item.get("event_key") or ""),
+            str(item.get("session_started_at_epoch_milliseconds") or ""),
+            str(item.get("sequence") or ""),
+            str(item.get("received_at") or ""),
+        )))
         items.append({
             "item_id": str(item.get("item_id") or ""),
             "provider": "jellyfin",
@@ -7084,7 +7119,14 @@ def get_household_progress(event):
                 metadata=metadata,
             ),
         })
-    return response(200, {"profile_id": profile_id, "items": items})
+    revision = hashlib.sha256(
+        "\n".join(sorted(revision_components)).encode("utf-8")
+    ).hexdigest()[:24]
+    return response(200, {
+        "profile_id": profile_id,
+        "revision": revision,
+        "items": items,
+    })
 
 
 def extract_profile_id_from_settings_path(path):
@@ -7691,6 +7733,106 @@ def _direct_home_connectors_for_profile(profile_id):
     ]
 
 
+def _authorized_parent_managed_connector_context(profile):
+    """Resolve a managed child through its exact Owner authority graph.
+
+    Parent-managed children intentionally share the Owner account and do not
+    receive a second account membership or credential.  Connector ownership
+    therefore comes from the strongly-read Owner principal and Owner
+    membership, while the returned media identity remains the exact child.
+    """
+    if not all((
+        principals_table,
+        identity_memberships_table,
+        identity_households_table,
+        identity_profiles_table,
+        household_memberships_table,
+    )):
+        return None
+    profile_id = str((profile or {}).get("profile_id") or "").strip()
+    principal_id = str((profile or {}).get("owner_principal_id") or "").strip()
+    account_id = str((profile or {}).get("account_id") or "").strip()
+    household_id = str((profile or {}).get("household_id") or "").strip()
+    if not (
+        profile_id
+        and principal_id
+        and account_id
+        and household_id
+        and bool_value((profile or {}).get("managed_by_owner"), False)
+        and str((profile or {}).get("profile_type") or "").strip().lower()
+        in {"child", "kid"}
+    ):
+        return None
+
+    principal = principals_table.get_item(
+        Key={"principal_id": principal_id}, ConsistentRead=True,
+    ).get("Item")
+    legacy_membership = identity_memberships_table.get_item(
+        Key={"principal_id": principal_id}, ConsistentRead=True,
+    ).get("Item")
+    household = identity_households_table.get_item(
+        Key={"household_id": household_id}, ConsistentRead=True,
+    ).get("Item")
+    owner_profile_id = str((legacy_membership or {}).get("profile_id") or "").strip()
+    owner_profile = identity_profiles_table.get_item(
+        Key={"profile_id": owner_profile_id}, ConsistentRead=True,
+    ).get("Item") if owner_profile_id else None
+    normalized_membership = household_memberships_table.get_item(Key={
+        "household_id": household_id,
+        "membership_id": household_membership_id(account_id, household_id),
+    }, ConsistentRead=True).get("Item")
+    normalized_membership = _repair_legacy_active_membership_profile_pointer(
+        normalized_membership,
+        expected_profile_id=owner_profile_id,
+    )
+    principal_profile_ids = (principal or {}).get("profile_ids") or []
+    if not (
+        isinstance(principal, dict)
+        and principal.get("state") == "active"
+        and not bool_value(principal.get("revoked"), False)
+        and hmac.compare_digest(str(principal.get("principal_id") or ""), principal_id)
+        and hmac.compare_digest(str(principal.get("account_id") or ""), account_id)
+        and hmac.compare_digest(str(principal.get("household_id") or ""), household_id)
+        and isinstance(principal_profile_ids, list)
+        and len(principal_profile_ids) <= 64
+        and all(any(
+            hmac.compare_digest(str(candidate or ""), required_profile_id)
+            for candidate in principal_profile_ids
+        ) for required_profile_id in (owner_profile_id, profile_id))
+        and isinstance(owner_profile, dict)
+        and owner_profile.get("state") == "active"
+        and hmac.compare_digest(str(owner_profile.get("profile_id") or ""), owner_profile_id)
+        and hmac.compare_digest(str(owner_profile.get("account_id") or ""), account_id)
+        and hmac.compare_digest(str(owner_profile.get("household_id") or ""), household_id)
+    ):
+        return None
+    try:
+        claims, role, resolved_membership = resolve_household_membership(
+            subject=principal_id,
+            principal=principal,
+            legacy_membership=legacy_membership,
+            household=household,
+            profile=owner_profile,
+            normalized_membership=normalized_membership,
+        )
+    except (AccountFoundationError, AuthorityError):
+        return None
+    if not (
+        role is CanonicalRole.OWNER
+        and claims.profile_id == owner_profile_id
+        and claims.account_id == account_id
+        and claims.household_id == household_id
+    ):
+        return None
+    return {
+        "account_id": account_id,
+        "household_id": household_id,
+        "profile_id": profile_id,
+        "role": CanonicalRole.CHILD.value,
+        "membership": resolved_membership,
+    }
+
+
 def _authorized_household_connector_context(profile_id):
     """Resolve one active profile to its exact server-owned household.
 
@@ -7720,6 +7862,10 @@ def _authorized_household_connector_context(profile_id):
         or bool_value(profile.get("revoked"), False)
     ):
         return "invalid", None
+
+    if bool_value(profile.get("managed_by_owner"), False):
+        context = _authorized_parent_managed_connector_context(profile)
+        return ("authorized", context) if context is not None else ("invalid", None)
 
     member_subject = str(profile.get("member_principal_id") or "").strip()
     owner_subject = str(profile.get("owner_principal_id") or "").strip()
@@ -12221,10 +12367,11 @@ def create_remote_command(event):
         if operation not in profile_authorized_operations:
             return response(401, {"state": "unauthorized"})
         if operation in switch_authorized_operations:
-            if not require_profile_switch_auth(event, profile_id):
+            authorized, protected_profile_session = authorize_profile_switch_session(
+                event, profile_id,
+            )
+            if not authorized:
                 return response(401, {"state": "unauthorized"})
-            if operation == "jellyfin.prepare_playback":
-                protected_profile_session = authenticated_app_session(event)
         elif not require_profile_auth(event, profile_id):
             return response(401, {"state": "unauthorized"})
     if not SAFE_IDEMPOTENCY_KEY.fullmatch(idempotency_key):
@@ -12368,14 +12515,9 @@ def create_playback_grant(event):
     mode = str(body.get("mode") or "").strip().lower()
     if not profile_id or not SAFE_PLAYBACK_IDENTIFIER.fullmatch(profile_id):
         return response(400, {"state": "bad_request", "message": "invalid profile_id"})
-    app_session = None
-    if not require_dev_key(event):
-        app_session = authenticated_app_session(event)
-        if not (
-            app_session
-            and hmac.compare_digest(str(app_session.get("profile_id") or ""), profile_id)
-        ):
-            return response(401, {"state": "unauthorized"})
+    authorized, app_session = authorize_profile_switch_session(event, profile_id)
+    if not authorized:
+        return response(401, {"state": "unauthorized"})
     if not device_id or not SAFE_PLAYBACK_IDENTIFIER.fullmatch(device_id):
         return response(400, {"state": "bad_request", "message": "invalid device_id"})
     if (

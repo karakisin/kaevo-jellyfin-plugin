@@ -69,6 +69,7 @@ def configure(monkeypatch):
         "profile_id": "cloud-jefferson-001",
         "household_id": "household-001",
         "state": "active",
+        "switch_profile_ids": ["cloud-margaret-002"],
         "watching_profile_ids": ["cloud-margaret-002"],
     }
     target = {
@@ -81,7 +82,10 @@ def configure(monkeypatch):
     events = ProgressEventsTable()
     monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable([source, target]))
     monkeypatch.setattr(handler, "events_table", events)
-    monkeypatch.setattr(handler, "authenticated_app_session", lambda _: {"profile_id": source["profile_id"]})
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _: {
+        "profile_id": source["profile_id"],
+        "household_id": source["household_id"],
+    })
     return source, events
 
 
@@ -198,6 +202,7 @@ def test_progress_read_returns_only_the_authenticated_profiles_rows(monkeypatch)
     assert result["statusCode"] == 200
     body = json.loads(result["body"])
     assert body["profile_id"] == source["profile_id"]
+    assert len(body["revision"]) == 24
     assert body["items"][0]["item_id"] == "a" * 32
     assert body["items"][0]["viewer_profile_ids"] == ["cloud-jefferson-001", "cloud-margaret-002"]
     assert body["items"][0]["viewer_progress"] == [
@@ -218,6 +223,23 @@ def test_progress_read_returns_only_the_authenticated_profiles_rows(monkeypatch)
             "updated_at": body["items"][0]["updated_at"],
         },
     ]
+
+
+def test_progress_write_and_read_use_one_exact_switch_authorized_profile(monkeypatch):
+    _, events = configure(monkeypatch)
+    body = request_body(selected_ids=["cloud-margaret-002"])
+    body["profile_id"] = "cloud-margaret-002"
+
+    written = handler.save_household_progress({"body": json.dumps(body)})
+    read = handler.get_household_progress({
+        "queryStringParameters": {"profile_id": "cloud-margaret-002"},
+    })
+
+    assert written["statusCode"] == 202
+    assert json.loads(written["body"])["profile_ids"] == ["cloud-margaret-002"]
+    assert ("cloud-margaret-002", "household-progress#jellyfin#" + "a" * 32) in events.items
+    assert read["statusCode"] == 200
+    assert json.loads(read["body"])["profile_id"] == "cloud-margaret-002"
 
 
 def test_progress_read_keeps_an_authorized_viewer_checkpoint_after_a_solo_session(monkeypatch):
@@ -267,7 +289,14 @@ def test_independent_solo_histories_do_not_create_family_sync(monkeypatch):
 
     item = json.loads(handler.get_household_progress({})["body"])["items"][0]
     assert item["viewer_profile_ids"] == []
-    assert item["viewer_progress"] == []
+    assert item["viewer_progress"] == [{
+        "profile_id": source["profile_id"],
+        "position_seconds": 600.0,
+        "runtime_seconds": 7200.0,
+        "is_currently_selected": True,
+        "playback_state": "active",
+        "updated_at": item["updated_at"],
+    }]
 
 
 def test_family_sync_membership_does_not_carry_to_next_episode(monkeypatch):
@@ -287,7 +316,9 @@ def test_family_sync_membership_does_not_carry_to_next_episode(monkeypatch):
     }
     assert len(items["a" * 32]["viewer_progress"]) == 2
     assert items["b" * 32]["viewer_profile_ids"] == []
-    assert items["b" * 32]["viewer_progress"] == []
+    assert [entry["profile_id"] for entry in items["b" * 32]["viewer_progress"]] == [
+        source["profile_id"],
+    ]
 
 
 def decode_ticket_payload(ticket):
