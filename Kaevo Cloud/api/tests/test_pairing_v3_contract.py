@@ -254,6 +254,7 @@ def test_raw_number_canonical_digest_matches_plugin_fixed_vector():
 
 @pytest.mark.parametrize(("raw_body", "expected_digest"), [
     ('{"s":"\\uD83D\\uDE00"}', "_C6fjXom4iuJQdFW3QtMOU1s6WuTN-0foAAugvKGl1Q"),
+    ('{"s":"cast member\\uFEFF"}', "sUYlzCUFkD-azfYp-35QS07w6tdYj2GWTVoZMYCnBbY"),
     (
         '{"s":"caf\\u00E9 \\u0026 \\u003Ctag\\u003E / \\u0022quote\\u0022 \\\\ path"}',
         "5aSCh07KHIahFiTdM4wEQg5RZ1n9ksgGEytIHvnIQYA",

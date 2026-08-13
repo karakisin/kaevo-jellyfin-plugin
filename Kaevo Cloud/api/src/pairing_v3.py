@@ -225,7 +225,7 @@ def _dotnet_unsafe_relaxed_json_string(value: str) -> str:
             scalar = codepoint - 0x10000
             output.append(f"\\u{0xD800 + (scalar >> 10):04X}\\u{0xDC00 + (scalar & 0x3FF):04X}")
         elif (
-            category in {"Cc", "Co", "Cn", "Zl", "Zp"}
+            category in {"Cc", "Cf", "Co", "Cn", "Zl", "Zp"}
             or (category == "Zs" and codepoint != 0x20)
         ):
             output.append(f"\\u{codepoint:04X}")
@@ -270,11 +270,12 @@ def canonical_json_digest_preserving_number_lexemes(raw_json: str) -> str:
     """Canonicalize exact JSON while retaining the sender's number lexemes.
 
     System.Text.Json preserves provider number spellings and applies
-    UnsafeRelaxedJsonEscaping when a JsonElement is written to the plugin's
-    canonical stream.  Python's normal json.loads then json.dumps path does not
-    match either behavior.  This strict parser retains only validated number
-    tokens, rejects duplicate keys and non-standard constants, and reproduces
-    the plugin's string escaping and recursive key ordering.
+    UnsafeRelaxedJsonEscaping, including its global block list for Unicode
+    format characters, when a JsonElement is written to the plugin's canonical
+    stream.  Python's normal json.loads then json.dumps path does not match
+    either behavior.  This strict parser retains only validated number tokens,
+    rejects duplicate keys and non-standard constants, and reproduces the
+    plugin's string escaping and recursive key ordering.
     """
     if not isinstance(raw_json, str):
         raise PairingV3CryptoError("JSON body must be text")

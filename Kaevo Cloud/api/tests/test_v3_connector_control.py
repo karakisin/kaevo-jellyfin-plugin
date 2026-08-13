@@ -405,6 +405,29 @@ def test_completion_accepts_plugin_digest_that_preserves_provider_number_lexemes
     assert any(control.CONNECTOR_AUTH_NUMBER_COMPATIBILITY_EVENT in record.message for record in caplog.records)
 
 
+def test_completion_accepts_plugin_digest_that_escapes_provider_format_characters(tables, caplog):
+    tables[0].items[CONNECTOR_ID]["profile_id"] = PROFILE_ID
+    tables[3].items["complete-format-1"] = {
+        "request_id": "complete-format-1", "connector_id": CONNECTOR_ID, "profile_id": PROFILE_ID,
+        "status": "in_progress", "request_json": "{}", "expires_at": control.epoch_now() + 60,
+    }
+    route = "/v3/remote-requests/complete-format-1/complete"
+    raw_body = (
+        '{"connector_id":' + json.dumps(CONNECTOR_ID)
+        + ',"response":{"credits":{"cast":[{"name":"cast member\\uFEFF"}]}}}'
+    )
+
+    with caplog.at_level(logging.WARNING, logger=control.LOGGER.name):
+        result = control.lambda_handler(
+            signed_raw(route, raw_body, "connectorformatnonce01234567890"),
+            None,
+        )
+
+    assert result["statusCode"] == 200
+    assert tables[3].items["complete-format-1"]["status"] == "completed"
+    assert any(control.CONNECTOR_AUTH_NUMBER_COMPATIBILITY_EVENT in record.message for record in caplog.records)
+
+
 def test_oversized_completion_does_not_leave_the_request_completing(tables, monkeypatch):
     tables[0].items[CONNECTOR_ID]["profile_id"] = PROFILE_ID
     tables[3].items["oversized-1"] = {
