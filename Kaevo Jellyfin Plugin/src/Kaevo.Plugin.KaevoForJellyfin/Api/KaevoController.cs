@@ -4,6 +4,7 @@ using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Common.Plugins;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
@@ -19,7 +20,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
-    private const string PluginVersion = "0.2.91";
+    private const string PluginVersion = "0.2.92";
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey, bool RequiresUsernamePassword, string Category)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey, bool RequiresUsernamePassword, string Category)>(StringComparer.OrdinalIgnoreCase)
         {
@@ -48,6 +49,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     private readonly KaevoPairingV3Service _pairingV3;
     private readonly KaevoProviderPolicyAuditStore _providerAudit;
     private readonly KaevoSeerrIdentityProvisioningService _seerrIdentityProvisioning;
+    private readonly IPluginManager _pluginManager;
 
     public KaevoController(
         ILibraryManager libraryManager,
@@ -61,7 +63,8 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         KaevoLocalPairingService localPairing,
         KaevoPairingV3Service pairingV3,
         KaevoProviderPolicyAuditStore providerAudit,
-        KaevoSeerrIdentityProvisioningService seerrIdentityProvisioning)
+        KaevoSeerrIdentityProvisioningService seerrIdentityProvisioning,
+        IPluginManager pluginManager)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
@@ -75,6 +78,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         _pairingV3 = pairingV3;
         _providerAudit = providerAudit;
         _seerrIdentityProvisioning = seerrIdentityProvisioning;
+        _pluginManager = pluginManager;
     }
 
     public void OnActionExecuting(ActionExecutingContext context)
@@ -129,7 +133,11 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             relay.ConnectedChannels,
             "hls-bounded-buffer-v3",
             configuration.OptimizerExecutionEnabled,
-            KaevoProfileJellyfinBindingStore.ProfileBindingState(configuration)));
+            KaevoProfileJellyfinBindingStore.ProfileBindingState(configuration),
+            configuration.JellyfinPluginIntegrationsEnabled,
+            _pluginManager.Plugins.Any(plugin =>
+                plugin.IsEnabledAndSupported
+                && string.Equals(plugin.Name, "Intro Skipper", StringComparison.OrdinalIgnoreCase))));
     }
 
     [HttpGet("cloud/status")]

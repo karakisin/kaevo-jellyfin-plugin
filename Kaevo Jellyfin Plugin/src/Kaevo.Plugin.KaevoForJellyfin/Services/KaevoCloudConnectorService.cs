@@ -2239,6 +2239,12 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var remux = source.TryGetProperty("SupportsDirectStream", out var streamValue) && streamValue.GetBoolean();
         var mode = compatibilityPlayer ? "direct_play" : remux ? "remux" : "transcode";
         var tracks = KaevoPlaybackTrackCatalog.FromMediaSource(source);
+        var mediaSegmentsRequested = parameters.TryGetValue("media_segments_enabled", out var mediaSegmentsValue)
+            && mediaSegmentsValue.ValueKind is JsonValueKind.True or JsonValueKind.False
+            && mediaSegmentsValue.GetBoolean();
+        var mediaSegmentsTask = configuration.JellyfinPluginIntegrationsEnabled && mediaSegmentsRequested
+            ? ReadPlaybackMediaSegmentsAsync(configuration, secrets, itemId, cancellationToken)
+            : Task.FromResult<IReadOnlyList<KaevoMediaSegmentProjection>>(Array.Empty<KaevoMediaSegmentProjection>());
         var trickplay = KaevoPlaybackTrickplayCatalog.FromItem(root, mediaSourceId)
             ?? await ReadPlaybackTrickplayMetadataAsync(
                 configuration,
@@ -2247,6 +2253,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 itemId,
                 mediaSourceId,
                 cancellationToken).ConfigureAwait(false);
+        var mediaSegments = await mediaSegmentsTask.ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
             requestId = request.RequestId,
@@ -2263,9 +2270,40 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 subtitle_tracks = tracks.SubtitleTracks,
                 selected_audio_stream_index = audioStreamIndex ?? tracks.SelectedAudioStreamIndex,
                 selected_subtitle_stream_index = subtitleStreamIndex,
-                trickplay
+                trickplay,
+                media_segments = mediaSegments
             }
         }, JsonOptions), false);
+    }
+
+    private async Task<IReadOnlyList<KaevoMediaSegmentProjection>> ReadPlaybackMediaSegmentsAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string itemId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await SendLocalAsync(
+                configuration,
+                secrets,
+                HttpMethod.Get,
+                $"/MediaSegments/{Uri.EscapeDataString(itemId)}?includeSegmentTypes=Intro&includeSegmentTypes=Recap",
+                null,
+                null,
+                cancellationToken).ConfigureAwait(false);
+            return KaevoMediaSegmentCatalog.FromJellyfin(response.Payload, itemId);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (InvalidOperationException)
+        {
+            // Media segments are an optional enhancement. An unavailable
+            // provider must never block the underlying playback route.
+            return Array.Empty<KaevoMediaSegmentProjection>();
+        }
     }
 
     private async Task<KaevoPlaybackTrickplayMetadata?> ReadPlaybackTrickplayMetadataAsync(

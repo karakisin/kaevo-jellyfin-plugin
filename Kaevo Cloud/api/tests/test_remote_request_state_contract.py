@@ -432,6 +432,7 @@ def test_prepare_completion_embeds_one_exact_short_lived_playback_grant(monkeypa
             "item_id": "a" * 32,
             "device_id": "ios-device-1",
             "max_bitrate": 20_000_000,
+            "media_segments_enabled": True,
         },
     })
     table = FakeRemoteRequests([item])
@@ -467,6 +468,22 @@ def test_prepare_completion_embeds_one_exact_short_lived_playback_grant(monkeypa
                     "thumbnail_count": 40,
                     "interval": 10000,
                 },
+                "media_segments": [
+                    {
+                        "id": "intro-1",
+                        "item_id": "a" * 32,
+                        "type": "Intro",
+                        "start_ticks": 10_000_000,
+                        "end_ticks": 710_000_000,
+                    },
+                    {
+                        "id": "wrong-item",
+                        "item_id": "b" * 32,
+                        "type": "Intro",
+                        "start_ticks": 10_000_000,
+                        "end_ticks": 710_000_000,
+                    },
+                ],
             }},
         }),
         f"/v1/remote-requests/{request_id}/complete",
@@ -478,6 +495,13 @@ def test_prepare_completion_embeds_one_exact_short_lived_playback_grant(monkeypa
     assert grant["state"] == "issued"
     assert grant["connector_id"] == "connector-1"
     assert grant["expires_at"] - handler.epoch_now() <= 120
+    assert stored["result"]["media_segments"] == [{
+        "id": "intro-1",
+        "item_id": "a" * 32,
+        "type": "Intro",
+        "start_ticks": 10_000_000,
+        "end_ticks": 710_000_000,
+    }]
     assert grant["relay_base_url"].startswith("https://relay.test/v1/playback/")
     assert "grant" not in grant
     assert stored["result"]["trickplay"]["width"] == 320

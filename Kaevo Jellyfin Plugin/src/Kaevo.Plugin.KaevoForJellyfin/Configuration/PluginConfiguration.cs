@@ -36,6 +36,10 @@ public sealed class PluginConfiguration : BasePluginConfiguration
 
     public bool RemotePlaybackEnabled { get; set; }
 
+    // Explicit server-administrator consent for integrations that consume
+    // standard Jellyfin capabilities published by other installed plugins.
+    public bool JellyfinPluginIntegrationsEnabled { get; set; }
+
     public bool MediaScanEnabled { get; set; } = true;
 
     public bool OptimizerPlanningEnabled { get; set; } = true;

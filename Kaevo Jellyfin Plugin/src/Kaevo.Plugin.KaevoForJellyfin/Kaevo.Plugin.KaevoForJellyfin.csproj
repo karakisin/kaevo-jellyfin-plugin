@@ -4,9 +4,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>12</LangVersion>
-    <Version>0.2.91</Version>
-    <AssemblyVersion>0.2.91.0</AssemblyVersion>
-    <FileVersion>0.2.91.0</FileVersion>
+    <Version>0.2.92</Version>
+    <AssemblyVersion>0.2.92.0</AssemblyVersion>
+    <FileVersion>0.2.92.0</FileVersion>
     <RootNamespace>Kaevo.Plugin.KaevoForJellyfin</RootNamespace>
     <AssemblyName>Kaevo.Plugin.KaevoForJellyfin</AssemblyName>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>

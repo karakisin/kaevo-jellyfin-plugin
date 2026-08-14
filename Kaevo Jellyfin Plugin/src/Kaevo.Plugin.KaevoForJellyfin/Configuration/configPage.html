@@ -243,6 +243,14 @@
                             <span class="fieldDescription" style="display:block">Kaevo still requires an in-app confirmation before deleting a movie or episode.</span>
                         </span>
                     </label>
+                    <h3>Jellyfin Plugin Integrations</h3>
+                    <label class="kaevo-toggle-row">
+                        <input id="JellyfinPluginIntegrationsEnabled" type="checkbox" is="emby-checkbox" />
+                        <span>
+                            Enable Jellyfin Plugin Integrations
+                            <span class="fieldDescription" style="display:block">Allows Kaevo to use supported capabilities published by installed Jellyfin plugins. Plugins are still installed and configured by a Jellyfin administrator.</span>
+                        </span>
+                    </label>
                     <button is="emby-button" type="submit" class="raised button-submit block emby-button">
                         <span>Save</span>
                     </button>
@@ -404,6 +412,7 @@
                 ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
                     document.querySelector('#SnapshotItemLimit').value = config.SnapshotItemLimit || 50;
                     document.querySelector('#RemoteMediaDeletionEnabled').checked = config.RemoteMediaDeletionEnabled === true;
+                    document.querySelector('#JellyfinPluginIntegrationsEnabled').checked = config.JellyfinPluginIntegrationsEnabled === true;
                     KaevoConfig.pairingV3Enabled = pairingV3Enabled(config);
                     renderPairingMode();
                     return Promise.all([
@@ -538,6 +547,7 @@
                     var value = parseInt(document.querySelector('#SnapshotItemLimit').value, 10);
                     config.SnapshotItemLimit = Math.max(1, Math.min(100, value || 50));
                     config.RemoteMediaDeletionEnabled = document.querySelector('#RemoteMediaDeletionEnabled').checked;
+                    config.JellyfinPluginIntegrationsEnabled = document.querySelector('#JellyfinPluginIntegrationsEnabled').checked;
                     config.OptimizerExecutionEnabled = false;
                     return ApiClient.updatePluginConfiguration(KaevoConfig.pluginUniqueId, config);
                 }).then(function (result) {

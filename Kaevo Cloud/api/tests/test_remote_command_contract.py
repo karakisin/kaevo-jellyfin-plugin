@@ -750,6 +750,26 @@ def test_playback_preparation_preserves_compatibility_player_request():
     assert rejected_error == "compatibility_player is invalid"
 
 
+def test_playback_preparation_requires_boolean_media_segment_opt_in():
+    payload, error = command("jellyfin.prepare_playback", {
+        "item_id": "a" * 32,
+        "device_id": "ios-device-1",
+        "max_bitrate": 12_000_000,
+        "media_segments_enabled": True,
+    })
+    assert error == ""
+    assert payload["body"]["media_segments_enabled"] is True
+
+    rejected, rejected_error = command("jellyfin.prepare_playback", {
+        "item_id": "a" * 32,
+        "device_id": "ios-device-1",
+        "max_bitrate": 12_000_000,
+        "media_segments_enabled": "true",
+    })
+    assert rejected is None
+    assert rejected_error == "media_segments_enabled is invalid"
+
+
 def test_delete_item_is_exact_item_bound():
     payload, error = command("jellyfin.delete_item", {"item_id": "b" * 32})
     assert error == ""

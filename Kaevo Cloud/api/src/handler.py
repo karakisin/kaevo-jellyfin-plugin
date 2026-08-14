@@ -11555,6 +11555,9 @@ def normalize_remote_command(operation, parameters):
         compatibility_player = parameters.get("compatibility_player", False)
         if not isinstance(compatibility_player, bool):
             return None, "compatibility_player is invalid"
+        media_segments_enabled = parameters.get("media_segments_enabled", False)
+        if not isinstance(media_segments_enabled, bool):
+            return None, "media_segments_enabled is invalid"
         playback_body = {
             "item_id": item_id.lower(),
             "device_id": device_id,
@@ -11562,6 +11565,8 @@ def normalize_remote_command(operation, parameters):
         }
         if compatibility_player:
             playback_body["compatibility_player"] = True
+        if media_segments_enabled:
+            playback_body["media_segments_enabled"] = True
         if audio_stream_index is not None:
             playback_body["audio_stream_index"] = audio_stream_index
         if subtitle_stream_index is not None:
@@ -12543,6 +12548,40 @@ def _bounded_trickplay_metadata(value):
     return normalized
 
 
+def _bounded_media_segments(value, expected_item_id):
+    if not isinstance(value, list):
+        return []
+    normalized = []
+    for candidate in value[:32]:
+        if not isinstance(candidate, dict):
+            continue
+        item_id = str(candidate.get("item_id") or "").strip().lower()
+        segment_id = str(candidate.get("id") or "").strip()
+        segment_type = str(candidate.get("type") or "").strip().title()
+        start_ticks = candidate.get("start_ticks")
+        end_ticks = candidate.get("end_ticks")
+        if not (
+            hmac.compare_digest(item_id, expected_item_id)
+            and segment_type in {"Intro", "Recap"}
+            and 0 < len(segment_id) <= 128
+            and not isinstance(start_ticks, bool)
+            and isinstance(start_ticks, int)
+            and not isinstance(end_ticks, bool)
+            and isinstance(end_ticks, int)
+            and 0 <= start_ticks < end_ticks <= 6_048_000_000_000
+            and end_ticks - start_ticks <= 18_000_000_000
+        ):
+            continue
+        normalized.append({
+            "id": segment_id,
+            "item_id": item_id,
+            "type": segment_type,
+            "start_ticks": start_ticks,
+            "end_ticks": end_ticks,
+        })
+    return normalized
+
+
 def _issued_playback_grant(
     *, profile_id, device_id, item_id, media_source_id,
     playback_session_id, mode, max_bitrate, connector, trickplay=None,
@@ -12740,6 +12779,12 @@ def _completion_with_embedded_playback_grant(item, response_payload):
     embedded = dict(issued)
     embedded.pop("grant", None)
     updated_result = dict(result)
+    if request_body.get("media_segments_enabled") is True:
+        updated_result["media_segments"] = _bounded_media_segments(
+            result.get("media_segments"), item_id,
+        )
+    else:
+        updated_result.pop("media_segments", None)
     updated_result["playback_grant"] = embedded
     return {**response_payload, "result": updated_result}
 

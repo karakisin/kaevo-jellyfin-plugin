@@ -15,7 +15,9 @@ public sealed record KaevoStatusResponse(
     int PlaybackRelayChannels,
     string PlaybackRelayProtocol,
     bool OptimizerExecution,
-    string ProfileBindingState);
+    string ProfileBindingState,
+    bool JellyfinPluginIntegrations,
+    bool IntroSkipperInstalled);
 
 public sealed record KaevoCloudPairingStatus(
     string State,
