@@ -36,6 +36,18 @@
             background: linear-gradient(135deg, #f0d3a3, #d6a65f); font-weight: 750;
             box-shadow: 0 10px 24px rgba(185, 135, 63, .17);
         }
+        #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saving"] {
+            cursor: progress; opacity: .72; box-shadow: none;
+        }
+        #KaevoConfigPage #KaevoSaveConfiguration { width: 100%; box-sizing: border-box; }
+        #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saved"] {
+            color: var(--kaevo-gold) !important; background: #0b0d10 !important;
+            border: 1px solid rgba(231,196,139,.55) !important; box-shadow: none !important;
+        }
+        #KaevoConfigPage #KaevoSaveConfigurationStatus {
+            margin: .75rem 0 0; text-align: center; color: var(--kaevo-gold); font-weight: 700;
+        }
+        #KaevoConfigPage #KaevoSaveConfigurationStatus[data-save-state="error"] { color: #ffb4ab; }
         #KaevoConfigPage #KaevoCreatePairing:disabled {
             color: var(--kaevo-gold); background: rgba(8,10,13,.52);
             border: 1px solid rgba(231,196,139,.45); box-shadow: none;
@@ -136,6 +148,18 @@
                 background:linear-gradient(135deg,#f0d3a3,#d6a65f); font-weight:750;
                 box-shadow:0 10px 24px rgba(185,135,63,.17);
             }
+            #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saving"] {
+                cursor:progress; opacity:.72; box-shadow:none;
+            }
+            #KaevoConfigPage #KaevoSaveConfiguration { width:100%; box-sizing:border-box; }
+            #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saved"] {
+                color:var(--kaevo-gold) !important; background:#0b0d10 !important;
+                border:1px solid rgba(231,196,139,.55) !important; box-shadow:none !important;
+            }
+            #KaevoConfigPage #KaevoSaveConfigurationStatus {
+                margin:.75rem 0 0; text-align:center; color:var(--kaevo-gold); font-weight:700;
+            }
+            #KaevoConfigPage #KaevoSaveConfigurationStatus[data-save-state="error"] { color:#ffb4ab; }
             #KaevoConfigPage #KaevoCreatePairing:disabled {
                 color:var(--kaevo-gold); background:rgba(8,10,13,.52);
                 border:1px solid rgba(231,196,139,.45); box-shadow:none;
@@ -266,9 +290,10 @@
                         Allows Kaevo to use supported capabilities from installed Jellyfin plugins. Plugins are installed and configured by a Jellyfin administrator.
                         <span class="kaevo-app-followup"><strong>Next:</strong> In Kaevo, open Settings → Connections → Jellyfin Plugins, then enable Jellyfin Plugin Integrations and Intro Skipper.</span>
                     </p>
-                    <button is="emby-button" type="submit" class="raised button-submit block emby-button">
-                        <span>Save</span>
+                    <button id="KaevoSaveConfiguration" is="emby-button" type="submit" class="raised button-submit block emby-button" data-save-state="idle">
+                        <span id="KaevoSaveConfigurationLabel">Save</span>
                     </button>
+                    <p id="KaevoSaveConfigurationStatus" role="status" aria-live="polite" data-save-state="idle" hidden></p>
                     </section>
                 </form>
 
@@ -285,6 +310,7 @@
                 pluginUniqueId: '80c77b84-7f2d-4b52-84c7-7dfe68cd95ae',
                 providers: [],
                 pairingCountdownTimer: null,
+                saveResetTimer: null,
                 pairingV3Enabled: false,
                 pairingV3Connected: false
             };
@@ -294,6 +320,46 @@
                     clearInterval(KaevoConfig.pairingCountdownTimer);
                     KaevoConfig.pairingCountdownTimer = null;
                 }
+            }
+
+            function setSaveState(state) {
+                var button = document.querySelector('#KaevoSaveConfiguration');
+                var label = document.querySelector('#KaevoSaveConfigurationLabel');
+                var status = document.querySelector('#KaevoSaveConfigurationStatus');
+                if (KaevoConfig.saveResetTimer) {
+                    clearTimeout(KaevoConfig.saveResetTimer);
+                    KaevoConfig.saveResetTimer = null;
+                }
+                button.dataset.saveState = state;
+                status.dataset.saveState = state;
+                if (state === 'saving') {
+                    button.disabled = true;
+                    button.setAttribute('aria-disabled', 'true');
+                    label.textContent = 'Saving…';
+                    status.hidden = true;
+                    status.textContent = '';
+                    return;
+                }
+                button.disabled = false;
+                button.setAttribute('aria-disabled', 'false');
+                if (state === 'saved') {
+                    label.textContent = 'Saved ✓';
+                    status.textContent = 'Settings saved successfully.';
+                    status.hidden = false;
+                    KaevoConfig.saveResetTimer = setTimeout(function () {
+                        setSaveState('idle');
+                    }, 3000);
+                    return;
+                }
+                if (state === 'error') {
+                    label.textContent = 'Try Again';
+                    status.textContent = 'Settings were not saved. Please try again.';
+                    status.hidden = false;
+                    return;
+                }
+                label.textContent = 'Save';
+                status.textContent = '';
+                status.hidden = true;
             }
 
             function loadKaevoBranding() {
@@ -553,10 +619,15 @@
                 createPairingTicket(true);
             });
 
-            document.querySelector('#KaevoConfigPage').addEventListener('pagehide', stopPairingCountdown);
+            document.querySelector('#KaevoConfigPage').addEventListener('pagehide', function () {
+                stopPairingCountdown();
+                if (KaevoConfig.saveResetTimer) clearTimeout(KaevoConfig.saveResetTimer);
+            });
 
             document.querySelector('#KaevoConfigForm').addEventListener('submit', function (event) {
                 event.preventDefault();
+                if (document.querySelector('#KaevoSaveConfiguration').disabled) return false;
+                setSaveState('saving');
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
                     var value = parseInt(document.querySelector('#SnapshotItemLimit').value, 10);
@@ -567,6 +638,12 @@
                     return ApiClient.updatePluginConfiguration(KaevoConfig.pluginUniqueId, config);
                 }).then(function (result) {
                     Dashboard.processPluginConfigurationUpdateResult(result);
+                    setSaveState('saved');
+                }).catch(function () {
+                    setSaveState('error');
+                    Dashboard.alert('Kaevo could not save these settings. Please try again.');
+                }).finally(function () {
+                    Dashboard.hideLoadingMsg();
                 });
                 return false;
             });

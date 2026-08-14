@@ -59,6 +59,17 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("enable Jellyfin Plugin Integrations and Intro Skipper", page, StringComparison.Ordinal);
         Assert.Contains("type=\"checkbox\" is=\"emby-checkbox\"", page, StringComparison.Ordinal);
         Assert.Contains("input:not([type=\"checkbox\"])", page, StringComparison.Ordinal);
+        Assert.Contains("id=\"KaevoSaveConfiguration\"", page, StringComparison.Ordinal);
+        Assert.Contains("role=\"status\" aria-live=\"polite\"", page, StringComparison.Ordinal);
+        Assert.Contains("setSaveState('saving')", page, StringComparison.Ordinal);
+        Assert.Contains("setSaveState('saved')", page, StringComparison.Ordinal);
+        Assert.Contains("setSaveState('error')", page, StringComparison.Ordinal);
+        Assert.Contains("Saving…", page, StringComparison.Ordinal);
+        Assert.Contains("Saved ✓", page, StringComparison.Ordinal);
+        Assert.Contains("Settings saved successfully.", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoSaveConfiguration[data-save-state=\"saved\"]", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoSaveConfiguration { width:100%; box-sizing:border-box; }", page, StringComparison.Ordinal);
+        Assert.Contains("background:#0b0d10 !important", page, StringComparison.Ordinal);
 
         Assert.Contains(assembly.GetManifestResourceNames(), name => name.EndsWith("Branding.Kaevo_LogoMark_Transparent.png", StringComparison.Ordinal));
         Assert.Contains(assembly.GetManifestResourceNames(), name => name.EndsWith("Branding.Kaevo_Wordmark_Transparent.png", StringComparison.Ordinal));

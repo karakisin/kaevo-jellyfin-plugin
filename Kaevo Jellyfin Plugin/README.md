@@ -10,7 +10,7 @@ installation.
 - Jellyfin: `10.11.x`
 - .NET target: `net8.0`
 - Foundation baseline: `0.1.0`
-- Current repository build: `0.2.93`
+- Current repository build: `0.2.94`
 - Supported phase: local metadata, app-guided Cloud activation, guarded remote playback, and owner-authorized download controls
 
 Current endpoints:
