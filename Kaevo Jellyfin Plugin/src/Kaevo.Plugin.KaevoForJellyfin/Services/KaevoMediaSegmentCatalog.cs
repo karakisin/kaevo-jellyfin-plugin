@@ -30,7 +30,7 @@ internal static class KaevoMediaSegmentCatalog
             var startTicks = Int64Value(item, "StartTicks");
             var endTicks = Int64Value(item, "EndTicks");
             if (!string.Equals(itemId, expectedItemId, StringComparison.OrdinalIgnoreCase)
-                || (type != "Intro" && type != "Recap")
+                || (type != "Intro" && type != "Recap" && type != "Outro")
                 || startTicks is null
                 || endTicks is null)
             {
@@ -65,10 +65,11 @@ internal static class KaevoMediaSegmentCatalog
             var type = value.GetString();
             if (string.Equals(type, "Intro", StringComparison.OrdinalIgnoreCase)) return "Intro";
             if (string.Equals(type, "Recap", StringComparison.OrdinalIgnoreCase)) return "Recap";
+            if (string.Equals(type, "Outro", StringComparison.OrdinalIgnoreCase)) return "Outro";
         }
         if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var ordinal))
         {
-            return ordinal switch { 3 => "Recap", 5 => "Intro", _ => "Unknown" };
+            return ordinal switch { 3 => "Recap", 4 => "Outro", 5 => "Intro", _ => "Unknown" };
         }
         return "Unknown";
     }

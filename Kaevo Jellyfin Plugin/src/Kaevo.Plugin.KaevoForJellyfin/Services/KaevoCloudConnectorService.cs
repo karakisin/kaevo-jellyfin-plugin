@@ -19,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.91";
+    private const string PluginVersion = "0.2.96";
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
@@ -2288,7 +2288,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 configuration,
                 secrets,
                 HttpMethod.Get,
-                $"/MediaSegments/{Uri.EscapeDataString(itemId)}?includeSegmentTypes=Intro&includeSegmentTypes=Recap",
+                $"/MediaSegments/{Uri.EscapeDataString(itemId)}?includeSegmentTypes=Intro&includeSegmentTypes=Recap&includeSegmentTypes=Outro",
                 null,
                 null,
                 cancellationToken).ConfigureAwait(false);
