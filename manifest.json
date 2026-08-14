@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.94.0",
+        "changelog": "Adds clear Saving, Saved, and retry feedback to the Kaevo configuration Save button so administrators can immediately confirm whether their settings were saved.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.94/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "e63cd526ced12300ce40672c85ff2085",
+        "timestamp": "2026-08-14T09:20:42Z"
+      },
+      {
         "version": "0.2.93.0",
         "changelog": "Keeps the Jellyfin Plugin Integrations guidance fully visible and directs users to finish Intro Skipper setup in Kaevo under Settings and Connections.",
         "targetAbi": "10.11.0.0",
