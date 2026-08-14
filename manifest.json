@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.92.0",
+        "changelog": "Adds opt-in Jellyfin plugin integrations and bounded Intro Skipper media-segment support for exact Skip Intro and Skip Recap playback prompts.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.92/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "d4b3f46c17e55ca2502dae9786a96203",
+        "timestamp": "2026-08-14T08:38:15Z"
+      },
+      {
         "version": "0.2.91.0",
         "changelog": "Carries exact bounded Jellyfin trickplay metadata through Kaevo Cloud so remote playback can display grant-authorized sprite previews without changing transport or controls.",
         "targetAbi": "10.11.0.0",
