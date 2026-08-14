@@ -43,11 +43,26 @@
         #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saved"] {
             color: var(--kaevo-gold) !important; background: #0b0d10 !important;
             border: 1px solid rgba(231,196,139,.55) !important; box-shadow: none !important;
+            cursor: not-allowed; opacity: 1;
         }
         #KaevoConfigPage #KaevoSaveConfigurationStatus {
             margin: .75rem 0 0; text-align: center; color: var(--kaevo-gold); font-weight: 700;
         }
         #KaevoConfigPage #KaevoSaveConfigurationStatus[data-save-state="error"] { color: #ffb4ab; }
+        #KaevoConfigPage .kaevo-provider-save {
+            display: block; width: 100%; box-sizing: border-box; min-height: 52px; margin-top: 1rem;
+            border: 0 !important; border-radius: 999px; color: #17191d !important;
+            background: linear-gradient(135deg, #f0d3a3, #d6a65f) !important;
+            font-weight: 750; box-shadow: 0 10px 24px rgba(185,135,63,.17) !important;
+        }
+        #KaevoConfigPage .kaevo-provider-save[data-save-state="saving"] {
+            cursor: progress; opacity: .72; box-shadow: none !important;
+        }
+        #KaevoConfigPage .kaevo-provider-save[data-save-state="saved"] {
+            color: var(--kaevo-gold) !important; background: #0b0d10 !important;
+            border: 1px solid rgba(231,196,139,.55) !important; box-shadow: none !important;
+            cursor: not-allowed; opacity: 1;
+        }
         #KaevoConfigPage #KaevoCreatePairing:disabled {
             color: var(--kaevo-gold); background: rgba(8,10,13,.52);
             border: 1px solid rgba(231,196,139,.45); box-shadow: none;
@@ -155,11 +170,26 @@
             #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saved"] {
                 color:var(--kaevo-gold) !important; background:#0b0d10 !important;
                 border:1px solid rgba(231,196,139,.55) !important; box-shadow:none !important;
+                cursor:not-allowed; opacity:1;
             }
             #KaevoConfigPage #KaevoSaveConfigurationStatus {
                 margin:.75rem 0 0; text-align:center; color:var(--kaevo-gold); font-weight:700;
             }
             #KaevoConfigPage #KaevoSaveConfigurationStatus[data-save-state="error"] { color:#ffb4ab; }
+            #KaevoConfigPage .kaevo-provider-save {
+                display:block; width:100%; box-sizing:border-box; min-height:52px; margin-top:1rem;
+                border:0 !important; border-radius:999px; color:#17191d !important;
+                background:linear-gradient(135deg,#f0d3a3,#d6a65f) !important;
+                font-weight:750; box-shadow:0 10px 24px rgba(185,135,63,.17) !important;
+            }
+            #KaevoConfigPage .kaevo-provider-save[data-save-state="saving"] {
+                cursor:progress; opacity:.72; box-shadow:none !important;
+            }
+            #KaevoConfigPage .kaevo-provider-save[data-save-state="saved"] {
+                color:var(--kaevo-gold) !important; background:#0b0d10 !important;
+                border:1px solid rgba(231,196,139,.55) !important; box-shadow:none !important;
+                cursor:not-allowed; opacity:1;
+            }
             #KaevoConfigPage #KaevoCreatePairing:disabled {
                 color:var(--kaevo-gold); background:rgba(8,10,13,.52);
                 border:1px solid rgba(231,196,139,.45); box-shadow:none;
@@ -309,8 +339,9 @@
             var KaevoConfig = {
                 pluginUniqueId: '80c77b84-7f2d-4b52-84c7-7dfe68cd95ae',
                 providers: [],
+                providerSavedSettings: {},
                 pairingCountdownTimer: null,
-                saveResetTimer: null,
+                savedSettings: null,
                 pairingV3Enabled: false,
                 pairingV3Connected: false
             };
@@ -326,10 +357,6 @@
                 var button = document.querySelector('#KaevoSaveConfiguration');
                 var label = document.querySelector('#KaevoSaveConfigurationLabel');
                 var status = document.querySelector('#KaevoSaveConfigurationStatus');
-                if (KaevoConfig.saveResetTimer) {
-                    clearTimeout(KaevoConfig.saveResetTimer);
-                    KaevoConfig.saveResetTimer = null;
-                }
                 button.dataset.saveState = state;
                 status.dataset.saveState = state;
                 if (state === 'saving') {
@@ -340,17 +367,16 @@
                     status.textContent = '';
                     return;
                 }
-                button.disabled = false;
-                button.setAttribute('aria-disabled', 'false');
                 if (state === 'saved') {
+                    button.disabled = true;
+                    button.setAttribute('aria-disabled', 'true');
                     label.textContent = 'Saved ✓';
-                    status.textContent = 'Settings saved successfully.';
+                    status.textContent = 'Settings are saved.';
                     status.hidden = false;
-                    KaevoConfig.saveResetTimer = setTimeout(function () {
-                        setSaveState('idle');
-                    }, 3000);
                     return;
                 }
+                button.disabled = false;
+                button.setAttribute('aria-disabled', 'false');
                 if (state === 'error') {
                     label.textContent = 'Try Again';
                     status.textContent = 'Settings were not saved. Please try again.';
@@ -360,6 +386,28 @@
                 label.textContent = 'Save';
                 status.textContent = '';
                 status.hidden = true;
+            }
+
+            function readConfigurationSettings() {
+                var value = parseInt(document.querySelector('#SnapshotItemLimit').value, 10);
+                return {
+                    snapshotItemLimit: Math.max(1, Math.min(100, value || 50)),
+                    remoteMediaDeletionEnabled: document.querySelector('#RemoteMediaDeletionEnabled').checked,
+                    jellyfinPluginIntegrationsEnabled: document.querySelector('#JellyfinPluginIntegrationsEnabled').checked
+                };
+            }
+
+            function configurationMatchesSavedSettings() {
+                var saved = KaevoConfig.savedSettings;
+                if (!saved) return false;
+                var current = readConfigurationSettings();
+                return current.snapshotItemLimit === saved.snapshotItemLimit
+                    && current.remoteMediaDeletionEnabled === saved.remoteMediaDeletionEnabled
+                    && current.jellyfinPluginIntegrationsEnabled === saved.jellyfinPluginIntegrationsEnabled;
+            }
+
+            function refreshConfigurationSaveState() {
+                setSaveState(configurationMatchesSavedSettings() ? 'saved' : 'idle');
             }
 
             function loadKaevoBranding() {
@@ -436,6 +484,62 @@
                 return document.querySelector('#KaevoProvider-' + provider + '-' + suffix);
             }
 
+            function providerDisplayName(provider) {
+                var match = KaevoConfig.providers.find(function (item) { return item.Provider === provider; });
+                return match ? match.DisplayName : provider;
+            }
+
+            function readProviderSettings(provider) {
+                var keyInput = providerValue(provider, 'key');
+                var usernameInput = providerValue(provider, 'username');
+                var passwordInput = providerValue(provider, 'password');
+                return {
+                    baseUrl: providerValue(provider, 'url').value.trim(),
+                    apiKey: keyInput ? keyInput.value.trim() : '',
+                    username: usernameInput ? usernameInput.value.trim() : '',
+                    password: passwordInput ? passwordInput.value : '',
+                    enabled: providerValue(provider, 'enabled').checked
+                };
+            }
+
+            function providerMatchesSavedSettings(provider) {
+                var saved = KaevoConfig.providerSavedSettings[provider];
+                if (!saved) return false;
+                var current = readProviderSettings(provider);
+                return current.baseUrl === saved.baseUrl
+                    && current.apiKey === saved.apiKey
+                    && current.username === saved.username
+                    && current.password === saved.password
+                    && current.enabled === saved.enabled;
+            }
+
+            function setProviderSaveState(provider, state) {
+                var button = document.querySelector('[data-save-provider="' + provider + '"]');
+                if (!button) return;
+                button.dataset.saveState = state;
+                if (state === 'saving') {
+                    button.disabled = true;
+                    button.setAttribute('aria-disabled', 'true');
+                    button.querySelector('span').textContent = 'Saving…';
+                    return;
+                }
+                if (state === 'saved') {
+                    button.disabled = true;
+                    button.setAttribute('aria-disabled', 'true');
+                    button.querySelector('span').textContent = 'Saved ✓';
+                    return;
+                }
+                button.disabled = false;
+                button.setAttribute('aria-disabled', 'false');
+                button.querySelector('span').textContent = state === 'error'
+                    ? 'Try Again'
+                    : 'Save ' + providerDisplayName(provider);
+            }
+
+            function refreshProviderSaveState(provider) {
+                setProviderSaveState(provider, providerMatchesSavedSettings(provider) ? 'saved' : 'idle');
+            }
+
             function escapeHtml(value) {
                 return String(value || '').replace(/[&<>'"]/g, function (character) {
                     return { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[character];
@@ -468,7 +572,7 @@
                             + '<input id="KaevoProvider-' + provider.Provider + '-password" type="password" is="emby-input" autocomplete="new-password" placeholder="Leave blank to keep the saved password" /></div>'
                         : '';
                     var connected = provider.Enabled && provider.Configured;
-                    return '<section class="kaevo-provider-card">'
+                    return '<section class="kaevo-provider-card" data-provider-card="' + provider.Provider + '">'
                         + '<h4 style="margin-top:0">' + provider.DisplayName + '</h4>'
                         + '<div class="fieldDescription">Status: <strong id="KaevoProvider-' + provider.Provider + '-status">'
                         + (connected ? 'Connected' : provider.Configured ? 'Off' : 'Not Connected') + '</strong></div>'
@@ -478,9 +582,14 @@
                         + '<input id="KaevoProvider-' + provider.Provider + '-url" type="url" is="emby-input" value="' + escapeHtml(provider.BaseUrl) + '" placeholder="http://192.168.1.10:port" /></div>'
                         + keyField
                         + loginFields
-                        + '<button is="emby-button" type="button" class="raised emby-button" data-save-provider="' + provider.Provider + '"><span>Save ' + provider.DisplayName + '</span></button>'
+                        + '<button is="emby-button" type="button" class="raised emby-button kaevo-provider-save" data-save-provider="' + provider.Provider + '" data-save-state="idle"><span>Save ' + provider.DisplayName + '</span></button>'
                         + '</section>';
                 }).join('');
+                KaevoConfig.providerSavedSettings = {};
+                providers.forEach(function (provider) {
+                    KaevoConfig.providerSavedSettings[provider.Provider] = readProviderSettings(provider.Provider);
+                    refreshProviderSaveState(provider.Provider);
+                });
             }
 
             function loadProviders() {
@@ -494,6 +603,8 @@
                     document.querySelector('#SnapshotItemLimit').value = config.SnapshotItemLimit || 50;
                     document.querySelector('#RemoteMediaDeletionEnabled').checked = config.RemoteMediaDeletionEnabled === true;
                     document.querySelector('#JellyfinPluginIntegrationsEnabled').checked = config.JellyfinPluginIntegrationsEnabled === true;
+                    KaevoConfig.savedSettings = readConfigurationSettings();
+                    refreshConfigurationSaveState();
                     KaevoConfig.pairingV3Enabled = pairingV3Enabled(config);
                     renderPairingMode();
                     return Promise.all([
@@ -524,30 +635,38 @@
                 });
             });
 
+            function refreshProviderSaveStateFromEvent(event) {
+                var card = event.target.closest('[data-provider-card]');
+                if (card) refreshProviderSaveState(card.getAttribute('data-provider-card'));
+            }
+
+            document.querySelector('#KaevoProviderList').addEventListener('input', refreshProviderSaveStateFromEvent);
+            document.querySelector('#KaevoProviderList').addEventListener('change', refreshProviderSaveStateFromEvent);
             document.querySelector('#KaevoProviderList').addEventListener('click', function (event) {
                 var button = event.target.closest('[data-save-provider]');
                 if (!button) return;
+                if (button.disabled) return;
                 var provider = button.getAttribute('data-save-provider');
-                var keyInput = providerValue(provider, 'key');
-                var usernameInput = providerValue(provider, 'username');
-                var passwordInput = providerValue(provider, 'password');
+                var settingsToSave = readProviderSettings(provider);
+                setProviderSaveState(provider, 'saving');
                 Dashboard.showLoadingMsg();
                 ApiClient.ajax({
                     type: 'POST',
                     url: ApiClient.getUrl('kaevo/providers/' + provider),
                     contentType: 'application/json',
                     data: JSON.stringify({
-                        BaseUrl: providerValue(provider, 'url').value.trim(),
-                        ApiKey: keyInput ? keyInput.value.trim() : '',
-                        Username: usernameInput ? usernameInput.value.trim() : '',
-                        Password: passwordInput ? passwordInput.value : '',
-                        Enabled: providerValue(provider, 'enabled').checked
+                        BaseUrl: settingsToSave.baseUrl,
+                        ApiKey: settingsToSave.apiKey,
+                        Username: settingsToSave.username,
+                        Password: settingsToSave.password,
+                        Enabled: settingsToSave.enabled
                     })
                 }).then(function () {
                     return loadProviders();
                 }).then(function () {
                     Dashboard.alert('Connection saved.');
                 }).catch(function () {
+                    setProviderSaveState(provider, 'error');
                     Dashboard.alert('Kaevo could not save this connection. Check the local address and API key.');
                 }).finally(function () {
                     Dashboard.hideLoadingMsg();
@@ -619,26 +738,27 @@
                 createPairingTicket(true);
             });
 
-            document.querySelector('#KaevoConfigPage').addEventListener('pagehide', function () {
-                stopPairingCountdown();
-                if (KaevoConfig.saveResetTimer) clearTimeout(KaevoConfig.saveResetTimer);
-            });
+            document.querySelector('#KaevoConfigPage').addEventListener('pagehide', stopPairingCountdown);
+
+            document.querySelector('#KaevoConfigForm').addEventListener('input', refreshConfigurationSaveState);
+            document.querySelector('#KaevoConfigForm').addEventListener('change', refreshConfigurationSaveState);
 
             document.querySelector('#KaevoConfigForm').addEventListener('submit', function (event) {
                 event.preventDefault();
                 if (document.querySelector('#KaevoSaveConfiguration').disabled) return false;
+                var settingsToSave = readConfigurationSettings();
                 setSaveState('saving');
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
-                    var value = parseInt(document.querySelector('#SnapshotItemLimit').value, 10);
-                    config.SnapshotItemLimit = Math.max(1, Math.min(100, value || 50));
-                    config.RemoteMediaDeletionEnabled = document.querySelector('#RemoteMediaDeletionEnabled').checked;
-                    config.JellyfinPluginIntegrationsEnabled = document.querySelector('#JellyfinPluginIntegrationsEnabled').checked;
+                    config.SnapshotItemLimit = settingsToSave.snapshotItemLimit;
+                    config.RemoteMediaDeletionEnabled = settingsToSave.remoteMediaDeletionEnabled;
+                    config.JellyfinPluginIntegrationsEnabled = settingsToSave.jellyfinPluginIntegrationsEnabled;
                     config.OptimizerExecutionEnabled = false;
                     return ApiClient.updatePluginConfiguration(KaevoConfig.pluginUniqueId, config);
                 }).then(function (result) {
                     Dashboard.processPluginConfigurationUpdateResult(result);
-                    setSaveState('saved');
+                    KaevoConfig.savedSettings = settingsToSave;
+                    refreshConfigurationSaveState();
                 }).catch(function () {
                     setSaveState('error');
                     Dashboard.alert('Kaevo could not save these settings. Please try again.');
