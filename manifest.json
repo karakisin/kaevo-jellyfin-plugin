@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.93.0",
+        "changelog": "Keeps the Jellyfin Plugin Integrations guidance fully visible and directs users to finish Intro Skipper setup in Kaevo under Settings and Connections.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.93/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "96442a254bb352d9f45393db1183903e",
+        "timestamp": "2026-08-14T09:01:52Z"
+      },
+      {
         "version": "0.2.92.0",
         "changelog": "Adds opt-in Jellyfin plugin integrations and bounded Intro Skipper media-segment support for exact Skip Intro and Skip Recap playback prompts.",
         "targetAbi": "10.11.0.0",
