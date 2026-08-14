@@ -82,6 +82,13 @@
             padding: 1rem; margin: 1rem 0; border: 1px solid rgba(255,255,255,.1);
             border-radius: 16px; background: rgba(9,11,14,.35);
         }
+        #KaevoConfigPage .kaevo-toggle-description {
+            position: static !important; display: block; margin: -.55rem 0 1.5rem 3.1rem;
+            max-width: calc(100% - 3.1rem); line-height: 1.45;
+        }
+        #KaevoConfigPage .kaevo-toggle-description .kaevo-app-followup {
+            display: block; margin-top: .35rem;
+        }
         @media (max-width: 600px) {
             #KaevoConfigPage .kaevo-card { padding: 1rem; border-radius: 18px; }
             #KaevoConfigPage .kaevo-hero { padding-top: .75rem; }
@@ -185,6 +192,13 @@
                 width:auto; flex:0 0 auto; box-sizing:initial;
             }
             #KaevoConfigPage .kaevo-toggle-row > span { display:block; }
+            #KaevoConfigPage .kaevo-toggle-description {
+                position:static !important; display:block; margin:-.55rem 0 1.5rem 3.1rem;
+                max-width:calc(100% - 3.1rem); line-height:1.45;
+            }
+            #KaevoConfigPage .kaevo-toggle-description .kaevo-app-followup {
+                display:block; margin-top:.35rem;
+            }
             @media (max-width:600px) {
                 #KaevoConfigPage .kaevo-card { padding:1rem; border-radius:18px; }
                 #KaevoConfigPage .kaevo-hero { padding-top:.75rem; }
@@ -246,11 +260,12 @@
                     <h3>Jellyfin Plugin Integrations</h3>
                     <label class="kaevo-toggle-row">
                         <input id="JellyfinPluginIntegrationsEnabled" type="checkbox" is="emby-checkbox" />
-                        <span>
-                            Enable Jellyfin Plugin Integrations
-                            <span class="fieldDescription" style="display:block">Allows Kaevo to use supported capabilities published by installed Jellyfin plugins. Plugins are still installed and configured by a Jellyfin administrator.</span>
-                        </span>
+                        <span>Enable Jellyfin Plugin Integrations</span>
                     </label>
+                    <p class="fieldDescription kaevo-toggle-description">
+                        Allows Kaevo to use supported capabilities from installed Jellyfin plugins. Plugins are installed and configured by a Jellyfin administrator.
+                        <span class="kaevo-app-followup"><strong>Next:</strong> In Kaevo, open Settings → Connections → Jellyfin Plugins, then enable Jellyfin Plugin Integrations and Intro Skipper.</span>
+                    </p>
                     <button is="emby-button" type="submit" class="raised button-submit block emby-button">
                         <span>Save</span>
                     </button>

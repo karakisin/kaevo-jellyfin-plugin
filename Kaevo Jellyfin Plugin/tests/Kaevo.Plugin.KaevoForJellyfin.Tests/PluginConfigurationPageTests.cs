@@ -53,6 +53,10 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("Nothing extra.", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoConfigForm { width:100%; max-width:none; margin:0; }", page, StringComparison.Ordinal);
         Assert.Contains("class=\"kaevo-toggle-row\"", page, StringComparison.Ordinal);
+        Assert.Contains("class=\"fieldDescription kaevo-toggle-description\"", page, StringComparison.Ordinal);
+        Assert.Contains("position:static !important", page, StringComparison.Ordinal);
+        Assert.Contains("Settings → Connections → Jellyfin Plugins", page, StringComparison.Ordinal);
+        Assert.Contains("enable Jellyfin Plugin Integrations and Intro Skipper", page, StringComparison.Ordinal);
         Assert.Contains("type=\"checkbox\" is=\"emby-checkbox\"", page, StringComparison.Ordinal);
         Assert.Contains("input:not([type=\"checkbox\"])", page, StringComparison.Ordinal);
 
