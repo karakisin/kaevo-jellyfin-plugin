@@ -111,11 +111,7 @@ class GrantRegistry:
         now = self.clock()
         active = self.active.get(key)
         if active:
-            if now - active.activated_at > MAX_ACTIVE_SECONDS or now - active.last_seen_at > IDLE_SECONDS:
-                self.active.pop(key, None)
-                raise ValueError("relayPlaybackSessionExpired")
-            active.last_seen_at = now
-            return active.payload
+            return self.touch(token)
         payload = verify_signed_token(token, self.signing_key, clock=self.clock)
         if payload.get("mode") not in {"direct_play", "remux", "transcode"}:
             raise ValueError("relayPlaybackGrantRequired")
@@ -129,8 +125,38 @@ class GrantRegistry:
             raise ValueError("relayPlaybackGrantMalformed")
         if "trickplay" in payload and not bounded_trickplay_claim(payload["trickplay"]):
             raise ValueError("relayPlaybackGrantMalformed")
+        active_until = payload.get("active_until")
+        if active_until is not None and (
+            isinstance(active_until, bool)
+            or not isinstance(active_until, int)
+            or active_until <= now
+            or active_until > now + 30 * 24 * 60 * 60
+        ):
+            raise ValueError("relayPlaybackGrantMalformed")
         self.active[key] = ActiveGrant(payload=payload, activated_at=now, last_seen_at=now)
         return payload
+
+    def touch(self, token: str) -> dict[str, Any]:
+        """Keep an activated grant alive while its response is still streaming.
+
+        Direct Play can use one long-lived HTTP response. Without touching the
+        active grant as media bytes flow, a healthy stream appears idle to the
+        registry and later Trickplay requests are rejected after five minutes.
+        """
+        key = hashlib.sha256(token.encode()).hexdigest()
+        now = self.clock()
+        active = self.active.get(key)
+        if active is None:
+            raise ValueError("relayPlaybackSessionExpired")
+        active_until = active.payload.get("active_until")
+        if isinstance(active_until, int) and now >= active_until:
+            self.active.pop(key, None)
+            raise ValueError("relayPlaybackSessionExpired")
+        if now - active.activated_at > MAX_ACTIVE_SECONDS or now - active.last_seen_at > IDLE_SECONDS:
+            self.active.pop(key, None)
+            raise ValueError("relayPlaybackSessionExpired")
+        active.last_seen_at = now
+        return active.payload
 
 
 @dataclass
@@ -691,6 +717,7 @@ async def playback(grant_path: str, video_path: str, request: Request):
                 while True:
                     kind, value = await asyncio.wait_for(queue.get(), timeout=RESPONSE_BODY_IDLE_TIMEOUT_SECONDS)
                     if kind == "body":
+                        grants.touch(grant_token)
                         total_bytes += len(value)
                         if total_bytes > MAX_PLAYLIST_BYTES:
                             raise HTTPException(status_code=502, detail="connectorPlaylistTooLarge")
@@ -714,6 +741,7 @@ async def playback(grant_path: str, video_path: str, request: Request):
                 while True:
                     kind, value = await asyncio.wait_for(queue.get(), timeout=RESPONSE_BODY_IDLE_TIMEOUT_SECONDS)
                     if kind == "body":
+                        grants.touch(grant_token)
                         yield value
                     elif kind == "response_end":
                         break

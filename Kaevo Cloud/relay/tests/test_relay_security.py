@@ -80,6 +80,36 @@ def test_activated_playback_session_survives_grant_expiry_but_not_idle_limit():
         registry.resolve(signed)
 
 
+def test_guest_hard_stop_remains_enforced_after_grant_activation():
+    now = [1000.0]
+    registry = GrantRegistry(KEY, clock=lambda: now[0])
+    payload = playback_payload()
+    payload["active_until"] = 1060
+    signed = token(payload)
+    assert registry.resolve(signed)["mode"] == "transcode"
+    now[0] = 1059.0
+    assert registry.touch(signed)["mode"] == "transcode"
+    now[0] = 1060.0
+    with pytest.raises(ValueError, match="relayPlaybackSessionExpired"):
+        registry.touch(signed)
+
+
+def test_active_direct_stream_touch_keeps_trickplay_authorization_alive():
+    now = [1000.0]
+    registry = GrantRegistry(KEY, clock=lambda: now[0])
+    payload = playback_payload()
+    payload["mode"] = "direct_play"
+    signed = token(payload)
+    assert registry.resolve(signed)["mode"] == "direct_play"
+
+    for timestamp in (1200.0, 1400.0, 1600.0):
+        now[0] = timestamp
+        assert registry.touch(signed)["mode"] == "direct_play"
+
+    now[0] = 1601.0
+    assert registry.resolve(signed)["mode"] == "direct_play"
+
+
 def test_connector_ticket_cannot_be_used_as_playback_grant():
     registry = GrantRegistry(KEY, clock=lambda: 1000)
     signed = token({"v": 1, "type": "connector_relay", "connector_id": "connector-1", "nbf": 995, "exp": 1100})
@@ -361,6 +391,9 @@ async def test_playback_streams_media_chunk_without_body_ack(monkeypatch):
         def resolve(self, _token):
             return playback_payload()
 
+        def touch(self, _token):
+            return playback_payload()
+
     monkeypatch.setattr(relay_module, "grants", StaticGrantRegistry())
     monkeypatch.setattr(relay_module, "connectors", registry)
 
@@ -414,6 +447,10 @@ async def test_split_grant_route_rewrites_hls_response_for_avfoundation(monkeypa
             assert candidate == signed
             return playback_payload()
 
+        def touch(self, candidate):
+            assert candidate == signed
+            return playback_payload()
+
     monkeypatch.setattr(relay_module, "grants", StaticGrantRegistry())
     monkeypatch.setattr(relay_module, "connectors", registry)
 
@@ -456,6 +493,9 @@ async def test_repeated_head_playback_requests_release_connector_slots(monkeypat
 
     class StaticGrantRegistry:
         def resolve(self, _token):
+            return playback_payload()
+
+        def touch(self, _token):
             return playback_payload()
 
     monkeypatch.setattr(relay_module, "grants", StaticGrantRegistry())

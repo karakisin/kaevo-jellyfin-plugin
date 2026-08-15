@@ -93,6 +93,22 @@ public sealed class RelayRequestContextTests
     }
 
     [Fact]
+    public void GuestScopeReadUsesOnlyExactBoundUserAndValidatedImmutableIds()
+    {
+        const string userId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const string first = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string second = "cccccccccccccccccccccccccccccccc";
+        var request = KaevoCloudConnectorService.BuildGuestScopeItemsRequest(
+            userId,
+            $"{first},not-an-item,{second},{first}");
+
+        Assert.Equal($"/Users/{userId}/Items", request.Path);
+        Assert.Equal($"{first},{second}", request.Query["Ids"].GetString());
+        Assert.False(request.Query["EnableUserData"].GetBoolean());
+        Assert.Equal(2, request.Query["Limit"].GetInt32());
+    }
+
+    [Fact]
     public void MainSnapshotCatalogStillUsesExactUserItemsRoute()
     {
         const string userId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

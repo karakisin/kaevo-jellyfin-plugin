@@ -25,6 +25,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
     private const int ControlRequestConcurrency = 4;
+    // Main snapshots render compact Home/Library cards. Full people and
+    // playback media descriptors belong to the exact-item detail and
+    // playback-preparation reads; requesting them for every shelf item made
+    // one observed 181-item snapshot 2.31 MB and delayed provider readback by
+    // 17 seconds.
+    internal const string MainSnapshotItemFields =
+        "Overview,Genres,Studios,ProviderIds,PrimaryImageAspectRatio";
     private static readonly object ProfileBindingSync = new();
     private static readonly HashSet<string> SupportedLocalProviders = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -35,7 +42,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         "ParentId", "Recursive", "StartIndex", "Limit", "Fields", "EnableUserData", "EnableImages",
         "ImageTypeLimit", "EnableImageTypes", "IncludeItemTypes", "UserId", "seasonId", "isMissing",
-        "adjacentTo", "startItemId"
+        "adjacentTo", "startItemId", "SearchTerm"
     };
 
     private readonly KaevoSecretStore _secretStore;
@@ -499,6 +506,16 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         if (request.Path == "/kaevo/internal/main-snapshot")
         {
             return await ReadMainSnapshotAsync(
+                configuration,
+                secrets,
+                request.ProfileId,
+                request.Query,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (request.Path == "/kaevo/internal/guest-scope")
+        {
+            return await ReadGuestScopeAsync(
                 configuration,
                 secrets,
                 request.ProfileId,
@@ -2208,6 +2225,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             playbackInfoQuery.Add($"SubtitleStreamIndex={subtitleStreamIndex.Value}");
         }
+        var itemAuthorityTask = SendLocalAsync(
+            configuration,
+            secrets,
+            HttpMethod.Get,
+            $"/Users/{Uri.EscapeDataString(jellyfinUserId)}/Items/{Uri.EscapeDataString(itemId)}?Fields=SeriesId,SeasonId&EnableImages=false",
+            null,
+            null,
+            cancellationToken);
         var local = await SendLocalAsync(
             configuration,
             secrets,
@@ -2216,6 +2241,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             null,
             body,
             cancellationToken).ConfigureAwait(false);
+        var itemAuthority = await itemAuthorityTask.ConfigureAwait(false);
         var root = local.Payload;
         var source = root.TryGetProperty("MediaSources", out var sources) && sources.ValueKind == JsonValueKind.Array
             ? sources.EnumerateArray().FirstOrDefault()
@@ -2254,6 +2280,21 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 mediaSourceId,
                 cancellationToken).ConfigureAwait(false);
         var mediaSegments = await mediaSegmentsTask.ConfigureAwait(false);
+        var authorityRoot = itemAuthority.Payload;
+        var itemKind = authorityRoot.TryGetProperty("Type", out var typeValue)
+            ? typeValue.GetString()?.Trim().ToLowerInvariant()
+            : null;
+        var seriesId = authorityRoot.TryGetProperty("SeriesId", out var seriesValue)
+            ? seriesValue.GetString()?.Trim().ToLowerInvariant()
+            : null;
+        var seasonId = authorityRoot.TryGetProperty("SeasonId", out var seasonValue)
+            ? seasonValue.GetString()?.Trim().ToLowerInvariant()
+            : null;
+        var runTimeTicks = authorityRoot.TryGetProperty("RunTimeTicks", out var runtimeValue)
+            && runtimeValue.TryGetInt64(out var parsedRuntime)
+            && parsedRuntime > 0
+                ? parsedRuntime
+                : (long?)null;
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
             requestId = request.RequestId,
@@ -2270,6 +2311,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 subtitle_tracks = tracks.SubtitleTracks,
                 selected_audio_stream_index = audioStreamIndex ?? tracks.SelectedAudioStreamIndex,
                 selected_subtitle_stream_index = subtitleStreamIndex,
+                item_kind = itemKind == "series" ? "show" : itemKind,
+                series_id = seriesId,
+                season_id = seasonId,
+                runtime_ticks = runTimeTicks,
                 trickplay,
                 media_segments = mediaSegments
             }
@@ -2439,6 +2484,61 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             recentlyAdded = recentTask.Result.Payload,
             limits = new { movies_limit = moviesLimit, shows_limit = showsLimit, collections_limit = collectionsLimit, resume_limit = resumeLimit, recent_limit = recentLimit }
         }, JsonOptions), false);
+    }
+
+    private Task<CommandResult> ReadGuestScopeAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string? cloudProfileId,
+        IReadOnlyDictionary<string, JsonElement>? query,
+        CancellationToken cancellationToken)
+    {
+        var userId = RequireBoundJellyfinUserId(
+            configuration,
+            cloudProfileId,
+            "profileJellyfinBindingMissing");
+        var request = BuildGuestScopeItemsRequest(userId, QueryString(query, "itemIds"));
+        return SendLocalAsync(
+            configuration,
+            secrets,
+            HttpMethod.Get,
+            request.Path,
+            request.Query,
+            null,
+            cancellationToken);
+    }
+
+    internal static (string Path, IReadOnlyDictionary<string, JsonElement> Query) BuildGuestScopeItemsRequest(
+        string userId,
+        string rawItemIds)
+    {
+        if (!ItemIdRegex().IsMatch(userId))
+        {
+            throw new InvalidOperationException("profileJellyfinBindingMissing");
+        }
+        var itemIds = rawItemIds
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(value => ItemIdRegex().IsMatch(value))
+            .Select(value => value.ToLowerInvariant())
+            .Distinct(StringComparer.Ordinal)
+            .Take(500)
+            .ToArray();
+        if (itemIds.Length == 0)
+        {
+            throw new InvalidOperationException("guestScopeItemsInvalid");
+        }
+        return ($"/Users/{userId}/Items", new Dictionary<string, JsonElement>
+        {
+            ["Ids"] = JsonSerializer.SerializeToElement(string.Join(',', itemIds)),
+            ["Recursive"] = JsonSerializer.SerializeToElement(false),
+            ["StartIndex"] = JsonSerializer.SerializeToElement(0),
+            ["Limit"] = JsonSerializer.SerializeToElement(itemIds.Length),
+            ["Fields"] = JsonSerializer.SerializeToElement(MainSnapshotItemFields),
+            ["EnableUserData"] = JsonSerializer.SerializeToElement(false),
+            ["EnableImages"] = JsonSerializer.SerializeToElement(true),
+            ["ImageTypeLimit"] = JsonSerializer.SerializeToElement(1),
+            ["EnableImageTypes"] = JsonSerializer.SerializeToElement("Primary,Backdrop,Logo")
+        });
     }
 
     private Task<CommandResult> ReadSnapshotItemsAsync(

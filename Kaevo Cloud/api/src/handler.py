@@ -86,6 +86,18 @@ from profile_mapping import (
     public_mapping,
     validate_confirmed_mapping,
 )
+from guest_pass import (
+    MAX_ACTIVE_PASSES,
+    GuestPassValidationError,
+    effective_state as guest_pass_effective_state,
+    new_claim_secret,
+    normalize_create_request as normalize_guest_pass_create_request,
+    pin_matches as guest_pass_pin_matches,
+    pin_record as guest_pass_pin_record,
+    public_projection as public_guest_pass,
+    scope_authorizes as guest_pass_scope_authorizes,
+    secret_digest as guest_pass_secret_digest,
+)
 from pairing_v3 import (
     AUTHORIZATION_AUDIENCE,
     PROTOCOL as PAIRING_V3_PROTOCOL,
@@ -144,6 +156,7 @@ IDENTITY_MEMBERSHIPS_TABLE = os.environ.get("IDENTITY_MEMBERSHIPS_TABLE")
 IDENTITY_HOUSEHOLDS_TABLE = os.environ.get("IDENTITY_HOUSEHOLDS_TABLE")
 IDENTITY_PROFILES_TABLE = os.environ.get("IDENTITY_PROFILES_TABLE")
 HOUSEHOLD_INVITATIONS_TABLE = os.environ.get("HOUSEHOLD_INVITATIONS_TABLE")
+GUEST_PASSES_TABLE = os.environ.get("GUEST_PASSES_TABLE")
 HOUSEHOLD_JOIN_TRANSACTIONS_TABLE = os.environ.get("HOUSEHOLD_JOIN_TRANSACTIONS_TABLE")
 ACCOUNTS_TABLE = os.environ.get("ACCOUNTS_TABLE")
 AUTH_IDENTITIES_TABLE = os.environ.get("AUTH_IDENTITIES_TABLE")
@@ -229,6 +242,7 @@ identity_memberships_table = dynamodb.Table(IDENTITY_MEMBERSHIPS_TABLE) if IDENT
 identity_households_table = dynamodb.Table(IDENTITY_HOUSEHOLDS_TABLE) if IDENTITY_HOUSEHOLDS_TABLE else None
 identity_profiles_table = dynamodb.Table(IDENTITY_PROFILES_TABLE) if IDENTITY_PROFILES_TABLE else None
 household_invitations_table = dynamodb.Table(HOUSEHOLD_INVITATIONS_TABLE) if HOUSEHOLD_INVITATIONS_TABLE else None
+guest_passes_table = dynamodb.Table(GUEST_PASSES_TABLE) if GUEST_PASSES_TABLE else None
 household_join_transactions_table = dynamodb.Table(HOUSEHOLD_JOIN_TRANSACTIONS_TABLE) if HOUSEHOLD_JOIN_TRANSACTIONS_TABLE else None
 accounts_table = dynamodb.Table(ACCOUNTS_TABLE) if ACCOUNTS_TABLE else None
 auth_identities_table = dynamodb.Table(AUTH_IDENTITIES_TABLE) if AUTH_IDENTITIES_TABLE else None
@@ -9660,6 +9674,774 @@ def household_invitation_code_expiration(invitation):
     return int(invitation.get("code_expires_at") or invitation.get("expires_at") or 0)
 
 
+GUEST_PASS_RECORD_RETENTION_SECONDS = 30 * 24 * 60 * 60
+GUEST_PASS_ACCESS_TOKEN_MAX_SECONDS = 60 * 24 * 60 * 60
+
+
+def _guest_pass_owner_session(event):
+    session, error_response = household_manager_bound_session(event)
+    if error_response:
+        return None, error_response
+    if str(session.get("household_access_role") or "").strip().lower() != "owner":
+        return None, response(403, {"state": "owner_required"})
+    return session, None
+
+
+def _guest_pass_records(household_id):
+    if guest_passes_table is None or not household_id:
+        return []
+    records = []
+    query = {
+        "IndexName": "household_id-created_at_epoch-index",
+        "KeyConditionExpression": Key("household_id").eq(household_id),
+        "ScanIndexForward": False,
+    }
+    while True:
+        page = guest_passes_table.query(**query)
+        for candidate in page.get("Items", []):
+            if candidate.get("record_type") != "guest_pass":
+                continue
+            pass_id = str(candidate.get("pass_id") or "")
+            if not pass_id:
+                continue
+            exact = guest_passes_table.get_item(
+                Key={"pass_id": pass_id}, ConsistentRead=True,
+            ).get("Item")
+            if (
+                isinstance(exact, dict)
+                and hmac.compare_digest(str(exact.get("household_id") or ""), household_id)
+            ):
+                records.append(exact)
+        last_key = page.get("LastEvaluatedKey")
+        if not last_key:
+            return records
+        query["ExclusiveStartKey"] = last_key
+
+
+def create_guest_pass(event):
+    session, error_response = _guest_pass_owner_session(event)
+    if error_response:
+        return error_response
+    if guest_passes_table is None:
+        return response(503, {"state": "guest_pass_storage_unavailable"})
+    body = parse_json_body(event)
+    if body is None:
+        return response(400, {"state": "invalid_guest_pass"})
+    now = epoch_now()
+    try:
+        normalized = normalize_guest_pass_create_request(body, now=now)
+    except GuestPassValidationError as error:
+        return response(400, {"state": error.state})
+
+    household_id = str(session.get("household_id") or "")
+    source_profile_id = normalized["source_profile_id"]
+    if identity_profiles_table is None:
+        return response(503, {"state": "identity_storage_unavailable"})
+    source_profile = identity_profiles_table.get_item(
+        Key={"profile_id": source_profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if not (
+        isinstance(source_profile, dict)
+        and source_profile.get("state") == "active"
+        and hmac.compare_digest(str(source_profile.get("household_id") or ""), household_id)
+    ):
+        return response(404, {"state": "source_profile_not_found"})
+    owner_profile = identity_profiles_table.get_item(
+        Key={"profile_id": str(session.get("profile_id") or "")},
+        ConsistentRead=True,
+    ).get("Item")
+    owner_display_name = (
+        str(owner_profile.get("display_name") or "Owner").strip()[:50]
+        if isinstance(owner_profile, dict)
+        else "Owner"
+    ) or "Owner"
+
+    pass_id = f"guest_{secrets.token_urlsafe(24)}"
+    claim_secret = new_claim_secret()
+    pin_salt, pin_digest = guest_pass_pin_record(normalized.pop("pin"))
+    created_at = utc_now_iso()
+    expiration = normalized["expiration"]
+    if expiration["kind"] == "fixed":
+        slot_expires_at = int(expiration["at"]) + GUEST_PASS_RECORD_RETENTION_SECONDS
+    else:
+        slot_expires_at = (
+            int(normalized["start_by"])
+            + int(expiration["seconds"])
+            + GUEST_PASS_RECORD_RETENTION_SECONDS
+        )
+    item = {
+        "pass_id": pass_id,
+        "record_type": "guest_pass",
+        "household_id": household_id,
+        "account_id": str(session.get("account_id") or ""),
+        "owner_principal_id": str(session.get("principal_id") or ""),
+        "owner_profile_id": str(session.get("profile_id") or ""),
+        "owner_display_name": owner_display_name,
+        **normalized,
+        "claim_secret_hash": guest_pass_secret_digest(claim_secret),
+        "pin_salt": pin_salt,
+        "pin_digest": pin_digest,
+        "state": "pending",
+        "created_at": created_at,
+        "created_at_epoch": now,
+        "expires_at": slot_expires_at,
+    }
+    if expiration["kind"] == "fixed":
+        item["access_expires_at"] = int(expiration["at"])
+    household_slot_prefix = guest_pass_secret_digest(household_id)[:24]
+    claimed_slot_id = None
+    for slot_index in range(MAX_ACTIVE_PASSES):
+        slot_id = f"guest_slot_{household_slot_prefix}_{slot_index}"
+        candidate = dict(item)
+        candidate["slot_id"] = slot_id
+        try:
+            dynamodb.meta.client.transact_write_items(TransactItems=[
+                {"Put": {
+                    "TableName": guest_passes_table.name,
+                    "Item": {
+                        "pass_id": slot_id,
+                        "record_type": "guest_pass_slot",
+                        "household_id": household_id,
+                        "created_at_epoch": now,
+                        "occupant_pass_id": pass_id,
+                        "expires_at": slot_expires_at,
+                    },
+                    "ConditionExpression": "attribute_not_exists(pass_id) OR expires_at < :now",
+                    "ExpressionAttributeValues": {":now": now},
+                }},
+                {"Put": {
+                    "TableName": guest_passes_table.name,
+                    "Item": candidate,
+                    "ConditionExpression": "attribute_not_exists(pass_id)",
+                }},
+            ])
+            item = candidate
+            claimed_slot_id = slot_id
+            break
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in {
+                "ConditionalCheckFailedException", "TransactionCanceledException",
+            }:
+                continue
+            raise
+    if claimed_slot_id is None:
+        return response(409, {"state": "guest_pass_limit_reached", "limit": MAX_ACTIVE_PASSES})
+    projected = public_guest_pass(item, now=now)
+    projected.update({
+        "state": "guest_pass_created",
+        "claim_url": f"kaevo://guest-pass/claim?pass_id={pass_id}&claim={claim_secret}",
+        "pin_required": bool(pin_digest),
+    })
+    return response(201, projected)
+
+
+def list_guest_passes(event):
+    session, error_response = _guest_pass_owner_session(event)
+    if error_response:
+        return error_response
+    if guest_passes_table is None:
+        return response(503, {"state": "guest_pass_storage_unavailable"})
+    now = epoch_now()
+    items = [
+        public_guest_pass(item, now=now)
+        for item in _guest_pass_records(str(session.get("household_id") or ""))
+    ]
+    return response(200, {"state": "guest_passes_listed", "items": items})
+
+
+def revoke_guest_pass(event, path):
+    session, error_response = _guest_pass_owner_session(event)
+    if error_response:
+        return error_response
+    if guest_passes_table is None:
+        return response(503, {"state": "guest_pass_storage_unavailable"})
+    pass_id = path.removeprefix("/v1/guest-passes/").removesuffix("/revoke").strip("/")
+    item = guest_passes_table.get_item(
+        Key={"pass_id": pass_id}, ConsistentRead=True,
+    ).get("Item")
+    if not (
+        isinstance(item, dict)
+        and hmac.compare_digest(str(item.get("household_id") or ""), str(session.get("household_id") or ""))
+    ):
+        return response(404, {"state": "guest_pass_not_found"})
+    now = epoch_now()
+    if guest_pass_effective_state(item, now=now) == "revoked":
+        return response(200, {"state": "guest_pass_revoked", "pass_id": pass_id})
+    slot_id = str(item.get("slot_id") or "")
+    try:
+        transactions = [{"Update": {
+            "TableName": guest_passes_table.name,
+            "Key": {"pass_id": pass_id},
+            "UpdateExpression": "SET #state = :revoked, revoked_at = :revoked_at, expires_at = :expires_at",
+            "ConditionExpression": "household_id = :household_id AND #state <> :revoked",
+            "ExpressionAttributeNames": {"#state": "state"},
+            "ExpressionAttributeValues": {
+                ":revoked": "revoked",
+                ":revoked_at": utc_now_iso(),
+                ":expires_at": now + GUEST_PASS_RECORD_RETENTION_SECONDS,
+                ":household_id": str(session.get("household_id") or ""),
+            },
+        }}]
+        if slot_id:
+            transactions.append({"Delete": {
+                "TableName": guest_passes_table.name,
+                "Key": {"pass_id": slot_id},
+                "ConditionExpression": "occupant_pass_id = :pass_id AND household_id = :household_id",
+                "ExpressionAttributeValues": {
+                    ":pass_id": pass_id,
+                    ":household_id": str(session.get("household_id") or ""),
+                },
+            }})
+        dynamodb.meta.client.transact_write_items(TransactItems=transactions)
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return response(409, {"state": "guest_pass_revoke_conflict"})
+        raise
+    return response(200, {"state": "guest_pass_revoked", "pass_id": pass_id})
+
+
+def claim_guest_pass(event):
+    if guest_passes_table is None or app_sessions_table is None:
+        return response(503, {"state": "guest_pass_storage_unavailable"})
+    body = parse_json_body(event)
+    if not isinstance(body, dict):
+        return response(400, {"state": "invalid_guest_pass_claim"})
+    pass_id = str(body.get("pass_id") or "").strip()
+    claim_secret = str(body.get("claim_secret") or "").strip()
+    device_id = str(body.get("device_id") or "").strip()
+    public_jwk = body.get("public_jwk")
+    if not (
+        re.fullmatch(r"guest_[A-Za-z0-9_-]{16,128}", pass_id)
+        and 32 <= len(claim_secret) <= 256
+        and SAFE_PLAYBACK_IDENTIFIER.fullmatch(device_id)
+        and isinstance(public_jwk, dict)
+    ):
+        return response(400, {"state": "invalid_guest_pass_claim"})
+    try:
+        validate_public_jwk(public_jwk)
+        thumbprint = jwk_thumbprint(public_jwk)
+        verify_dpop(
+            str(header_value(event, "dpop") or ""),
+            method=method_for(event),
+            url=request_absolute_url(event),
+            expected_thumbprint=thumbprint,
+            replay_guard=record_dpop_jti,
+        )
+    except IdentityError as error:
+        return identity_error_response(error)
+
+    item = guest_passes_table.get_item(
+        Key={"pass_id": pass_id}, ConsistentRead=True,
+    ).get("Item")
+    now = epoch_now()
+    if not isinstance(item, dict) or guest_pass_effective_state(item, now=now) not in {"pending", "claimed"}:
+        return response(404, {"state": "guest_pass_unavailable"})
+    if not hmac.compare_digest(
+        str(item.get("claim_secret_hash") or ""), guest_pass_secret_digest(claim_secret),
+    ) or not guest_pass_pin_matches(body.get("pin"), str(item.get("pin_salt") or ""), str(item.get("pin_digest") or "")):
+        return response(404, {"state": "guest_pass_unavailable"})
+
+    already_claimed = str(item.get("state") or "") == "claimed"
+    if already_claimed and not (
+        hmac.compare_digest(str(item.get("device_id") or ""), device_id)
+        and hmac.compare_digest(str(item.get("key_thumbprint") or ""), thumbprint)
+    ):
+        return response(409, {"state": "guest_pass_device_bound"})
+    if not already_claimed:
+        try:
+            guest_passes_table.update_item(
+                Key={"pass_id": pass_id},
+                UpdateExpression=(
+                    "SET #state = :claimed, claimed_at = :claimed_at, "
+                    "device_id = :device_id, key_thumbprint = :thumbprint"
+                ),
+                ConditionExpression="#state = :pending AND start_by >= :now",
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={
+                    ":claimed": "claimed", ":pending": "pending",
+                    ":claimed_at": utc_now_iso(), ":device_id": device_id,
+                    ":thumbprint": thumbprint, ":now": now,
+                },
+            )
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return response(409, {"state": "guest_pass_claim_conflict"})
+            raise
+
+    access_token = secrets.token_urlsafe(32)
+    expires_at = now + GUEST_PASS_ACCESS_TOKEN_MAX_SECONDS
+    app_sessions_table.put_item(Item={
+        "token_hash": f"guest#{production_token_hash(access_token)}",
+        "record_type": "guest_access",
+        "pass_id": pass_id,
+        "household_id": str(item.get("household_id") or ""),
+        "profile_id": str(item.get("source_profile_id") or ""),
+        "device_id": device_id,
+        "key_thumbprint": thumbprint,
+        "state": "active",
+        "created_at_epoch": now,
+        "expires_at": expires_at,
+    })
+    projection = public_guest_pass({**item, "state": "claimed", "device_id": device_id}, now=now)
+    return response(200, {
+        "state": "guest_pass_claimed",
+        "server_time": now,
+        "token_type": "DPoP",  # nosec B105
+        "access_token": access_token,
+        "access_expires_at": expires_at,
+        "guest_pass": projection,
+    })
+
+
+def _guest_access_context(event, *, allow_expired_finish_current=False):
+    """Resolve one exact DPoP-bound Guest Pass without creating a profile."""
+    if app_sessions_table is None or guest_passes_table is None:
+        return None, None, response(503, {"state": "guest_pass_storage_unavailable"})
+    token = app_bearer_token(event)
+    if not token:
+        return None, None, response(401, {"state": "guest_pass_unauthorized"})
+    access = app_sessions_table.get_item(
+        Key={"token_hash": f"guest#{production_token_hash(token)}"},
+        ConsistentRead=True,
+    ).get("Item")
+    now = epoch_now()
+    if not (
+        isinstance(access, dict)
+        and access.get("record_type") == "guest_access"
+        and access.get("state") == "active"
+        and int(access.get("expires_at") or 0) > now
+    ):
+        return None, None, response(401, {"state": "guest_pass_unauthorized"})
+    try:
+        verify_dpop(
+            str(header_value(event, "dpop") or ""),
+            method=method_for(event),
+            url=request_absolute_url(event),
+            expected_thumbprint=str(access.get("key_thumbprint") or ""),
+            access_token=token,
+            replay_guard=record_dpop_jti,
+        )
+    except IdentityError:
+        return None, None, response(401, {"state": "guest_pass_unauthorized"})
+    guest_pass = guest_passes_table.get_item(
+        Key={"pass_id": str(access.get("pass_id") or "")},
+        ConsistentRead=True,
+    ).get("Item")
+    guest_state = guest_pass_effective_state(guest_pass, now=now) if isinstance(guest_pass, dict) else "unavailable"
+    finish_current = bool(
+        allow_expired_finish_current
+        and guest_state == "expired"
+        and str((guest_pass or {}).get("expiration_behavior") or "") == "finish_current_video"
+        and isinstance((guest_pass or {}).get("active_playback"), dict)
+    )
+    if not (
+        isinstance(guest_pass, dict)
+        and hmac.compare_digest(str(guest_pass.get("pass_id") or ""), str(access.get("pass_id") or ""))
+        and hmac.compare_digest(str(guest_pass.get("household_id") or ""), str(access.get("household_id") or ""))
+        and hmac.compare_digest(str(guest_pass.get("source_profile_id") or ""), str(access.get("profile_id") or ""))
+        and hmac.compare_digest(str(guest_pass.get("device_id") or ""), str(access.get("device_id") or ""))
+        and hmac.compare_digest(str(guest_pass.get("key_thumbprint") or ""), str(access.get("key_thumbprint") or ""))
+        and (guest_state in {"claimed", "active"} or finish_current)
+    ):
+        return None, None, response(403, {"state": "guest_pass_unavailable"})
+    return access, guest_pass, None
+
+
+def guest_pass_session(event):
+    _access, guest_pass, error_response = _guest_access_context(event)
+    if error_response:
+        return error_response
+    now = epoch_now()
+    return response(200, {
+        "state": "guest_pass_active",
+        "server_time": now,
+        "guest_pass": public_guest_pass(guest_pass, now=now),
+    })
+
+
+def _guest_item_authorized(guest_pass, item):
+    if not isinstance(item, dict):
+        return False
+    item_id = str(item.get("Id") or item.get("id") or "").strip().lower()
+    raw_kind = str(item.get("Type") or item.get("type") or "").strip().lower()
+    item_kind = {"series": "show"}.get(raw_kind, raw_kind)
+    ancestry = {
+        "show": str(item.get("SeriesId") or item.get("series_id") or "").strip().lower(),
+        "season": str(item.get("SeasonId") or item.get("season_id") or "").strip().lower(),
+    }
+    return guest_pass_scope_authorizes(
+        guest_pass.get("scope") or {},
+        item_id=item_id,
+        item_kind=item_kind,
+        ancestor_ids=ancestry,
+    )
+
+
+def _guest_filter_item_page(guest_pass, page):
+    if not isinstance(page, dict):
+        return {"Items": [], "TotalRecordCount": 0, "StartIndex": 0}
+    items_key = "Items" if isinstance(page.get("Items"), list) else "items"
+    filtered = [
+        item for item in (page.get(items_key) or [])
+        if _guest_item_authorized(guest_pass, item)
+    ]
+    result = dict(page)
+    result[items_key] = filtered
+    for count_key in ("TotalRecordCount", "totalRecordCount"):
+        if count_key in result:
+            result[count_key] = len(filtered)
+    return result
+
+
+def _guest_annotate_item_page(guest_pass, page):
+    """Keep an owner-authorized full-library search browse-only by default."""
+    if not isinstance(page, dict):
+        return {"Items": [], "TotalRecordCount": 0, "StartIndex": 0}
+    items_key = "Items" if isinstance(page.get("Items"), list) else "items"
+    result = dict(page)
+    result[items_key] = [
+        {**item, "GuestPlayable": _guest_item_authorized(guest_pass, item)}
+        for item in (page.get(items_key) or [])
+        if isinstance(item, dict)
+    ]
+    return result
+
+
+def _guest_filter_main_snapshot(guest_pass, payload):
+    if not isinstance(payload, dict):
+        return {"state": "guest_content_unavailable"}
+    result = dict(payload)
+    for key in ("movies", "shows", "continueWatching", "recentlyAdded"):
+        result[key] = _guest_filter_item_page(guest_pass, payload.get(key))
+    if str((guest_pass.get("scope") or {}).get("kind") or "") != "full_library":
+        # Library and collection names can reveal content outside the pass.
+        result["collections"] = _guest_filter_item_page(guest_pass, None)
+        result["views"] = _guest_filter_item_page(guest_pass, None)
+    return result
+
+
+def _queue_guest_remote_request(
+    guest_pass, request_payload, *, connector=None, guest_search_full=False,
+):
+    connector = connector or latest_online_connector_for_profile(str(guest_pass.get("source_profile_id") or ""))
+    if not connector:
+        return None
+    now_iso = utc_now_iso()
+    request_id = str(uuid.uuid4())
+    priority = remote_request_priority(request_payload)
+    item = {
+        "request_id": request_id,
+        "profile_id": str(guest_pass.get("source_profile_id") or ""),
+        "guest_pass_id": str(guest_pass.get("pass_id") or ""),
+        "guest_search_full": bool(guest_search_full),
+        "connector_id": str(connector.get("connector_id") or ""),
+        "status": "pending",
+        "status_created_at": status_sort_key("pending", now_iso, request_id, priority),
+        "priority": priority,
+        "request_json": json.dumps(request_payload, separators=(",", ":"), sort_keys=True),
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "expires_at": epoch_now() + REMOTE_REQUEST_TTL_SECONDS,
+    }
+    remote_requests_table.put_item(Item=item)
+    return item
+
+
+def create_guest_content_request(event):
+    _access, guest_pass, error_response = _guest_access_context(event)
+    if error_response:
+        return error_response
+    if remote_requests_table is None:
+        return response(503, {"state": "guest_content_unavailable"})
+    body = parse_json_body(event) or {}
+    resource = str(body.get("resource") or "home").strip().lower()
+    connector = latest_online_connector_for_profile(str(guest_pass.get("source_profile_id") or ""))
+    if not connector:
+        return response(409, {"state": "connector_unavailable"})
+    if resource == "home":
+        scope = guest_pass.get("scope") or {}
+        if str(scope.get("kind") or "") == "full_library":
+            path = "/kaevo/internal/main-snapshot"
+            query = {
+                "moviesLimit": "80", "showsLimit": "80", "collectionsLimit": "50",
+                "resumeLimit": "20", "recentLimit": "30",
+            }
+        else:
+            item_ids = [
+                str(entry.get("item_id") or "").strip().lower()
+                for entry in (scope.get("entries") or [])
+                if isinstance(entry, dict)
+            ]
+            path = "/kaevo/internal/guest-scope"
+            query = {"itemIds": ",".join(item_ids)}
+    elif resource in {"seasons", "episodes"}:
+        series_id = str(body.get("series_id") or "").strip().lower()
+        if not SAFE_JELLYFIN_ITEM_ID.fullmatch(series_id):
+            return response(400, {"state": "invalid_guest_content_scope"})
+        path = f"/Shows/{series_id}/{'Seasons' if resource == 'seasons' else 'Episodes'}"
+        query = {}
+        season_id = str(body.get("season_id") or "").strip().lower()
+        if resource == "episodes" and season_id:
+            if not SAFE_JELLYFIN_ITEM_ID.fullmatch(season_id):
+                return response(400, {"state": "invalid_guest_content_scope"})
+            query["seasonId"] = season_id
+        path, query, binding_error = _authorized_jellyfin_metadata_request(
+            str(guest_pass.get("source_profile_id") or ""),
+            str(connector.get("connector_id") or ""),
+            path,
+            query,
+        )
+        if binding_error:
+            return response(409, {"state": "guest_content_unavailable"})
+    elif resource == "search":
+        permissions = guest_pass.get("permissions") or {}
+        if not (
+            bool_value(permissions.get("search_granted_content"), False)
+            or bool_value(permissions.get("search_full_library"), False)
+        ):
+            return response(403, {"state": "guest_search_not_allowed"})
+        search_text = str(body.get("query") or "").strip()
+        if not 2 <= len(search_text) <= 100 or any(ord(char) < 32 for char in search_text):
+            return response(400, {"state": "invalid_guest_search"})
+        path = "/Users/00000000000000000000000000000000/Items"
+        query = {
+            "SearchTerm": search_text,
+            "Recursive": "true",
+            "StartIndex": "0",
+            "Limit": "50",
+            "IncludeItemTypes": "Movie,Series,Season,Episode",
+            "Fields": "Overview,Genres,Studios,ProviderIds,PrimaryImageAspectRatio",
+            "EnableUserData": "false",
+            "EnableImages": "true",
+            "ImageTypeLimit": "1",
+            "EnableImageTypes": "Primary,Backdrop,Logo",
+        }
+        path, query, binding_error = _authorized_jellyfin_metadata_request(
+            str(guest_pass.get("source_profile_id") or ""),
+            str(connector.get("connector_id") or ""),
+            path,
+            query,
+        )
+        if binding_error:
+            return response(409, {"state": "guest_content_unavailable"})
+    else:
+        return response(400, {"state": "invalid_guest_content_resource"})
+    request_payload = {"provider": "jellyfin", "method": "GET", "path": path, "query": query}
+    queued = _queue_guest_remote_request(
+        guest_pass,
+        request_payload,
+        connector=connector,
+        guest_search_full=(
+            resource == "search"
+            and bool_value((guest_pass.get("permissions") or {}).get("search_full_library"), False)
+        ),
+    )
+    if queued is None:
+        return response(409, {"state": "connector_unavailable"})
+    return response(202, {"state": "queued", "request_id": queued["request_id"]})
+
+
+def create_guest_playback_request(event):
+    access, guest_pass, error_response = _guest_access_context(event)
+    if error_response:
+        return error_response
+    if remote_requests_table is None:
+        return response(503, {"state": "guest_playback_unavailable"})
+    body = parse_json_body(event) or {}
+    item_id = str(body.get("item_id") or "").strip().lower()
+    if not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
+        return response(400, {"state": "invalid_guest_playback_item"})
+    request_payload, error = normalize_remote_command(
+        "jellyfin.prepare_playback",
+        {
+            "item_id": item_id,
+            "device_id": str(access.get("device_id") or ""),
+            "max_bitrate": min(positive_int(body.get("max_bitrate") or 40_000_000, maximum=100_000_000) or 40_000_000, 40_000_000),
+            "media_segments_enabled": False,
+        },
+    )
+    if request_payload is None:
+        return response(400, {"state": "invalid_guest_playback", "message": error})
+    queued = _queue_guest_remote_request(guest_pass, request_payload)
+    if queued is None:
+        return response(409, {"state": "connector_unavailable"})
+    return response(202, {"state": "queued", "request_id": queued["request_id"]})
+
+
+def record_guest_playback_activity(event):
+    _access, guest_pass, error_response = _guest_access_context(
+        event, allow_expired_finish_current=True,
+    )
+    if error_response:
+        return error_response
+    body = parse_json_body(event) or {}
+    activity = str(body.get("event") or "").strip().lower()
+    item_id = str(body.get("item_id") or "").strip().lower()
+    playback_session_id = str(body.get("playback_session_id") or "").strip()
+    position_ticks = body.get("position_ticks")
+    if (
+        activity not in {"started", "progress", "stopped", "completed", "marked_watched"}
+        or not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id)
+        or not SAFE_PLAYBACK_IDENTIFIER.fullmatch(playback_session_id)
+        or isinstance(position_ticks, bool)
+        or not isinstance(position_ticks, int)
+        or not 0 <= position_ticks <= 6_048_000_000_000
+    ):
+        return response(400, {"state": "invalid_guest_playback_activity"})
+    if activity == "marked_watched" and not bool_value(
+        (guest_pass.get("permissions") or {}).get("mark_watched"), False,
+    ):
+        return response(403, {"state": "guest_mark_watched_not_allowed"})
+    active = guest_pass.get("active_playback") or {}
+    if not (
+        isinstance(active, dict)
+        and hmac.compare_digest(str(active.get("item_id") or ""), item_id)
+        and hmac.compare_digest(str(active.get("playback_session_id") or ""), playback_session_id)
+    ):
+        return response(409, {"state": "guest_playback_session_mismatch"})
+    runtime_ticks = int(active.get("runtime_ticks") or 0)
+    completed = activity == "marked_watched" or (
+        activity == "completed"
+        and (runtime_ticks <= 0 or position_ticks >= int(runtime_ticks * 0.9))
+    )
+    now = epoch_now()
+    set_clauses = ["last_activity = :activity"]
+    values = {
+        ":activity": {
+            "event": activity,
+            "item_id": item_id,
+            "playback_session_id": playback_session_id,
+            "position_ticks": position_ticks,
+            "recorded_at": utc_now_iso(),
+        },
+        ":pass_id": str(guest_pass.get("pass_id") or ""),
+        ":session_id": playback_session_id,
+    }
+    if completed and str(guest_pass.get("replay_policy") or "") == "one_completed_view":
+        set_clauses.append(
+            "completed_item_ids = list_append(if_not_exists(completed_item_ids, :empty), :item)"
+        )
+        values[":empty"] = []
+        values[":item"] = [item_id]
+    update = "SET " + ", ".join(set_clauses)
+    if activity in {"stopped", "completed", "marked_watched"}:
+        update += " REMOVE active_playback"
+    try:
+        guest_passes_table.update_item(
+            Key={"pass_id": str(guest_pass.get("pass_id") or "")},
+            UpdateExpression=update,
+            ConditionExpression=(
+                "pass_id = :pass_id AND active_playback.playback_session_id = :session_id"
+            ),
+            ExpressionAttributeValues=values,
+        )
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return response(409, {"state": "guest_playback_session_mismatch"})
+        raise
+    return response(200, {
+        "state": "guest_playback_completed" if completed else "guest_playback_activity_recorded",
+        "server_time": now,
+    })
+
+
+def _activate_guest_pass_for_playback(guest_pass, item_id):
+    now = epoch_now()
+    if guest_pass_effective_state(guest_pass, now=now) not in {"claimed", "active"}:
+        return None
+    completed = guest_pass.get("completed_item_ids") or []
+    if (
+        guest_pass.get("replay_policy") == "one_completed_view"
+        and any(hmac.compare_digest(str(value or ""), item_id) for value in completed)
+    ):
+        return None
+    if guest_pass.get("started_at"):
+        return guest_pass
+    expiration = guest_pass.get("expiration") or {}
+    access_expires_at = (
+        now + int(expiration.get("seconds") or 0)
+        if expiration.get("kind") == "duration_after_first_play"
+        else int(expiration.get("at") or 0)
+    )
+    if access_expires_at <= now:
+        return None
+    try:
+        guest_passes_table.update_item(
+            Key={"pass_id": str(guest_pass.get("pass_id") or "")},
+            UpdateExpression=(
+                "SET #state = :active, started_at = :started_at, "
+                "access_expires_at = :access_expires_at REMOVE claim_secret_hash"
+            ),
+            ConditionExpression=(
+                "attribute_not_exists(started_at) AND start_by >= :now "
+                "AND #state = :claimed"
+            ),
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":active": "active", ":claimed": "claimed", ":started_at": utc_now_iso(),
+                ":access_expires_at": access_expires_at, ":now": now,
+            },
+        )
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+    exact = guest_passes_table.get_item(
+        Key={"pass_id": str(guest_pass.get("pass_id") or "")}, ConsistentRead=True,
+    ).get("Item")
+    return exact if isinstance(exact, dict) and guest_pass_effective_state(exact, now=now) == "active" else None
+
+
+def get_guest_remote_request(event, path):
+    _access, guest_pass, error_response = _guest_access_context(event)
+    if error_response:
+        return error_response
+    request_id = path.removeprefix("/v1/guest-pass/remote-requests/").strip("/")
+    if not request_id or remote_requests_table is None:
+        return response(404, {"state": "not_found"})
+    item = remote_requests_table.get_item(
+        Key={"request_id": request_id}, ConsistentRead=True,
+    ).get("Item")
+    if not (
+        isinstance(item, dict)
+        and hmac.compare_digest(str(item.get("guest_pass_id") or ""), str(guest_pass.get("pass_id") or ""))
+        and hmac.compare_digest(str(item.get("profile_id") or ""), str(guest_pass.get("source_profile_id") or ""))
+    ):
+        return response(404, {"state": "not_found"})
+    projected = public_remote_request_item(item, include_payload=True)
+    if item.get("status") == "completed":
+        request_payload = parse_json_field(item.get("request_json"), {})
+        if request_payload.get("path") == "/kaevo/internal/main-snapshot":
+            projected["response"] = _guest_filter_main_snapshot(
+                guest_pass, decode_remote_response_payload(item, {}),
+            )
+        elif request_payload.get("path") == "/kaevo/internal/guest-scope":
+            projected["response"] = {
+                "scopeItems": _guest_filter_item_page(
+                    guest_pass, decode_remote_response_payload(item, {}),
+                )
+            }
+        elif re.fullmatch(
+            r"/Shows/[0-9a-fA-F]{32}/(Seasons|Episodes)",
+            str(request_payload.get("path") or ""),
+        ):
+            projected["response"] = {
+                "scopeItems": _guest_filter_item_page(
+                    guest_pass, decode_remote_response_payload(item, {}),
+                )
+            }
+        elif item.get("guest_pass_id") and re.fullmatch(
+            r"/Users/[0-9a-fA-F]{32}/Items",
+            str(request_payload.get("path") or ""),
+        ):
+            page = decode_remote_response_payload(item, {})
+            projected["response"] = {
+                "scopeItems": _guest_annotate_item_page(guest_pass, page)
+                if bool_value(item.get("guest_search_full"), False)
+                else _guest_filter_item_page(guest_pass, page)
+            }
+    return response(200, {"state": str(item.get("status") or "unknown"), "request": projected})
+
+
 def household_invitation_response(invitation, join_code, *, state):
     payload = {
         "state": state,
@@ -12585,6 +13367,7 @@ def _bounded_media_segments(value, expected_item_id):
 def _issued_playback_grant(
     *, profile_id, device_id, item_id, media_source_id,
     playback_session_id, mode, max_bitrate, connector, trickplay=None,
+    expires_at_cap=None, active_until=None,
 ):
     """Mint one exact, short-lived relay capability after caller validation."""
     pairing_v3_connector = pairing_v3_connector_can_issue_playback_grants(connector)
@@ -12608,8 +13391,22 @@ def _issued_playback_grant(
         "max_concurrent": 1,
         "iat": now,
         "nbf": now - 5,
-        "exp": now + PLAYBACK_GRANT_TTL_SECONDS,
+        "exp": min(
+            now + PLAYBACK_GRANT_TTL_SECONDS,
+            int(expires_at_cap),
+        ) if expires_at_cap else now + PLAYBACK_GRANT_TTL_SECONDS,
     }
+    if expires_at_cap:
+        # Unlike the short issuance window in ``exp``, this bound is enforced
+        # by the relay after a grant has activated. It is what makes a Guest
+        # Pass hard stop remain authoritative during an already-open stream.
+        payload["active_until"] = int(expires_at_cap)
+    elif active_until:
+        # A finish-current-video Guest Pass is allowed to outlive the pass
+        # window only for this exact prepared title. Bound that exception to
+        # the trusted runtime (plus a small startup buffer), never the relay's
+        # general activated-grant lifetime.
+        payload["active_until"] = int(active_until)
     normalized_trickplay = _bounded_trickplay_metadata(trickplay)
     if normalized_trickplay is not None:
         payload["trickplay"] = normalized_trickplay
@@ -12737,6 +13534,9 @@ def _completion_with_embedded_playback_grant(item, response_payload):
         result.get("max_bitrate") or requested_max_bitrate,
         maximum=100_000_000,
     )
+    guest_expires_at_cap = None
+    guest_active_until = None
+    guest_pass_id = str(item.get("guest_pass_id") or "").strip()
     if not (
         SAFE_PLAYBACK_IDENTIFIER.fullmatch(profile_id)
         and SAFE_PLAYBACK_IDENTIFIER.fullmatch(device_id)
@@ -12763,6 +13563,58 @@ def _completion_with_embedded_playback_grant(item, response_payload):
     ).get("Item")
     if not isinstance(connector, dict):
         return response_payload
+    if guest_pass_id:
+        if guest_passes_table is None:
+            return {**response_payload, "result": {"state": "guest_pass_unavailable"}}
+        candidate = guest_passes_table.get_item(
+            Key={"pass_id": guest_pass_id}, ConsistentRead=True,
+        ).get("Item")
+        ancestry = {
+            "show": str(result.get("series_id") or "").strip().lower(),
+            "season": str(result.get("season_id") or "").strip().lower(),
+        }
+        if not (
+            isinstance(candidate, dict)
+            and hmac.compare_digest(str(candidate.get("source_profile_id") or ""), profile_id)
+            and guest_pass_scope_authorizes(
+                candidate.get("scope") or {},
+                item_id=item_id,
+                item_kind=str(result.get("item_kind") or "").strip().lower(),
+                ancestor_ids=ancestry,
+            )
+        ):
+            return {**response_payload, "result": {"state": "guest_scope_denied"}}
+        active_guest_pass = _activate_guest_pass_for_playback(candidate, item_id)
+        if active_guest_pass is None:
+            return {**response_payload, "result": {"state": "guest_pass_unavailable"}}
+        runtime_ticks = positive_int(
+            result.get("runtime_ticks"), maximum=6_048_000_000_000,
+        ) or 0
+        try:
+            guest_passes_table.update_item(
+                Key={"pass_id": guest_pass_id},
+                UpdateExpression="SET active_playback = :active_playback",
+                ConditionExpression="#state = :active",
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={
+                    ":active": "active",
+                    ":active_playback": {
+                        "item_id": item_id,
+                        "playback_session_id": playback_session_id,
+                        "runtime_ticks": runtime_ticks,
+                        "prepared_at": utc_now_iso(),
+                    },
+                },
+            )
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return {**response_payload, "result": {"state": "guest_pass_unavailable"}}
+            raise
+        if str(active_guest_pass.get("expiration_behavior") or "") == "hard_stop":
+            guest_expires_at_cap = int(active_guest_pass.get("access_expires_at") or 0) or None
+        else:
+            runtime_seconds = min(max(runtime_ticks // 10_000_000, 0), 43_200)
+            guest_active_until = epoch_now() + max(runtime_seconds + 600, 900)
     issued = _issued_playback_grant(
         profile_id=profile_id,
         device_id=device_id,
@@ -12773,6 +13625,8 @@ def _completion_with_embedded_playback_grant(item, response_payload):
         max_bitrate=max_bitrate,
         connector=connector,
         trickplay=result.get("trickplay"),
+        expires_at_cap=guest_expires_at_cap,
+        active_until=guest_active_until,
     )
     if issued is None or not issued.get("relay_base_url"):
         return response_payload
@@ -13275,6 +14129,14 @@ def lambda_handler(event, context):
                 "/v2/app-sessions/refresh",
                 "/v2/household/invitations",
                 "/v2/household/invitations/{invitationId}/revoke",
+                "/v1/guest-passes",
+                "/v1/guest-passes/claim",
+                "/v1/guest-passes/{passId}/revoke",
+                "/v1/guest-pass/session",
+                "/v1/guest-pass/content",
+                "/v1/guest-pass/playback",
+                "/v1/guest-pass/activity",
+                "/v1/guest-pass/remote-requests/{requestId}",
                 "/v2/identity/join-household",
                 "/v3/identity/household-joins/begin",
                 "/v3/identity/household-joins/route-auth",
@@ -13385,6 +14247,26 @@ def lambda_handler(event, context):
         return revoke_household_invitation(event, path)
     if method == "DELETE" and re.fullmatch(r"/v2/household/invitations/[^/]+", path):
         return delete_household_invitation(event, path)
+
+    if path == "/v1/guest-passes":
+        if method == "POST":
+            return create_guest_pass(event)
+        if method == "GET":
+            return list_guest_passes(event)
+    if method == "POST" and path == "/v1/guest-passes/claim":
+        return claim_guest_pass(event)
+    if method == "POST" and re.fullmatch(r"/v1/guest-passes/[^/]+/revoke", path):
+        return revoke_guest_pass(event, path)
+    if method == "GET" and path == "/v1/guest-pass/session":
+        return guest_pass_session(event)
+    if method == "POST" and path == "/v1/guest-pass/content":
+        return create_guest_content_request(event)
+    if method == "POST" and path == "/v1/guest-pass/playback":
+        return create_guest_playback_request(event)
+    if method == "POST" and path == "/v1/guest-pass/activity":
+        return record_guest_playback_activity(event)
+    if method == "GET" and re.fullmatch(r"/v1/guest-pass/remote-requests/[^/]+", path):
+        return get_guest_remote_request(event, path)
 
     if method == "POST" and path == "/v2/identity/join-household":
         return join_household(event)
