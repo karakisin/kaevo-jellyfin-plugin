@@ -1,0 +1,95 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Isolated Kaevo Guest Pass infrastructure for the development environment",
+  "Parameters": {
+    "ExistingHttpApiId": {"Type": "String"},
+    "ExistingApiFunctionArn": {"Type": "String"},
+    "ExistingApiRoleName": {"Type": "String"},
+    "GuestPassTableArn": {"Type": "String"}
+  },
+  "Resources": {
+    "KaevoGuestPassDataPolicy": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "Roles": [{"Ref": "ExistingApiRoleName"}],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Sid": "GuestPassDataAccess",
+            "Effect": "Allow",
+            "Action": [
+              "dynamodb:ConditionCheckItem",
+              "dynamodb:DeleteItem",
+              "dynamodb:GetItem",
+              "dynamodb:PutItem",
+              "dynamodb:Query",
+              "dynamodb:TransactWriteItems",
+              "dynamodb:UpdateItem"
+            ],
+            "Resource": [
+              {"Ref": "GuestPassTableArn"},
+              {"Fn::Sub": "${GuestPassTableArn}/index/*"}
+            ]
+          }]
+        }
+      }
+    },
+    "KaevoGuestPassApiIntegration": {
+      "Type": "AWS::ApiGatewayV2::Integration",
+      "Properties": {
+        "ApiId": {"Ref": "ExistingHttpApiId"},
+        "IntegrationType": "AWS_PROXY",
+        "IntegrationMethod": "POST",
+        "PayloadFormatVersion": "2.0",
+        "IntegrationUri": {"Fn::Sub": [
+          "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations",
+          {"FunctionArn": {"Ref": "ExistingApiFunctionArn"}}
+        ]}
+      }
+    },
+    "KaevoGuestPassInvokePermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {"Ref": "ExistingApiFunctionArn"},
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {"Fn::Sub": [
+          "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiId}/*/*/v1/guest-pass*",
+          {"ApiId": {"Ref": "ExistingHttpApiId"}}
+        ]}
+      }
+    },
+    "KaevoGuestPassesRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {"ApiId": {"Ref": "ExistingHttpApiId"}, "AuthorizationType": "NONE", "RouteKey": "ANY /v1/guest-passes", "Target": {"Fn::Join": ["/", ["integrations", {"Ref": "KaevoGuestPassApiIntegration"}]]}}
+    },
+    "KaevoClaimGuestPassRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {"ApiId": {"Ref": "ExistingHttpApiId"}, "AuthorizationType": "NONE", "RouteKey": "POST /v1/guest-passes/claim", "Target": {"Fn::Join": ["/", ["integrations", {"Ref": "KaevoGuestPassApiIntegration"}]]}}
+    },
+    "KaevoRevokeGuestPassRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {"ApiId": {"Ref": "ExistingHttpApiId"}, "AuthorizationType": "NONE", "RouteKey": "POST /v1/guest-passes/{passId}/revoke", "Target": {"Fn::Join": ["/", ["integrations", {"Ref": "KaevoGuestPassApiIntegration"}]]}}
+    },
+    "KaevoGuestPassSessionRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {"ApiId": {"Ref": "ExistingHttpApiId"}, "AuthorizationType": "NONE", "RouteKey": "GET /v1/guest-pass/session", "Target": {"Fn::Join": ["/", ["integrations", {"Ref": "KaevoGuestPassApiIntegration"}]]}}
+    },
+    "KaevoGuestPassContentRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {"ApiId": {"Ref": "ExistingHttpApiId"}, "AuthorizationType": "NONE", "RouteKey": "POST /v1/guest-pass/content", "Target": {"Fn::Join": ["/", ["integrations", {"Ref": "KaevoGuestPassApiIntegration"}]]}}
+    },
+    "KaevoGuestPassPlaybackRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {"ApiId": {"Ref": "ExistingHttpApiId"}, "AuthorizationType": "NONE", "RouteKey": "POST /v1/guest-pass/playback", "Target": {"Fn::Join": ["/", ["integrations", {"Ref": "KaevoGuestPassApiIntegration"}]]}}
+    },
+    "KaevoGuestPassActivityRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {"ApiId": {"Ref": "ExistingHttpApiId"}, "AuthorizationType": "NONE", "RouteKey": "POST /v1/guest-pass/activity", "Target": {"Fn::Join": ["/", ["integrations", {"Ref": "KaevoGuestPassApiIntegration"}]]}}
+    },
+    "KaevoGuestPassRemoteRequestRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {"ApiId": {"Ref": "ExistingHttpApiId"}, "AuthorizationType": "NONE", "RouteKey": "GET /v1/guest-pass/remote-requests/{requestId}", "Target": {"Fn::Join": ["/", ["integrations", {"Ref": "KaevoGuestPassApiIntegration"}]]}}
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Managed Kaevo Guest Pass storage for the development environment",
+  "Resources": {
+    "KaevoGuestPassesTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "TableName": "kaevo-cloud-dev-guest-passes",
+        "BillingMode": "PAY_PER_REQUEST",
+        "SSESpecification": {"SSEEnabled": true},
+        "PointInTimeRecoverySpecification": {"PointInTimeRecoveryEnabled": true},
+        "AttributeDefinitions": [
+          {"AttributeName": "pass_id", "AttributeType": "S"},
+          {"AttributeName": "household_id", "AttributeType": "S"},
+          {"AttributeName": "created_at_epoch", "AttributeType": "N"}
+        ],
+        "KeySchema": [{"AttributeName": "pass_id", "KeyType": "HASH"}],
+        "GlobalSecondaryIndexes": [{
+          "IndexName": "household_id-created_at_epoch-index",
+          "KeySchema": [
+            {"AttributeName": "household_id", "KeyType": "HASH"},
+            {"AttributeName": "created_at_epoch", "KeyType": "RANGE"}
+          ],
+          "Projection": {"ProjectionType": "ALL"}
+        }],
+        "TimeToLiveSpecification": {"AttributeName": "expires_at", "Enabled": true},
+        "Tags": [
+          {"Key": "KaevoDataClass", "Value": "device-bound-guest-access"},
+          {"Key": "KaevoSecurityBoundary", "Value": "guest-pass"},
+          {"Key": "Application", "Value": "Kaevo"},
+          {"Key": "Environment", "Value": "dev"},
+          {"Key": "SecurityBoundary", "Value": "GuestPass"}
+        ]
+      }
+    }
+  }
+}
