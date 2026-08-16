@@ -456,7 +456,7 @@ class FamilySyncRegistry:
 grants = GrantRegistry(SIGNING_KEY)
 connectors = ConnectorRegistry()
 family_sync = FamilySyncRegistry()
-app = FastAPI(title="Kaevo Playback Relay", version="0.2.14")
+app = FastAPI(title="Kaevo Playback Relay", version="0.2.15")
 
 
 @app.get("/health")
@@ -464,7 +464,7 @@ async def health() -> dict[str, Any]:
     return {
         "state": "ok",
         "service": "kaevo-playback-relay",
-        "version": "0.2.14",
+        "version": "0.2.15",
         "connectors": len(connectors.channels),
         "channels": connectors.channel_count,
         "family_sync_channels": len(family_sync.channels),
