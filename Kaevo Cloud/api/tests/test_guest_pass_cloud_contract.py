@@ -89,6 +89,15 @@ def test_guest_playback_starts_only_after_trusted_scope_and_route_validation():
     assert 'active_playback = :active_playback' in completion
     assert '"active_until"' in HANDLER
 
+    guest_read = HANDLER.split("def get_guest_remote_request", 1)[1].split(
+        "\ndef household_invitation_response", 1
+    )[0]
+    assert 'request_payload.get("path") == "/commands/jellyfin.prepare_playback"' in guest_read
+    assert "_completion_with_embedded_playback_grant(" in guest_read
+    assert guest_read.index("_completion_with_embedded_playback_grant(") < guest_read.index(
+        'request_payload.get("path") == "/kaevo/internal/main-snapshot"'
+    )
+
 
 def test_guest_activity_is_isolated_and_one_view_completion_is_fail_closed():
     activity = HANDLER.split("def record_guest_playback_activity", 1)[1].split(
@@ -109,6 +118,23 @@ def test_guest_scope_projection_and_search_are_server_owned():
     assert 'resource == "search"' in content
     assert '_authorized_jellyfin_metadata_request(' in content
     assert '_guest_annotate_item_page' in HANDLER
+
+
+def test_guest_artwork_is_server_scoped_and_uses_the_bounded_image_route():
+    content = HANDLER.split("def create_guest_content_request", 1)[1].split(
+        "\ndef create_guest_playback_request", 1
+    )[0]
+    image = content.split('elif resource == "image":', 1)[1].split(
+        "\n    else:", 1
+    )[0]
+    assert "SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id)" in image
+    assert "image_type not in REMOTE_IMAGE_TYPES" in image
+    assert "hmac.compare_digest(" in image
+    assert 'str(scope.get("kind") or "") != "full_library"' in image
+    assert 'return response(403, {"state": "guest_image_not_allowed"})' in image
+    assert 'path = "/kaevo/internal/image"' in image
+    assert 'bounded_int_param(body, "max_width"' in image
+    assert 'bounded_int_param(body, "max_height"' in image
 
 
 def test_plugin_returns_server_trusted_playback_ancestry():

@@ -10224,6 +10224,36 @@ def create_guest_content_request(event):
         )
         if binding_error:
             return response(409, {"state": "guest_content_unavailable"})
+    elif resource == "image":
+        item_id = str(body.get("item_id") or "").strip().lower()
+        image_type = str(body.get("image_type") or "primary").strip().lower()
+        if (
+            not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id)
+            or image_type not in REMOTE_IMAGE_TYPES
+        ):
+            return response(400, {"state": "invalid_guest_image"})
+        scope = guest_pass.get("scope") or {}
+        exact_scope_item = any(
+            isinstance(entry, dict)
+            and hmac.compare_digest(
+                str(entry.get("item_id") or "").strip().lower(), item_id,
+            )
+            for entry in (scope.get("entries") or [])
+        )
+        if str(scope.get("kind") or "") != "full_library" and not exact_scope_item:
+            # Artwork is content too. Descendant ancestry supplied by a client
+            # is not authority, so this endpoint serves only a full-library
+            # pass or an immutable item explicitly present in the pass scope.
+            return response(403, {"state": "guest_image_not_allowed"})
+        path = "/kaevo/internal/image"
+        query = {
+            "item_id": item_id,
+            "image_type": image_type,
+            "tag": str(body.get("tag") or "").strip()[:256],
+            "max_width": str(bounded_int_param(body, "max_width", 900, REMOTE_IMAGE_MAX_DIMENSION)),
+            "max_height": str(bounded_int_param(body, "max_height", 1350, REMOTE_IMAGE_MAX_DIMENSION)),
+            "quality": str(bounded_int_param(body, "quality", 88, 95)),
+        }
     else:
         return response(400, {"state": "invalid_guest_content_resource"})
     request_payload = {"provider": "jellyfin", "method": "GET", "path": path, "query": query}
@@ -10410,7 +10440,19 @@ def get_guest_remote_request(event, path):
     projected = public_remote_request_item(item, include_payload=True)
     if item.get("status") == "completed":
         request_payload = parse_json_field(item.get("request_json"), {})
-        if request_payload.get("path") == "/kaevo/internal/main-snapshot":
+        if request_payload.get("path") == "/commands/jellyfin.prepare_playback":
+            # Pairing V3 completion is intentionally owned by the
+            # least-privilege connector-control Lambda, which cannot read
+            # Guest Pass policy or activate its first-play clock. Finalize
+            # the already authenticated, pass-bound request here before the
+            # guest sees it. This preserves one Cloud authority for scope,
+            # timing, device binding, and relay-grant issuance without giving
+            # the connector-control role access to Guest Pass records.
+            projected["response"] = _completion_with_embedded_playback_grant(
+                item,
+                decode_remote_response_payload(item, {}),
+            )
+        elif request_payload.get("path") == "/kaevo/internal/main-snapshot":
             projected["response"] = _guest_filter_main_snapshot(
                 guest_pass, decode_remote_response_payload(item, {}),
             )
