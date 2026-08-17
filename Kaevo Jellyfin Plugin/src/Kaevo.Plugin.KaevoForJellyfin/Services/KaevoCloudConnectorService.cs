@@ -19,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.96";
+    private const string PluginVersion = "0.2.97";
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
@@ -2394,8 +2394,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         CancellationToken cancellationToken)
     {
         var itemId = QueryString(query, "item_id");
-        var imageType = QueryString(query, "image_type");
-        if (!ItemIdRegex().IsMatch(itemId) || imageType is not ("Primary" or "Backdrop" or "Logo" or "Thumb"))
+        var imageType = NormalizeRemoteArtworkImageType(QueryString(query, "image_type"));
+        if (!ItemIdRegex().IsMatch(itemId) || string.IsNullOrEmpty(imageType))
         {
             throw new InvalidOperationException("remoteArtworkRequestInvalid");
         }
@@ -2446,6 +2446,18 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
 
         throw new InvalidOperationException("remoteArtworkPayloadTooLarge");
+    }
+
+    internal static string NormalizeRemoteArtworkImageType(string rawImageType)
+    {
+        return rawImageType.Trim().ToLowerInvariant() switch
+        {
+            "primary" => "Primary",
+            "backdrop" => "Backdrop",
+            "logo" => "Logo",
+            "thumb" => "Thumb",
+            _ => string.Empty
+        };
     }
 
     private async Task<CommandResult> ReadMainSnapshotAsync(
@@ -2794,6 +2806,30 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 pairingV3VerificationKeysJson: configuration.PairingV3CloudAuthorizationVerificationKeysJson,
                 pairingV3Issuer: configuration.PairingV3CloudAuthorizationIssuer);
             var resolved = KaevoPlaybackSecurity.Resolve(grant, message.Method ?? "GET", message.Path ?? string.Empty, message.Query, message.Range);
+            if (ShouldSynthesizeRelayManifestHead(resolved.Method, resolved.PathAndQuery))
+            {
+                // AVPlayer probes an HLS manifest with HEAD before requesting
+                // it. Jellyfin's dynamic HLS endpoint can enter transcode
+                // preparation even for that bodyless probe, which holds all
+                // relay channels until their response-start deadline. The
+                // signed grant and exact resource path have already been
+                // verified above, so answer only the representation metadata;
+                // the following GET still has to pass every grant check and
+                // obtain the real manifest from Jellyfin.
+                await SendTextAsync(socket, sendGate, JsonSerializer.Serialize(new
+                {
+                    type = "response_start",
+                    request_id = message.RequestId,
+                    status = (int)HttpStatusCode.OK,
+                    headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["content-type"] = "application/vnd.apple.mpegurl",
+                        ["cache-control"] = "no-store"
+                    }
+                }, JsonOptions), cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             using var local = new HttpRequestMessage(resolved.Method, BuildLocalUri(configuration, resolved.PathAndQuery, null));
             local.Headers.Add("X-Emby-Token", secrets.JellyfinApiKey);
             if (!string.IsNullOrWhiteSpace(resolved.RangeHeader))
@@ -2892,6 +2928,18 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 // supervisor owns reconnecting the shared socket if needed.
             }
         }
+    }
+
+    internal static bool ShouldSynthesizeRelayManifestHead(HttpMethod method, string pathAndQuery)
+    {
+        if (method != HttpMethod.Head || string.IsNullOrWhiteSpace(pathAndQuery))
+        {
+            return false;
+        }
+
+        var queryIndex = pathAndQuery.IndexOf('?', StringComparison.Ordinal);
+        var path = queryIndex >= 0 ? pathAndQuery[..queryIndex] : pathAndQuery;
+        return path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task SendRelayBodyAsync(

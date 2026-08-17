@@ -8,6 +8,35 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 
 public sealed class RelayRequestContextTests
 {
+    [Theory]
+    [InlineData("HEAD", "/Videos/11111111111111111111111111111111/master.m3u8", true)]
+    [InlineData("HEAD", "/Videos/11111111111111111111111111111111/master.m3u8?videoCodec=h264", true)]
+    [InlineData("GET", "/Videos/11111111111111111111111111111111/master.m3u8", false)]
+    [InlineData("HEAD", "/Videos/11111111111111111111111111111111/hls1/main/0.ts", false)]
+    public void RelaySynthesizesOnlyBodylessHlsManifestProbes(
+        string method,
+        string pathAndQuery,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            KaevoCloudConnectorService.ShouldSynthesizeRelayManifestHead(
+                new HttpMethod(method),
+                pathAndQuery));
+    }
+
+    [Theory]
+    [InlineData("primary", "Primary")]
+    [InlineData("PRIMARY", "Primary")]
+    [InlineData("Backdrop", "Backdrop")]
+    [InlineData("logo", "Logo")]
+    [InlineData("thumb", "Thumb")]
+    [InlineData("poster", "")]
+    public void NormalizeRemoteArtworkImageTypeAcceptsContractCasing(string input, string expected)
+    {
+        Assert.Equal(expected, KaevoCloudConnectorService.NormalizeRemoteArtworkImageType(input));
+    }
+
     [Fact]
     public void RecoveryCommandReturnsOnlyExactProfileBinding()
     {
