@@ -132,7 +132,23 @@ def test_guest_detail_is_exact_item_authorized_before_projection():
     guest_read = HANDLER.split("def get_guest_remote_request", 1)[1].split(
         "\ndef household_invitation_response", 1
     )[0]
-    assert '"detail": detail if _guest_item_authorized(guest_pass, detail) else None' in guest_read
+    assert "detail_authorized = _guest_item_authorized(guest_pass, detail) or (" in guest_read
+    assert "_guest_detail_anchor_authorizes_target(" in guest_read
+
+
+def test_guest_descendant_artwork_and_parent_detail_use_completed_pass_bound_authority():
+    assert "def _guest_authorization_request(guest_pass, request_id):" in HANDLER
+    authority = HANDLER.split(
+        "def _guest_authorization_request(guest_pass, request_id):", 1
+    )[1].split("\ndef create_guest_content_request", 1)[0]
+    assert 'item.get("status") == "completed"' in authority
+    assert 'item.get("guest_pass_id")' in authority
+    assert 'item.get("profile_id")' in authority
+    assert "def _guest_list_request_authorizes_item" in authority
+    assert "_guest_filter_item_page(" in authority
+    assert "def _guest_detail_anchor_authorizes_target" in authority
+    assert '_guest_item_authorized(guest_pass, detail)' in authority
+    assert 'detail.get("SeriesId")' in authority
 
 
 def test_guest_progress_projection_is_bounded_and_contains_no_household_identity():
@@ -175,6 +191,7 @@ def test_guest_artwork_is_server_scoped_and_uses_the_bounded_image_route():
     assert "hmac.compare_digest(" in image
     assert 'str(scope.get("kind") or "") != "full_library"' in image
     assert 'return response(403, {"state": "guest_image_not_allowed"})' in image
+    assert "_guest_list_request_authorizes_item(" in image
     assert 'path = "/kaevo/internal/image"' in image
     assert 'bounded_int_param(body, "max_width"' in image
     assert 'bounded_int_param(body, "max_height"' in image

@@ -10122,6 +10122,7 @@ def _guest_filter_main_snapshot(guest_pass, payload):
 
 def _queue_guest_remote_request(
     guest_pass, request_payload, *, connector=None, guest_search_full=False,
+    guest_authorization_request_id=None,
 ):
     connector = connector or latest_online_connector_for_profile(str(guest_pass.get("source_profile_id") or ""))
     if not connector:
@@ -10143,8 +10144,76 @@ def _queue_guest_remote_request(
         "updated_at": now_iso,
         "expires_at": epoch_now() + REMOTE_REQUEST_TTL_SECONDS,
     }
+    if guest_authorization_request_id:
+        item["guest_authorization_request_id"] = guest_authorization_request_id
     remote_requests_table.put_item(Item=item)
     return item
+
+
+def _guest_authorization_request(guest_pass, request_id):
+    try:
+        normalized_request_id = str(uuid.UUID(str(request_id or "")))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    item = remote_requests_table.get_item(
+        Key={"request_id": normalized_request_id}, ConsistentRead=True,
+    ).get("Item")
+    if not (
+        isinstance(item, dict)
+        and item.get("status") == "completed"
+        and hmac.compare_digest(
+            str(item.get("guest_pass_id") or ""), str(guest_pass.get("pass_id") or ""),
+        )
+        and hmac.compare_digest(
+            str(item.get("profile_id") or ""), str(guest_pass.get("source_profile_id") or ""),
+        )
+    ):
+        return None
+    return item
+
+
+def _guest_list_request_authorizes_item(guest_pass, request_id, item_id):
+    anchor = _guest_authorization_request(guest_pass, request_id)
+    if anchor is None:
+        return False
+    request_payload = parse_json_field(anchor.get("request_json"), {})
+    path = str(request_payload.get("path") or "")
+    if not (
+        re.fullmatch(r"/Shows/[0-9a-fA-F]{32}/(Seasons|Episodes)", path)
+        or re.fullmatch(r"/Users/[0-9a-fA-F]{32}/Items", path)
+        or path == "/kaevo/internal/guest-scope"
+    ):
+        return False
+    page = _guest_filter_item_page(
+        guest_pass, decode_remote_response_payload(anchor, {}),
+    )
+    values = page.get("Items") if isinstance(page.get("Items"), list) else page.get("items")
+    return any(
+        isinstance(value, dict)
+        and hmac.compare_digest(
+            str(value.get("Id") or value.get("id") or "").strip().lower(), item_id,
+        )
+        for value in (values or [])
+    )
+
+
+def _guest_detail_anchor_authorizes_target(guest_pass, request_id, target_id):
+    anchor = _guest_authorization_request(guest_pass, request_id)
+    if anchor is None:
+        return False
+    request_payload = parse_json_field(anchor.get("request_json"), {})
+    if not re.fullmatch(
+        r"/Users/[0-9a-fA-F]{32}/Items/[0-9a-fA-F]{32}",
+        str(request_payload.get("path") or ""),
+    ):
+        return False
+    detail = decode_remote_response_payload(anchor, {})
+    if not _guest_item_authorized(guest_pass, detail):
+        return False
+    related_series_id = str(
+        detail.get("SeriesId") or detail.get("series_id") or ""
+    ).strip().lower()
+    return bool(related_series_id) and hmac.compare_digest(related_series_id, target_id)
 
 
 def create_guest_content_request(event):
@@ -10155,6 +10224,12 @@ def create_guest_content_request(event):
         return response(503, {"state": "guest_content_unavailable"})
     body = parse_json_body(event) or {}
     resource = str(body.get("resource") or "home").strip().lower()
+    authorization_request_id = str(body.get("authorization_request_id") or "").strip()
+    if authorization_request_id:
+        try:
+            authorization_request_id = str(uuid.UUID(authorization_request_id))
+        except (ValueError, AttributeError, TypeError):
+            return response(400, {"state": "invalid_guest_authorization_request"})
     connector = latest_online_connector_for_profile(str(guest_pass.get("source_profile_id") or ""))
     if not connector:
         return response(409, {"state": "connector_unavailable"})
@@ -10178,6 +10253,10 @@ def create_guest_content_request(event):
         item_id = str(body.get("item_id") or "").strip().lower()
         if not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
             return response(400, {"state": "invalid_guest_content_item"})
+        if authorization_request_id and not _guest_detail_anchor_authorizes_target(
+            guest_pass, authorization_request_id, item_id,
+        ):
+            return response(403, {"state": "guest_related_detail_not_allowed"})
         path = f"/Users/00000000000000000000000000000000/Items/{item_id}"
         query = {
             "Fields": (
@@ -10262,10 +10341,13 @@ def create_guest_content_request(event):
             for entry in (scope.get("entries") or [])
         )
         if str(scope.get("kind") or "") != "full_library" and not exact_scope_item:
-            # Artwork is content too. Descendant ancestry supplied by a client
-            # is not authority, so this endpoint serves only a full-library
-            # pass or an immutable item explicitly present in the pass scope.
-            return response(403, {"state": "guest_image_not_allowed"})
+            # A completed, pass-bound list response is trusted ancestry for its
+            # already filtered children. Client-supplied IDs alone remain
+            # insufficient authority.
+            if not _guest_list_request_authorizes_item(
+                guest_pass, authorization_request_id, item_id,
+            ):
+                return response(403, {"state": "guest_image_not_allowed"})
         path = "/kaevo/internal/image"
         query = {
             "item_id": item_id,
@@ -10286,6 +10368,7 @@ def create_guest_content_request(event):
             resource == "search"
             and bool_value((guest_pass.get("permissions") or {}).get("search_full_library"), False)
         ),
+        guest_authorization_request_id=authorization_request_id or None,
     )
     if queued is None:
         return response(409, {"state": "connector_unavailable"})
@@ -10511,8 +10594,17 @@ def get_guest_remote_request(event, path):
             str(request_payload.get("path") or ""),
         ):
             detail = decode_remote_response_payload(item, {})
+            detail_id = str(detail.get("Id") or detail.get("id") or "").strip().lower()
+            detail_authorized = _guest_item_authorized(guest_pass, detail) or (
+                bool(detail_id)
+                and _guest_detail_anchor_authorizes_target(
+                    guest_pass,
+                    item.get("guest_authorization_request_id"),
+                    detail_id,
+                )
+            )
             projected["response"] = {
-                "detail": detail if _guest_item_authorized(guest_pass, detail) else None
+                "detail": detail if detail_authorized else None
             }
         elif item.get("guest_pass_id") and re.fullmatch(
             r"/Users/[0-9a-fA-F]{32}/Items",
