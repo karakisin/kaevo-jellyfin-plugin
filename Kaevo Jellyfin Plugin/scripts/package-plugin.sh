@@ -41,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Adds server-authorized Guest Pass library scope and trusted playback ancestry so Kaevo can enforce exact movie, show, season, and episode access without creating a Jellyfin profile.",
+  "changelog": "Hardens Requests and download progress with immutable Arr identity filters, byte-exact signed connector requests, and bounded recovery for stale Cloud request leases.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",

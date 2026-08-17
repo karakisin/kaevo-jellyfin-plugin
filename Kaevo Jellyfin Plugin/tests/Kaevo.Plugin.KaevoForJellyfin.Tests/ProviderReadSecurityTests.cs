@@ -46,6 +46,45 @@ public sealed class ProviderReadSecurityTests
         Assert.False(KaevoCloudConnectorService.IsAllowedProviderReadRequest("qbittorrent", "/api/v2/torrents/info", Query("filter", "all")));
     }
 
+    [Fact]
+    public void ArrCatalogBatchRequiresTheExactImmutableIdentityContract()
+    {
+        Assert.True(KaevoCloudConnectorService.IsAllowedProviderReadRequest(
+            "radarr", "/api/v3/movie", Query("tmdbIds", "11,22")));
+        Assert.True(KaevoCloudConnectorService.IsAllowedProviderReadRequest(
+            "sonarr", "/api/v3/series", Query("tvdbIds", "33")));
+
+        Assert.False(KaevoCloudConnectorService.IsAllowedProviderReadRequest(
+            "radarr", "/api/v3/movie", Query("tmdbIds", "11,11")));
+        Assert.False(KaevoCloudConnectorService.IsAllowedProviderReadRequest(
+            "radarr", "/api/v3/movie", Query("tvdbIds", "11")));
+        Assert.False(KaevoCloudConnectorService.IsAllowedProviderReadRequest(
+            "sonarr", "/api/v3/series", Query("tvdbIds", "0")));
+        Assert.False(KaevoCloudConnectorService.IsAllowedProviderReadRequest(
+            "sonarr", "/api/v3/series", Query("tvdbIds", string.Join(',', Enumerable.Range(1, 33)))));
+    }
+
+    [Fact]
+    public void ArrCatalogBatchFiltersOnlyExactImmutableIdsAndRetainsProviderDuplicates()
+    {
+        using var catalog = JsonDocument.Parse("""
+            [
+              {"id":1,"tmdbId":11,"title":"Allowed"},
+              {"id":2,"tmdbId":22,"title":"Other"},
+              {"id":3,"tmdbId":11,"title":"Ambiguous duplicate"},
+              {"id":4,"title":"Missing identity"}
+            ]
+            """);
+
+        var filtered = KaevoCloudConnectorService.FilterArrCatalog(
+            catalog.RootElement,
+            "tmdbId",
+            new HashSet<int> { 11 });
+
+        Assert.Equal(2, filtered.GetArrayLength());
+        Assert.All(filtered.EnumerateArray(), item => Assert.Equal(11, item.GetProperty("tmdbId").GetInt32()));
+    }
+
     private static IReadOnlyDictionary<string, JsonElement> Query(params string[] values)
     {
         return Enumerable.Range(0, values.Length / 2).ToDictionary(

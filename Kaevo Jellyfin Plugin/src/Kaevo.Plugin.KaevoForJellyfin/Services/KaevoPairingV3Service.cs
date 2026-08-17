@@ -278,6 +278,17 @@ public sealed class KaevoPairingV3Service
     }
 
     internal async Task<KaevoPairingV3SignedConnectorRequest> PrepareConnectorRequestAsync(string method, string canonicalRoute, object body, CancellationToken cancellationToken = default)
+        => await PrepareConnectorRequestDigestAsync(
+            method,
+            canonicalRoute,
+            KaevoPairingV3Crypto.CanonicalJsonDigest(body),
+            cancellationToken).ConfigureAwait(false);
+
+    private async Task<KaevoPairingV3SignedConnectorRequest> PrepareConnectorRequestDigestAsync(
+        string method,
+        string canonicalRoute,
+        string digest,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(method) || string.IsNullOrWhiteSpace(canonicalRoute) || !canonicalRoute.StartsWith("/", StringComparison.Ordinal)
             || canonicalRoute.Contains('\r') || canonicalRoute.Contains('\n')) throw new KaevoPairingV3Exception("malformed_request");
@@ -291,7 +302,6 @@ public sealed class KaevoPairingV3Service
         }, cancellationToken).ConfigureAwait(false);
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture);
         var nonce = KaevoPairingV3Crypto.Base64Url(RandomNumberGenerator.GetBytes(32));
-        var digest = KaevoPairingV3Crypto.CanonicalJsonDigest(body);
         var keyId = context.identity.KeyVersion.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var transcript = KaevoPairingV3Crypto.Transcript("connector-request", ("httpMethod", method.ToUpperInvariant()), ("canonicalRoute", canonicalRoute),
             ("bodyDigest", digest), ("timestamp", timestamp), ("nonce", nonce), ("connectorId", context.connector.ConnectorId),
@@ -320,17 +330,25 @@ public sealed class KaevoPairingV3Service
         object body,
         CancellationToken cancellationToken = default)
     {
-        var proof = await PrepareConnectorRequestAsync(method.Method, canonicalRoute, body, cancellationToken).ConfigureAwait(false);
+        var serializedBody = JsonSerializer.SerializeToUtf8Bytes(body, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var exactBodyDigest = KaevoPairingV3Crypto.Base64Url(SHA256.HashData(serializedBody));
+        var proof = await PrepareConnectorRequestDigestAsync(
+            method.Method,
+            canonicalRoute,
+            exactBodyDigest,
+            cancellationToken).ConfigureAwait(false);
         var uri = new Uri(new Uri(cloudBase.ToString().TrimEnd('/') + "/"), canonicalRoute.TrimStart('/'));
         var request = new HttpRequestMessage(method, uri)
         {
-            Content = new StringContent(JsonSerializer.Serialize(body, new JsonSerializerOptions(JsonSerializerDefaults.Web)), Encoding.UTF8, "application/json")
+            Content = new ByteArrayContent(serializedBody)
         };
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Key-Id", proof.PluginKeyId);
         request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Timestamp", proof.Timestamp);
         request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Nonce", proof.Nonce);
         request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Signature", proof.Signature);
+        request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Signature-Version", "2");
         try
         {
             return await _connectorHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);

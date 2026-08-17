@@ -313,7 +313,7 @@ public sealed class PairingV3ServiceTests : IDisposable
         var token = Authorization(start, "user-1");
         var challenge = await service.ChallengeAsync(start.TicketId, Attempt, KaevoPairingV3Crypto.HashText(token), Correlation);
         await service.CompleteAsync(new Uri("https://cloud.example"), ValidCompletion(start, challenge, token));
-        var body = new { connector_id = "connector-1", profile_id = "profile-1", provider_status = new { } };
+        var body = new { z = 1, a = "a\u2060b", connector_id = "connector-1" };
 
         using var response = await service.SendConnectorRequestAsync(
             new Uri("https://cloud.example"), HttpMethod.Post, "/v3/home-connectors/register", body);
@@ -324,6 +324,24 @@ public sealed class PairingV3ServiceTests : IDisposable
         Assert.False(string.IsNullOrWhiteSpace(capture.Headers["X-Kaevo-Plugin-Timestamp"]));
         Assert.False(string.IsNullOrWhiteSpace(capture.Headers["X-Kaevo-Plugin-Nonce"]));
         Assert.False(string.IsNullOrWhiteSpace(capture.Headers["X-Kaevo-Plugin-Signature"]));
+        Assert.Equal("2", capture.Headers["X-Kaevo-Plugin-Signature-Version"]);
+        var exactDigest = KaevoPairingV3Crypto.Base64Url(SHA256.HashData(Encoding.UTF8.GetBytes(capture.Body)));
+        Assert.NotEqual(KaevoPairingV3Crypto.CanonicalJsonDigest(body), exactDigest);
+        var exactTranscript = KaevoPairingV3Crypto.Transcript(
+            "connector-request",
+            ("httpMethod", "POST"),
+            ("canonicalRoute", capture.Path),
+            ("bodyDigest", exactDigest),
+            ("timestamp", capture.Headers["X-Kaevo-Plugin-Timestamp"]),
+            ("nonce", capture.Headers["X-Kaevo-Plugin-Nonce"]),
+            ("connectorId", "connector-1"),
+            ("pluginInstanceId", start.PluginInstanceId),
+            ("pluginKeyId", "1"),
+            ("pluginPublicKeyFingerprint", start.PluginFingerprint));
+        Assert.True(KaevoPairingV3Crypto.Verify(
+            KaevoPairingV3Crypto.Base64UrlDecode(start.PluginPublicKey),
+            exactTranscript,
+            capture.Headers["X-Kaevo-Plugin-Signature"]));
         Assert.DoesNotContain("Authorization", capture.Headers.Keys);
         Assert.DoesNotContain("DPoP", capture.Headers.Keys);
         Assert.DoesNotContain(token, capture.Body);

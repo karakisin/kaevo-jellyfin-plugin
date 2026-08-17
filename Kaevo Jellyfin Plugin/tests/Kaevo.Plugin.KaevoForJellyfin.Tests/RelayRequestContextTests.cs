@@ -8,6 +8,35 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 
 public sealed class RelayRequestContextTests
 {
+    [Theory]
+    [InlineData("HEAD", "/Videos/11111111111111111111111111111111/master.m3u8", true)]
+    [InlineData("HEAD", "/Videos/11111111111111111111111111111111/master.m3u8?videoCodec=h264", true)]
+    [InlineData("GET", "/Videos/11111111111111111111111111111111/master.m3u8", false)]
+    [InlineData("HEAD", "/Videos/11111111111111111111111111111111/hls1/main/0.ts", false)]
+    public void RelaySynthesizesOnlyBodylessHlsManifestProbes(
+        string method,
+        string pathAndQuery,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            KaevoCloudConnectorService.ShouldSynthesizeRelayManifestHead(
+                new HttpMethod(method),
+                pathAndQuery));
+    }
+
+    [Theory]
+    [InlineData("primary", "Primary")]
+    [InlineData("PRIMARY", "Primary")]
+    [InlineData("Backdrop", "Backdrop")]
+    [InlineData("logo", "Logo")]
+    [InlineData("thumb", "Thumb")]
+    [InlineData("poster", "")]
+    public void NormalizeRemoteArtworkImageTypeAcceptsContractCasing(string input, string expected)
+    {
+        Assert.Equal(expected, KaevoCloudConnectorService.NormalizeRemoteArtworkImageType(input));
+    }
+
     [Fact]
     public void RecoveryCommandReturnsOnlyExactProfileBinding()
     {
@@ -89,6 +118,10 @@ public sealed class RelayRequestContextTests
         Assert.Equal("Video", request.Query["mediaTypes"].GetString());
         Assert.True(request.Query["enableUserData"].GetBoolean());
         Assert.True(request.Query["excludeActiveSessions"].GetBoolean());
+        Assert.Equal(KaevoCloudConnectorService.MainSnapshotItemFields, request.Query["fields"].GetString());
+        Assert.DoesNotContain("People", request.Query["fields"].GetString());
+        Assert.DoesNotContain("MediaSources", request.Query["fields"].GetString());
+        Assert.DoesNotContain("MediaStreams", request.Query["fields"].GetString());
         Assert.DoesNotContain("IsResumable", request.Query.Keys);
     }
 
@@ -120,6 +153,12 @@ public sealed class RelayRequestContextTests
 
         Assert.Equal($"/Users/{userId}/Items", request.Path);
         Assert.Equal("Movie", request.Query["IncludeItemTypes"].GetString());
+        Assert.Equal(KaevoCloudConnectorService.MainSnapshotItemFields, request.Query["Fields"].GetString());
+        Assert.Contains("Overview", request.Query["Fields"].GetString());
+        Assert.Contains("ProviderIds", request.Query["Fields"].GetString());
+        Assert.DoesNotContain("People", request.Query["Fields"].GetString());
+        Assert.DoesNotContain("MediaSources", request.Query["Fields"].GetString());
+        Assert.DoesNotContain("MediaStreams", request.Query["Fields"].GetString());
         Assert.False(request.Query.ContainsKey("userId"));
         Assert.False(request.Query.ContainsKey("IsResumable"));
     }

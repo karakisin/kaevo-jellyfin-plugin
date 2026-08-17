@@ -781,6 +781,34 @@ def _pairing_v3_raw_event_json_body(event):
     return raw_body
 
 
+def _pairing_v3_exact_json_body_bytes(event):
+    """Return the exact strict JSON bytes used by connector signature v2."""
+    raw_body = _pairing_v3_raw_event_json_body(event)
+
+    def reject_duplicate_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise PairingV3CryptoError("duplicate JSON key")
+            value[key] = item
+        return value
+
+    def reject_nonstandard_number(value):
+        raise PairingV3CryptoError(f"nonstandard JSON number: {value}")
+
+    try:
+        parsed = json.loads(
+            raw_body,
+            object_pairs_hook=reject_duplicate_pairs,
+            parse_constant=reject_nonstandard_number,
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as error:
+        raise PairingV3CryptoError("strict JSON body invalid") from error
+    if not isinstance(parsed, dict):
+        raise PairingV3CryptoError("JSON body must be an object")
+    return raw_body.encode("utf-8", errors="strict")
+
+
 def _pairing_v3_connector_request_transcript(event, body_digest, timestamp, nonce, connector_id,
                                              plugin_instance_id, plugin_key_id, fingerprint):
     return pairing_v3_canonical_transcript("connector-request", (
@@ -6348,18 +6376,28 @@ def require_pairing_v3_connector_auth(event, connector_id, body):
     nonce = str(header_value(event, "x-kaevo-plugin-nonce") or "")
     if not SAFE_PAIRING_V3_NONCE.fullmatch(nonce):
         return _pairing_v3_connector_auth_rejected(event, "PLUGIN_NONCE_INVALID", connector_id)
+    signature_version = str(header_value(event, "x-kaevo-plugin-signature-version") or "1")
     try:
-        parsed_body_digest = pairing_v3_canonical_json_digest(body)
+        if signature_version == "2":
+            parsed_body_digest = pairing_v3_b64url_encode(
+                hashlib.sha256(_pairing_v3_exact_json_body_bytes(event)).digest()
+            )
+        elif signature_version == "1":
+            parsed_body_digest = pairing_v3_canonical_json_digest(body)
+        else:
+            raise PairingV3CryptoError("unsupported connector signature version")
         transcript = _pairing_v3_connector_request_transcript(
             event, parsed_body_digest, timestamp, nonce, connector_id,
             plugin_instance_id, plugin_key_id, fingerprint,
         )
-    except (PairingV3CryptoError, TypeError, ValueError):
+    except (PairingV3CryptoError, TypeError, ValueError, UnicodeDecodeError):
         return _pairing_v3_connector_auth_rejected(event, "REQUEST_CANONICALIZATION_INVALID", connector_id)
     signature = str(header_value(event, "x-kaevo-plugin-signature") or "")
     try:
         pairing_v3_verify_ed25519(public_key, transcript, signature)
     except (PairingV3CryptoError, TypeError, ValueError):
+        if signature_version == "2":
+            return _pairing_v3_connector_auth_rejected(event, "PLUGIN_SIGNATURE_INVALID", connector_id)
         try:
             compatibility_digest = pairing_v3_canonical_json_digest_preserving_number_lexemes(
                 _pairing_v3_raw_event_json_body(event)
@@ -6582,6 +6620,62 @@ def recent_events(event):
         "profile_id": profile_id,
         "items": [public_event_item(item) for item in result.get("Items", [])]
     })
+
+
+BUG_REPORT_EVENT_TYPES = {"bug_report_submitted", "bug_report_resolved"}
+BUG_REPORT_EVENT_SCAN_LIMIT = 500
+BUG_REPORT_EVENT_RESULT_LIMIT = 100
+
+
+def bug_report_events(event):
+    """Return only the authenticated profile's durable report lifecycle.
+
+    Resolution text is server-authored by Kaevo's support workflow. The app
+    can submit a pending record, but this read boundary never infers Resolved
+    from Sentry timing, title matching, or a client-side toggle.
+    """
+    if events_table is None:
+        return response(500, {"state": "server_error", "message": "events table is not configured"})
+
+    params = query_params(event)
+    profile_id = str(params.get("profile_id") or "").strip()
+    if not profile_id:
+        return response(400, {"state": "bad_request", "message": "profile_id is required"})
+    if not require_profile_auth(event, profile_id):
+        return response(401, {"state": "unauthorized"})
+
+    collected = []
+    scanned = 0
+    exclusive_start_key = None
+    while scanned < BUG_REPORT_EVENT_SCAN_LIMIT and len(collected) < BUG_REPORT_EVENT_RESULT_LIMIT:
+        request = {
+            "KeyConditionExpression": Key("profile_id").eq(profile_id),
+            "ScanIndexForward": False,
+            "Limit": min(100, BUG_REPORT_EVENT_SCAN_LIMIT - scanned),
+        }
+        if exclusive_start_key:
+            request["ExclusiveStartKey"] = exclusive_start_key
+        result = events_table.query(**request)
+        items = result.get("Items", [])
+        scanned += len(items)
+        for item in items:
+            if item.get("event_type") not in BUG_REPORT_EVENT_TYPES:
+                continue
+            metadata = parse_json_field(item.get("metadata_json"), {})
+            collected.append({
+                "event_id": item.get("event_id"),
+                "event_type": item.get("event_type"),
+                "reference": item.get("item_id"),
+                "timestamp": item.get("timestamp"),
+                "metadata": metadata if isinstance(metadata, dict) else {},
+            })
+            if len(collected) >= BUG_REPORT_EVENT_RESULT_LIMIT:
+                break
+        exclusive_start_key = result.get("LastEvaluatedKey")
+        if not exclusive_start_key:
+            break
+
+    return response(200, {"profile_id": profile_id, "items": collected})
 
 
 HOUSEHOLD_PROGRESS_EVENT_TYPE = "household_playback_progress"
@@ -12412,6 +12506,9 @@ def get_remote_routes(event):
 
 
 REMOTE_REQUEST_TTL_SECONDS = 24 * 60 * 60
+REMOTE_REQUEST_IN_PROGRESS_LEASE_SECONDS = 120
+REMOTE_REQUEST_COMPLETING_LEASE_SECONDS = 180
+REMOTE_ARR_IDENTITY_BATCH_MAXIMUM = 32
 REMOTE_COMMAND_ID_NAMESPACE = uuid.UUID("dd84f037-4c25-4b21-a393-6971989adddf")
 SAFE_JELLYFIN_ITEM_ID = re.compile(r"^[0-9a-fA-F]{32}$")
 SAFE_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
@@ -12831,6 +12928,24 @@ def is_safe_remote_path(provider, path, query):
             return False, "query cannot include secrets"
 
     provider = str(provider or "").lower()
+
+    synthetic_keys = {"tmdbIds", "tvdbIds"}
+    supplied_synthetic_keys = synthetic_keys.intersection((query or {}).keys())
+    if supplied_synthetic_keys:
+        expected = {
+            ("radarr", "/api/v3/movie"): "tmdbIds",
+            ("sonarr", "/api/v3/series"): "tvdbIds",
+        }.get((provider, path))
+        if supplied_synthetic_keys != {expected} or len(query or {}) != 1:
+            return False, "invalid Arr identity batch"
+        raw_values = str((query or {}).get(expected) or "")
+        parts = raw_values.split(",")
+        if not (1 <= len(parts) <= REMOTE_ARR_IDENTITY_BATCH_MAXIMUM):
+            return False, "Arr identity batch exceeds limit"
+        if any(not re.fullmatch(r"[1-9]\d*", part) for part in parts):
+            return False, "Arr identity batch must contain positive integers"
+        if len(set(parts)) != len(parts):
+            return False, "Arr identity batch contains duplicates"
 
     allowed_prefixes = {
         "jellyfin": [
@@ -13875,7 +13990,69 @@ def get_remote_request(event, path):
         if not authorized:
             return response(401, {"state": "unauthorized"})
 
+    item = terminalize_stale_remote_request(item)
     return response(200, public_remote_request_item(item, include_payload=True))
+
+
+def terminalize_stale_remote_request(item):
+    """Fail one exact abandoned connector lease instead of waiting for its TTL."""
+    status = str(item.get("status") or "")
+    lease_seconds = {
+        "in_progress": REMOTE_REQUEST_IN_PROGRESS_LEASE_SECONDS,
+        "completing": REMOTE_REQUEST_COMPLETING_LEASE_SECONDS,
+    }.get(status)
+    if lease_seconds is None:
+        return item
+    observed_updated_at = str(item.get("updated_at") or "")
+    observed_claimed_at = str(item.get("claimed_at") or "")
+    lease_marker = observed_updated_at or observed_claimed_at
+    try:
+        updated = datetime.fromisoformat(lease_marker.replace("Z", "+00:00"))
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - updated).total_seconds()
+    except (TypeError, ValueError):
+        age_seconds = lease_seconds + 1
+    if age_seconds <= lease_seconds:
+        return item
+
+    now = utc_now_iso()
+    error_json = json.dumps({
+        "message": "The home connector did not finish this request before its lease expired.",
+        "details": {"code": "remoteRequestLeaseExpired", "previous_status": status},
+    }, separators=(",", ":"))
+    condition = "#status = :expected"
+    expression_values = {
+        ":expected": status,
+        ":failed": "failed",
+        ":now": now,
+        ":status_created_at": status_sort_key("failed", now, item["request_id"]),
+        ":error_json": error_json,
+    }
+    if observed_updated_at:
+        condition += " AND updated_at = :expected_updated_at"
+        expression_values[":expected_updated_at"] = observed_updated_at
+    elif observed_claimed_at:
+        condition += " AND attribute_not_exists(updated_at) AND claimed_at = :expected_claimed_at"
+        expression_values[":expected_claimed_at"] = observed_claimed_at
+    else:
+        condition += " AND attribute_not_exists(updated_at) AND attribute_not_exists(claimed_at)"
+    try:
+        return remote_requests_table.update_item(
+            Key={"request_id": item["request_id"]},
+            ConditionExpression=condition,
+            UpdateExpression=(
+                "SET #status = :failed, failed_at = :now, updated_at = :now, "
+                "status_created_at = :status_created_at, error_json = :error_json"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues=expression_values,
+            ReturnValues="ALL_NEW",
+        ).get("Attributes", item)
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return remote_requests_table.get_item(Key={"request_id": item["request_id"]}).get("Item") or item
+        raise
 
 
 def claim_remote_request(event, *, pairing_v3=False):
@@ -14287,6 +14464,7 @@ def lambda_handler(event, context):
                 "/v1/events",
                 "/v1/events/batch",
                 "/v1/events/recent",
+                "/v1/bug-reports",
                 "/v1/household-progress",
                 "/v1/household-progress/live-ticket",
                 "/v1/entitlements",
@@ -14549,6 +14727,9 @@ def lambda_handler(event, context):
 
     if method == "GET" and path == "/v1/events/recent":
         return recent_events(event)
+
+    if method == "GET" and path == "/v1/bug-reports":
+        return bug_report_events(event)
 
     if method == "GET" and path == "/v1/entitlements":
         return get_entitlements(event)

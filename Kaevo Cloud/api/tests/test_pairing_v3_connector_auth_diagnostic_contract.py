@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import logging
 import os
@@ -27,6 +28,10 @@ class Table:
         key = next(iter(Key.values()))
         item = self.items.get(key)
         return {"Item": dict(item)} if item else {}
+
+    def put_item(self, *, Item, **_kwargs):
+        key = Item.get("token_hash") or Item.get("connector_id")
+        self.items[key] = dict(Item)
 
 
 def connector_event(path, *, headers=None):
@@ -114,3 +119,54 @@ def test_connector_auth_diagnostic_failure_preserves_fail_closed_result(monkeypa
         "missing-connector",
         {"connector_id": "missing-connector"},
     ) is False
+
+
+def test_signature_v2_verifies_the_exact_strict_utf8_body(monkeypatch):
+    connector_id = "connector-v2-exact"
+    seed = b"E" * 32
+    public_key = handler.ed25519_public_key_from_seed(seed)
+    fingerprint = handler.pairing_v3_plugin_fingerprint(public_key)
+    connector = {
+        "connector_id": connector_id,
+        "protocol_version": handler.PAIRING_V3_PROTOCOL,
+        "auth_state": "v3_active",
+        "state": "active",
+        "plugin_public_key": handler.pairing_v3_b64url_encode(public_key),
+        "plugin_public_key_fingerprint": fingerprint,
+        "plugin_instance_id": "plugin-v2-exact",
+        "plugin_key_id": "1",
+    }
+    route = "/v3/remote-requests/request-v2/complete"
+    raw_body = '{"connector_id":"connector-v2-exact","value":1.2300,"label":"a\u2060b"}'
+    timestamp = str(handler.epoch_now() * 1000)
+    nonce = "signaturev2exactnonce0123456789"
+    digest = handler.pairing_v3_b64url_encode(hashlib.sha256(raw_body.encode("utf-8")).digest())
+    transcript = handler.pairing_v3_canonical_transcript("connector-request", (
+        ("httpMethod", "POST"), ("canonicalRoute", route), ("bodyDigest", digest),
+        ("timestamp", timestamp), ("nonce", nonce), ("connectorId", connector_id),
+        ("pluginInstanceId", "plugin-v2-exact"), ("pluginKeyId", "1"),
+        ("pluginPublicKeyFingerprint", fingerprint),
+    ))
+    event = connector_event(route, headers={
+        "x-kaevo-plugin-key-id": "1",
+        "x-kaevo-plugin-timestamp": timestamp,
+        "x-kaevo-plugin-nonce": nonce,
+        "x-kaevo-plugin-signature": handler.pairing_v3_sign_ed25519(seed, transcript),
+        "x-kaevo-plugin-signature-version": "2",
+    })
+    event["body"] = raw_body
+    monkeypatch.setattr(handler, "home_connectors_table", Table({connector_id: connector}))
+    monkeypatch.setattr(handler, "app_sessions_table", Table())
+
+    assert handler.require_pairing_v3_connector_auth(event, connector_id, json.loads(raw_body)) is True
+
+
+def test_signature_v2_rejects_duplicate_keys_and_nonstandard_numbers():
+    for raw_body in ('{"a":1,"a":2}', '{"a":NaN}', '{"a":Infinity}'):
+        event = {"body": raw_body}
+        try:
+            handler._pairing_v3_exact_json_body_bytes(event)
+        except handler.PairingV3CryptoError:
+            pass
+        else:
+            raise AssertionError(f"strict v2 JSON accepted {raw_body}")

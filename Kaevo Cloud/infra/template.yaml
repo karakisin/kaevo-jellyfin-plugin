@@ -1556,6 +1556,13 @@ Resources:
             Path: /v1/events/recent
             Method: GET
 
+        BugReportHistory:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/bug-reports
+            Method: GET
+
         HouseholdProgressWrite:
           Type: HttpApi
           Properties:

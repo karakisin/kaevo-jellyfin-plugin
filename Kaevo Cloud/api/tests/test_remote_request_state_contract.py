@@ -33,12 +33,23 @@ class FakeRemoteRequests:
     def query(self, **_):
         return {"Items": [dict(item) for item in self.items.values() if item["status"] == "pending"]}
 
-    def update_item(self, *, Key, ExpressionAttributeValues, ReturnValues, **_):
+    def update_item(self, *, Key, ExpressionAttributeValues, ReturnValues, ConditionExpression="", **_):
         item = self.items.get(Key["request_id"])
-        expected = ExpressionAttributeValues.get(":pending", ExpressionAttributeValues.get(":in_progress"))
+        expected = ExpressionAttributeValues.get(
+            ":expected",
+            ExpressionAttributeValues.get(":pending", ExpressionAttributeValues.get(":in_progress")),
+        )
         if not item or item.get("status") != expected:
             raise ClientError({"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem")
         if ":now_epoch" in ExpressionAttributeValues and int(item.get("expires_at") or 0) < ExpressionAttributeValues[":now_epoch"]:
+            raise ClientError({"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem")
+        if ":expected_updated_at" in ExpressionAttributeValues and item.get("updated_at") != ExpressionAttributeValues[":expected_updated_at"]:
+            raise ClientError({"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem")
+        if ":expected_claimed_at" in ExpressionAttributeValues and item.get("claimed_at") != ExpressionAttributeValues[":expected_claimed_at"]:
+            raise ClientError({"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem")
+        if "attribute_not_exists(updated_at)" in ConditionExpression and "updated_at" in item:
+            raise ClientError({"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem")
+        if "attribute_not_exists(claimed_at)" in ConditionExpression and "claimed_at" in item:
             raise ClientError({"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem")
         if ":completing" in ExpressionAttributeValues:
             item["status"] = ExpressionAttributeValues[":completing"]
@@ -113,6 +124,7 @@ def request_item(request_id, status, expires_at=None):
         "status": status,
         "status_created_at": handler.status_sort_key(status, now, request_id),
         "created_at": now,
+        "updated_at": now,
         "expires_at": expires_at if expires_at is not None else handler.epoch_now() + 300,
     }
 
@@ -374,6 +386,53 @@ def test_expired_pending_request_cannot_be_claimed(monkeypatch):
     assert result["statusCode"] == 200
     assert json.loads(result["body"])["state"] == "empty"
     assert table.items["expired"]["status"] == "pending"
+
+
+def test_stale_in_progress_and_completing_leases_terminalize_on_exact_status_read(monkeypatch):
+    stale = "2026-01-01T00:00:00+00:00"
+    in_progress = request_item("stale-in-progress", "in_progress")
+    completing = request_item("stale-completing", "completing")
+    in_progress["updated_at"] = stale
+    completing["updated_at"] = stale
+    table = FakeRemoteRequests([in_progress, completing])
+    monkeypatch.setattr(handler, "remote_requests_table", table)
+    monkeypatch.setattr(handler, "require_profile_auth", lambda _event, profile_id: profile_id == "profile-1")
+
+    first = handler.get_remote_request({}, "/v1/remote-requests/stale-in-progress")
+    second = handler.get_remote_request({}, "/v1/remote-requests/stale-completing")
+
+    assert first["statusCode"] == 200
+    assert second["statusCode"] == 200
+    for request_id in ("stale-in-progress", "stale-completing"):
+        assert table.items[request_id]["status"] == "failed"
+        error = json.loads(table.items[request_id]["error_json"])
+        assert error["details"]["code"] == "remoteRequestLeaseExpired"
+
+
+def test_fresh_connector_lease_is_not_terminalized(monkeypatch):
+    item = request_item("fresh", "in_progress")
+    table = FakeRemoteRequests([item])
+    monkeypatch.setattr(handler, "remote_requests_table", table)
+    monkeypatch.setattr(handler, "require_profile_auth", lambda _event, profile_id: profile_id == "profile-1")
+
+    result = handler.get_remote_request({}, "/v1/remote-requests/fresh")
+
+    assert result["statusCode"] == 200
+    assert table.items["fresh"]["status"] == "in_progress"
+
+
+def test_legacy_stale_lease_without_timestamps_terminalizes_once(monkeypatch):
+    item = request_item("legacy-stale", "in_progress")
+    item.pop("updated_at")
+    table = FakeRemoteRequests([item])
+    monkeypatch.setattr(handler, "remote_requests_table", table)
+    monkeypatch.setattr(handler, "require_profile_auth", lambda _event, profile_id: profile_id == "profile-1")
+
+    result = handler.get_remote_request({}, "/v1/remote-requests/legacy-stale")
+
+    assert result["statusCode"] == 200
+    assert table.items["legacy-stale"]["status"] == "failed"
+    assert json.loads(table.items["legacy-stale"]["error_json"])["details"]["code"] == "remoteRequestLeaseExpired"
 
 
 def test_completion_and_failure_replays_cannot_overwrite_terminal_state(monkeypatch):

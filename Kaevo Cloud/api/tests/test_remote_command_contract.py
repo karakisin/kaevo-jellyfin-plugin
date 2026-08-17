@@ -658,6 +658,22 @@ def test_plugin_backed_provider_reads_are_allowlisted_without_secrets():
     assert error == "query cannot include secrets"
 
 
+def test_arr_identity_batches_are_exact_provider_path_bound_and_limited():
+    assert handler.is_safe_remote_path("radarr", "/api/v3/movie", {"tmdbIds": "11,22"}) == (True, "")
+    assert handler.is_safe_remote_path("sonarr", "/api/v3/series", {"tvdbIds": "33"}) == (True, "")
+
+    rejected = (
+        ("radarr", "/api/v3/movie", {"tvdbIds": "11"}),
+        ("radarr", "/api/v3/queue", {"tmdbIds": "11"}),
+        ("sonarr", "/api/v3/series", {"tvdbIds": "0"}),
+        ("sonarr", "/api/v3/series", {"tvdbIds": "11,11"}),
+        ("radarr", "/api/v3/movie", {"tmdbIds": ",".join(str(value) for value in range(1, 34))}),
+    )
+    for provider, path, query in rejected:
+        accepted, _ = handler.is_safe_remote_path(provider, path, query)
+        assert accepted is False
+
+
 def test_sonarr_episode_commands_are_id_bounded():
     inventory, error = command("sonarr.episode_inventory", {"tvdb_id": 121361})
     assert error == ""
