@@ -231,6 +231,34 @@ def _raw_event_json_body(event):
     return raw_body
 
 
+def _exact_json_body_bytes(event):
+    """Return the exact strict JSON bytes used by connector signature v2."""
+    raw_body = _raw_event_json_body(event)
+
+    def reject_duplicate_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise PairingV3CryptoError("duplicate JSON key")
+            value[key] = item
+        return value
+
+    def reject_nonstandard_number(value):
+        raise PairingV3CryptoError(f"nonstandard JSON number: {value}")
+
+    try:
+        parsed = json.loads(
+            raw_body,
+            object_pairs_hook=reject_duplicate_pairs,
+            parse_constant=reject_nonstandard_number,
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as error:
+        raise PairingV3CryptoError("strict JSON body invalid") from error
+    if not isinstance(parsed, dict):
+        raise PairingV3CryptoError("JSON body must be an object")
+    return raw_body.encode("utf-8", errors="strict")
+
+
 def _connector_request_transcript(event, body_digest, timestamp, nonce, connector_id,
                                   plugin_instance_id, plugin_key_id, fingerprint):
     return canonical_transcript("connector-request", (
@@ -317,18 +345,26 @@ def authenticate_connector(event, connector_id, body, *, allow_revoked=False):
     nonce = str(header_value(event, "x-kaevo-plugin-nonce") or "")
     if not SAFE_NONCE.fullmatch(nonce):
         return _connector_auth_rejected(event, "PLUGIN_NONCE_INVALID", connector_id)
+    signature_version = str(header_value(event, "x-kaevo-plugin-signature-version") or "1")
     try:
-        parsed_body_digest = canonical_json_digest(body)
+        if signature_version == "2":
+            parsed_body_digest = sha256_b64url(_exact_json_body_bytes(event))
+        elif signature_version == "1":
+            parsed_body_digest = canonical_json_digest(body)
+        else:
+            raise PairingV3CryptoError("unsupported connector signature version")
         transcript = _connector_request_transcript(
             event, parsed_body_digest, timestamp, nonce, connector_id,
             plugin_instance_id, plugin_key_id, fingerprint,
         )
-    except (PairingV3CryptoError, TypeError, ValueError):
+    except (PairingV3CryptoError, TypeError, ValueError, UnicodeDecodeError):
         return _connector_auth_rejected(event, "REQUEST_CANONICALIZATION_INVALID", connector_id)
     signature = str(header_value(event, "x-kaevo-plugin-signature") or "")
     try:
         verify_ed25519(public_key, transcript, signature)
     except (PairingV3CryptoError, TypeError, ValueError):
+        if signature_version == "2":
+            return _connector_auth_rejected(event, "PLUGIN_SIGNATURE_INVALID", connector_id)
         try:
             compatibility_digest = canonical_json_digest_preserving_number_lexemes(_raw_event_json_body(event))
             if hmac.compare_digest(compatibility_digest, parsed_body_digest):

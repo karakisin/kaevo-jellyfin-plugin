@@ -195,6 +195,27 @@ def signed_raw(route, raw_body, nonce="connectorrawnumbernonce0123456"):
     }
 
 
+def signed_v2(route, raw_body, nonce="connectorrawbytesnonce0123456"):
+    timestamp = str(control.epoch_now() * 1000)
+    transcript = pairing_v3.canonical_transcript("connector-request", (
+        ("httpMethod", "POST"), ("canonicalRoute", route),
+        ("bodyDigest", pairing_v3.sha256_b64url(raw_body.encode("utf-8"))),
+        ("timestamp", timestamp), ("nonce", nonce), ("connectorId", CONNECTOR_ID),
+        ("pluginInstanceId", "plugin-control-01"), ("pluginKeyId", "1"),
+        ("pluginPublicKeyFingerprint", pairing_v3.plugin_fingerprint(pairing_v3.ed25519_public_key_from_seed(PLUGIN_SEED))),
+    ))
+    return {
+        "rawPath": route,
+        "requestContext": {"http": {"method": "POST"}},
+        "headers": {
+            "X-Kaevo-Plugin-Key-Id": "1", "X-Kaevo-Plugin-Timestamp": timestamp,
+            "X-Kaevo-Plugin-Nonce": nonce, "X-Kaevo-Plugin-Signature-Version": "2",
+            "X-Kaevo-Plugin-Signature": pairing_v3.sign_ed25519(PLUGIN_SEED, transcript),
+        },
+        "body": raw_body,
+    }
+
+
 def body(**extra):
     return {"connector_id": CONNECTOR_ID, "profile_id": PROFILE_ID, "provider_status": {}, **extra}
 
@@ -217,6 +238,26 @@ def test_missing_wrong_and_replayed_signatures_fail_closed(tables):
     valid = signed(route, body(), "connectorcontrolnonce0123456791")
     assert control.lambda_handler(valid, None)["statusCode"] == 200
     assert control.lambda_handler(valid, None)["statusCode"] == 401
+
+
+def test_signature_v2_verifies_exact_serialized_body_bytes(tables):
+    route = f"/v3/home-connectors/{CONNECTOR_ID}/heartbeat"
+    raw_body = json.dumps(body(progress=0.000000000000000000123), separators=(",", ":"))
+    request = signed_v2(route, raw_body)
+
+    assert control.lambda_handler(request, None)["statusCode"] == 200
+
+
+def test_signature_v2_rejects_changed_serialized_body_and_unknown_version(tables):
+    route = f"/v3/home-connectors/{CONNECTOR_ID}/heartbeat"
+    raw_body = json.dumps(body(), separators=(",", ":"))
+    changed = signed_v2(route, raw_body, "connectorrawbytesnonce0123457")
+    changed["body"] = json.dumps(body(), indent=1)
+    assert control.lambda_handler(changed, None)["statusCode"] == 401
+
+    unsupported = signed_v2(route, raw_body, "connectorrawbytesnonce0123458")
+    unsupported["headers"]["X-Kaevo-Plugin-Signature-Version"] = "3"
+    assert control.lambda_handler(unsupported, None)["statusCode"] == 401
 
 
 def test_profile_conflict_and_wrong_binding_are_rejected(tables):
