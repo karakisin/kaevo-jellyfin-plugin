@@ -209,6 +209,17 @@ def effective_state(item: Mapping[str, Any], *, now: int) -> str:
 
 
 def public_projection(item: Mapping[str, Any], *, now: int) -> dict[str, Any]:
+    raw_progress = item.get("progress_by_item") or {}
+    progress_by_item = {
+        str(item_id).lower(): {
+            "position_ticks": max(0, int((value or {}).get("position_ticks") or 0)),
+            "runtime_ticks": max(0, int((value or {}).get("runtime_ticks") or 0)),
+            "completed": bool((value or {}).get("completed")),
+            "updated_at": str((value or {}).get("updated_at") or ""),
+        }
+        for item_id, value in list(raw_progress.items())[:MAX_SCOPE_ENTRIES]
+        if MEDIA_ID_PATTERN.fullmatch(str(item_id or "")) and isinstance(value, Mapping)
+    } if isinstance(raw_progress, Mapping) else {}
     return {
         "pass_id": str(item.get("pass_id") or ""),
         "guest_name": str(item.get("guest_name") or "Guest"),
@@ -225,6 +236,7 @@ def public_projection(item: Mapping[str, Any], *, now: int) -> dict[str, Any]:
         "scope": item.get("scope") or {},
         "permissions": item.get("permissions") or {},
         "device_bound": bool(item.get("device_id")),
+        "progress": progress_by_item,
     }
 
 

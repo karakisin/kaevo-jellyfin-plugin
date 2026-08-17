@@ -106,6 +106,9 @@ def test_guest_activity_is_isolated_and_one_view_completion_is_fail_closed():
     assert 'allow_expired_finish_current=True' in activity
     assert 'active_playback.playback_session_id = :session_id' in activity
     assert 'completed_item_ids = list_append' in activity
+    assert '"progress_by_item": progress_by_item' not in activity
+    assert '"progress_by_item = :progress_by_item"' in activity
+    assert '"runtime_ticks": max(runtime_ticks, 0)' in activity
     assert 'household-progress' not in activity
     assert 'jellyfin.playback_' not in activity
 
@@ -118,6 +121,46 @@ def test_guest_scope_projection_and_search_are_server_owned():
     assert 'resource == "search"' in content
     assert '_authorized_jellyfin_metadata_request(' in content
     assert '_guest_annotate_item_page' in HANDLER
+
+
+def test_guest_detail_is_exact_item_authorized_before_projection():
+    content = HANDLER.split("def create_guest_content_request", 1)[1].split(
+        "\ndef create_guest_playback_request", 1
+    )[0]
+    assert 'resource == "detail"' in content
+    assert '"Overview,Genres,People,Studios,ProviderIds,PrimaryImageAspectRatio,"' in content
+    guest_read = HANDLER.split("def get_guest_remote_request", 1)[1].split(
+        "\ndef household_invitation_response", 1
+    )[0]
+    assert '"detail": detail if _guest_item_authorized(guest_pass, detail) else None' in guest_read
+
+
+def test_guest_progress_projection_is_bounded_and_contains_no_household_identity():
+    from guest_pass import public_projection
+
+    item_id = "a" * 32
+    projected = public_projection({
+        "pass_id": "guest_example",
+        "progress_by_item": {
+            item_id: {
+                "position_ticks": 123_000_000,
+                "runtime_ticks": 600_000_000,
+                "completed": False,
+                "updated_at": "2026-08-16T00:00:00Z",
+                "household_profile_id": "must-not-project",
+            },
+            "not-a-media-id": {"position_ticks": 1},
+        },
+    }, now=1)
+
+    assert projected["progress"] == {
+        item_id: {
+            "position_ticks": 123_000_000,
+            "runtime_ticks": 600_000_000,
+            "completed": False,
+            "updated_at": "2026-08-16T00:00:00Z",
+        }
+    }
 
 
 def test_guest_artwork_is_server_scoped_and_uses_the_bounded_image_route():

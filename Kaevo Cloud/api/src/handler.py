@@ -10174,6 +10174,27 @@ def create_guest_content_request(event):
             ]
             path = "/kaevo/internal/guest-scope"
             query = {"itemIds": ",".join(item_ids)}
+    elif resource == "detail":
+        item_id = str(body.get("item_id") or "").strip().lower()
+        if not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
+            return response(400, {"state": "invalid_guest_content_item"})
+        path = f"/Users/00000000000000000000000000000000/Items/{item_id}"
+        query = {
+            "Fields": (
+                "Overview,Genres,People,Studios,ProviderIds,PrimaryImageAspectRatio,"
+                "Taglines,Tags,DateCreated,PremiereDate,ProductionYear,ImageTags,"
+                "BackdropImageTags,RunTimeTicks"
+            ),
+            "EnableUserData": "false",
+        }
+        path, query, binding_error = _authorized_jellyfin_metadata_request(
+            str(guest_pass.get("source_profile_id") or ""),
+            str(connector.get("connector_id") or ""),
+            path,
+            query,
+        )
+        if binding_error:
+            return response(409, {"state": "guest_content_unavailable"})
     elif resource in {"seasons", "episodes"}:
         series_id = str(body.get("series_id") or "").strip().lower()
         if not SAFE_JELLYFIN_ITEM_ID.fullmatch(series_id):
@@ -10335,7 +10356,20 @@ def record_guest_playback_activity(event):
         and (runtime_ticks <= 0 or position_ticks >= int(runtime_ticks * 0.9))
     )
     now = epoch_now()
-    set_clauses = ["last_activity = :activity"]
+    progress_by_item = dict(guest_pass.get("progress_by_item") or {})
+    if len(progress_by_item) >= 500 and item_id not in progress_by_item:
+        oldest_item_id = min(
+            progress_by_item,
+            key=lambda key: str((progress_by_item.get(key) or {}).get("updated_at") or ""),
+        )
+        progress_by_item.pop(oldest_item_id, None)
+    progress_by_item[item_id] = {
+        "position_ticks": position_ticks,
+        "runtime_ticks": max(runtime_ticks, 0),
+        "completed": completed,
+        "updated_at": utc_now_iso(),
+    }
+    set_clauses = ["last_activity = :activity", "progress_by_item = :progress_by_item"]
     values = {
         ":activity": {
             "event": activity,
@@ -10346,6 +10380,7 @@ def record_guest_playback_activity(event):
         },
         ":pass_id": str(guest_pass.get("pass_id") or ""),
         ":session_id": playback_session_id,
+        ":progress_by_item": progress_by_item,
     }
     if completed and str(guest_pass.get("replay_policy") or "") == "one_completed_view":
         set_clauses.append(
@@ -10470,6 +10505,14 @@ def get_guest_remote_request(event, path):
                 "scopeItems": _guest_filter_item_page(
                     guest_pass, decode_remote_response_payload(item, {}),
                 )
+            }
+        elif re.fullmatch(
+            r"/Users/[0-9a-fA-F]{32}/Items/[0-9a-fA-F]{32}",
+            str(request_payload.get("path") or ""),
+        ):
+            detail = decode_remote_response_payload(item, {})
+            projected["response"] = {
+                "detail": detail if _guest_item_authorized(guest_pass, detail) else None
             }
         elif item.get("guest_pass_id") and re.fullmatch(
             r"/Users/[0-9a-fA-F]{32}/Items",
