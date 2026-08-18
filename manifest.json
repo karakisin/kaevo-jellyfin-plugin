@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.2.99.0",
+        "changelog": "Applies watched and unwatched state directly to the exact bound Jellyfin profile and returns authoritative played-state readback for fast, consistent Kaevo Library updates.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.99/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "215dd4a3c7b23b46155bcd57e9a37ac9",
+        "timestamp": "2026-08-18T05:55:08Z"
+      },
+      {
         "version": "0.2.98.0",
         "changelog": "Hardens Requests and download progress with immutable Arr identity filters, byte-exact signed connector requests, and bounded recovery for stale Cloud request leases.",
         "targetAbi": "10.11.0.0",
