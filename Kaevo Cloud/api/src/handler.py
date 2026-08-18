@@ -13972,6 +13972,8 @@ def get_remote_request(event, path):
             return owner_error
     else:
         switch_authorized_paths = {
+            "/commands/jellyfin.mark_played",
+            "/commands/jellyfin.mark_unplayed",
             "/commands/jellyfin.prepare_playback",
             "/commands/jellyfin.playback_started",
             "/commands/jellyfin.playback_progress",

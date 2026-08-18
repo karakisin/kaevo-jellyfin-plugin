@@ -630,6 +630,16 @@ def test_jellyfin_watched_mutations_require_the_exact_scoped_profile_session(mon
             else {"connector_id": "connector-2"}
         ),
     )
+    monkeypatch.setattr(
+        handler,
+        "require_profile_switch_auth",
+        lambda _event, profile_id: profile_id == "profile-1",
+    )
+    monkeypatch.setattr(
+        handler,
+        "require_profile_auth",
+        lambda _event, _profile_id: False,
+    )
 
     for operation, suffix in (("jellyfin.mark_played", "played"), ("jellyfin.mark_unplayed", "unplayed")):
         result = handler.create_remote_command({
@@ -649,6 +659,16 @@ def test_jellyfin_watched_mutations_require_the_exact_scoped_profile_session(mon
         )
         assert json.loads(queued["request_json"])["path"] == f"/commands/{operation}"
 
+        fetched = handler.get_remote_request(
+            {"headers": {"authorization": "Bearer scoped-session"}},
+            f"/v1/remote-requests/{queued['request_id']}",
+        )
+        assert fetched["statusCode"] == 200
+        fetched_body = json.loads(fetched["body"])
+        assert fetched_body["request_id"] == queued["request_id"]
+        assert fetched_body["profile_id"] == "profile-1"
+        assert fetched_body["operation"] == operation
+
     cross_profile = handler.create_remote_command({
         "headers": {"authorization": "Bearer scoped-session"},
         "body": json.dumps({
@@ -659,6 +679,25 @@ def test_jellyfin_watched_mutations_require_the_exact_scoped_profile_session(mon
         }),
     })
     assert cross_profile["statusCode"] == 401
+
+    foreign_request_id = "foreign-watched-mutation"
+    remote_requests.items[foreign_request_id] = {
+        "request_id": foreign_request_id,
+        "profile_id": "profile-2",
+        "status": "pending",
+        "request_json": json.dumps({
+            "provider": "home_server",
+            "method": "COMMAND",
+            "path": "/commands/jellyfin.mark_played",
+            "query": {},
+            "body": {"item_id": "b" * 32},
+        }),
+    }
+    cross_profile_readback = handler.get_remote_request(
+        {"headers": {"authorization": "Bearer scoped-session"}},
+        f"/v1/remote-requests/{foreign_request_id}",
+    )
+    assert cross_profile_readback["statusCode"] == 401
 
 
 def test_seerr_cancel_request_remains_denied_to_profile_sessions(monkeypatch):
