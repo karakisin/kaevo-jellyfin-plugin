@@ -597,6 +597,70 @@ def test_seerr_create_request_is_available_only_to_the_exact_scoped_profile_sess
     assert remote_requests.put_count == 1
 
 
+def test_jellyfin_watched_mutations_require_the_exact_scoped_profile_session(monkeypatch):
+    class RemoteRequests:
+        def __init__(self):
+            self.items = {}
+
+        def get_item(self, *, Key):
+            item = self.items.get(Key["request_id"])
+            return {"Item": dict(item)} if item else {}
+
+        def put_item(self, *, Item):
+            self.items[Item["request_id"]] = dict(Item)
+
+    remote_requests = RemoteRequests()
+    monkeypatch.setattr(handler, "remote_requests_table", remote_requests)
+    monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
+    monkeypatch.setattr(
+        handler,
+        "authorize_profile_switch_session",
+        lambda _event, profile_id: (
+            (True, {"profile_id": "profile-1", "household_id": "household-1"})
+            if profile_id == "profile-1"
+            else (False, None)
+        ),
+    )
+    monkeypatch.setattr(
+        handler,
+        "latest_online_connector_for_profile",
+        lambda profile_id: (
+            {"connector_id": "connector-1"}
+            if profile_id == "profile-1"
+            else {"connector_id": "connector-2"}
+        ),
+    )
+
+    for operation, suffix in (("jellyfin.mark_played", "played"), ("jellyfin.mark_unplayed", "unplayed")):
+        result = handler.create_remote_command({
+            "headers": {"authorization": "Bearer scoped-session"},
+            "body": json.dumps({
+                "profile_id": "profile-1",
+                "operation": operation,
+                "parameters": {"item_id": "a" * 32},
+                "idempotency_key": f"watched-mutation-{suffix}-1",
+            }),
+        })
+
+        assert result["statusCode"] == 202
+        queued = next(
+            item for item in remote_requests.items.values()
+            if item["idempotency_key"] == f"watched-mutation-{suffix}-1"
+        )
+        assert json.loads(queued["request_json"])["path"] == f"/commands/{operation}"
+
+    cross_profile = handler.create_remote_command({
+        "headers": {"authorization": "Bearer scoped-session"},
+        "body": json.dumps({
+            "profile_id": "profile-2",
+            "operation": "jellyfin.mark_played",
+            "parameters": {"item_id": "b" * 32},
+            "idempotency_key": "watched-mutation-cross-profile-1",
+        }),
+    })
+    assert cross_profile["statusCode"] == 401
+
+
 def test_seerr_cancel_request_remains_denied_to_profile_sessions(monkeypatch):
     monkeypatch.setattr(handler, "remote_requests_table", object())
     monkeypatch.setattr(handler, "require_dev_key", lambda _: False)

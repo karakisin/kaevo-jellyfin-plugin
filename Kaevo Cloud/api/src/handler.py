@@ -13484,6 +13484,8 @@ def create_remote_command(event):
     if not profile_id:
         return response(400, {"state": "bad_request", "message": "profile_id is required"})
     profile_authorized_operations = {
+        "jellyfin.mark_played",
+        "jellyfin.mark_unplayed",
         "jellyfin.prepare_playback",
         "jellyfin.playback_started",
         "jellyfin.playback_progress",
@@ -13501,6 +13503,8 @@ def create_remote_command(event):
         "sonarr.search_episodes",
     }
     switch_authorized_operations = {
+        "jellyfin.mark_played",
+        "jellyfin.mark_unplayed",
         "jellyfin.prepare_playback",
         "jellyfin.playback_started",
         "jellyfin.playback_progress",
