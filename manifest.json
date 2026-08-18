@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.1.0",
+        "changelog": "Fixes Mark Watched and Mark Unwatched on Jellyfin 10.11 by using the supported exact-user playstate endpoint and validating its authoritative item readback.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.1/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "ba548efa95a2bbae7657e4ae7f89cd43",
+        "timestamp": "2026-08-18T08:59:43Z"
+      },
+      {
         "version": "0.3.0.0",
         "changelog": "Fixes watched-state confirmation on Jellyfin 10.11 by reading the exact bound user's authoritative data without calling the removed Jellyfin 10.10 API.",
         "targetAbi": "10.11.0.0",
