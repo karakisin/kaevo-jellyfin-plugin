@@ -9,6 +9,42 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 public sealed class RelayRequestContextTests
 {
     [Theory]
+    [InlineData("jellyfin.mark_played", true, true)]
+    [InlineData("jellyfin.mark_played", false, false)]
+    [InlineData("jellyfin.mark_unplayed", false, true)]
+    [InlineData("jellyfin.mark_unplayed", true, false)]
+    public void WatchedMutationPayloadReturnsExactAuthoritativeReadback(
+        string operation,
+        bool played,
+        bool expectedApplied)
+    {
+        const string itemId = "11111111111111111111111111111111";
+        var request = new CloudRequest(
+            "request-watched-1",
+            "COMMAND",
+            "home_server",
+            $"/commands/{operation}",
+            null,
+            operation,
+            null,
+            "profile-1");
+
+        var payload = KaevoCloudConnectorService.BuildWatchedMutationPayload(
+            request,
+            operation,
+            itemId,
+            played);
+
+        Assert.Equal("request-watched-1", payload.GetProperty("requestId").GetString());
+        Assert.Equal("complete", payload.GetProperty("state").GetString());
+        Assert.Equal(operation, payload.GetProperty("operation").GetString());
+        var result = payload.GetProperty("result");
+        Assert.Equal(itemId, result.GetProperty("item_id").GetString());
+        Assert.Equal(expectedApplied, result.GetProperty("applied").GetBoolean());
+        Assert.Equal(played, result.GetProperty("played").GetBoolean());
+    }
+
+    [Theory]
     [InlineData("HEAD", "/Videos/11111111111111111111111111111111/master.m3u8", true)]
     [InlineData("HEAD", "/Videos/11111111111111111111111111111111/master.m3u8?videoCodec=h264", true)]
     [InlineData("GET", "/Videos/11111111111111111111111111111111/master.m3u8", false)]
