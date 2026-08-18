@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Kaevo.Plugin.KaevoForJellyfin.Configuration;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Session;
@@ -19,7 +20,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.97";
+    private const string PluginVersion = "0.3.0";
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
@@ -841,20 +842,48 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             return await PreparePlaybackAsync(configuration, secrets, request, parameters, cancellationToken).ConfigureAwait(false);
         }
 
-        if (operation is "jellyfin.mark_played" or "jellyfin.mark_unplayed" or "jellyfin.favorite" or "jellyfin.unfavorite")
+        if (operation is "jellyfin.mark_played" or "jellyfin.mark_unplayed")
         {
             var itemId = RequireItemId(parameters);
             var jellyfinUserId = RequireBoundJellyfinUserId(
                 configuration,
                 request,
                 "profileJellyfinBindingMissing");
-            var (method, suffix) = operation switch
+            var user = _userManager.GetUserById(Guid.ParseExact(jellyfinUserId, "N"))
+                ?? throw new InvalidOperationException("profileJellyfinBindingMissing");
+            var item = _libraryManager.GetItemById<BaseItem>(Guid.ParseExact(itemId, "N"), user)
+                ?? throw new InvalidOperationException("jellyfinItemMissing");
+            if (operation == "jellyfin.mark_played")
             {
-                "jellyfin.mark_played" => (HttpMethod.Post, "UserPlayedItems"),
-                "jellyfin.mark_unplayed" => (HttpMethod.Delete, "UserPlayedItems"),
-                "jellyfin.favorite" => (HttpMethod.Post, "UserFavoriteItems"),
-                _ => (HttpMethod.Delete, "UserFavoriteItems")
-            };
+                item.MarkPlayed(user, DateTime.UtcNow, resetPosition: true);
+            }
+            else
+            {
+                item.MarkUnplayed(user);
+            }
+            // Jellyfin 10.11 removed BaseItem.IsPlayed(User) in favor of an
+            // overload that also accepts user data. Read the exact bound
+            // user's authoritative record through the stable manager contract
+            // so a successful mutation is not reported as failed because the
+            // plugin was compiled against Jellyfin 10.10.
+            var played = WatchedStateFromUserData(
+                BaseItem.UserDataManager.GetUserData(user, item)?.Played);
+            return new CommandResult(
+                200,
+                BuildWatchedMutationPayload(request, operation, itemId, played),
+                false);
+        }
+
+        if (operation is "jellyfin.favorite" or "jellyfin.unfavorite")
+        {
+            var itemId = RequireItemId(parameters);
+            var jellyfinUserId = RequireBoundJellyfinUserId(
+                configuration,
+                request,
+                "profileJellyfinBindingMissing");
+            var (method, suffix) = operation == "jellyfin.favorite"
+                ? (HttpMethod.Post, "UserFavoriteItems")
+                : (HttpMethod.Delete, "UserFavoriteItems");
             var path = $"/{suffix}/{itemId}?userId={Uri.EscapeDataString(jellyfinUserId)}";
             await SendLocalAsync(configuration, secrets, method, path, null, null, cancellationToken).ConfigureAwait(false);
             return new CommandResult(200, JsonSerializer.SerializeToElement(new
@@ -1195,6 +1224,24 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             result
         }, JsonOptions), false);
     }
+
+    internal static JsonElement BuildWatchedMutationPayload(
+        CloudRequest request,
+        string operation,
+        string itemId,
+        bool played)
+    {
+        var desiredPlayed = operation == "jellyfin.mark_played";
+        return JsonSerializer.SerializeToElement(new
+        {
+            requestId = request.RequestId,
+            state = "complete",
+            operation,
+            result = new { item_id = itemId, applied = played == desiredPlayed, played }
+        }, JsonOptions);
+    }
+
+    internal static bool WatchedStateFromUserData(bool? played) => played == true;
 
     private async Task CancelSonarrEpisodesAsync(
         KaevoConnectorSecrets secrets,
