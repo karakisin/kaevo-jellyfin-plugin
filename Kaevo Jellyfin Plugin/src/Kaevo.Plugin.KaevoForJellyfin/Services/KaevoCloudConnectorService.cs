@@ -8,7 +8,6 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Kaevo.Plugin.KaevoForJellyfin.Configuration;
-using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Session;
@@ -20,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.3.0";
+    private const string PluginVersion = "0.3.1";
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
@@ -849,25 +848,18 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 configuration,
                 request,
                 "profileJellyfinBindingMissing");
-            var user = _userManager.GetUserById(Guid.ParseExact(jellyfinUserId, "N"))
-                ?? throw new InvalidOperationException("profileJellyfinBindingMissing");
-            var item = _libraryManager.GetItemById<BaseItem>(Guid.ParseExact(itemId, "N"), user)
-                ?? throw new InvalidOperationException("jellyfinItemMissing");
-            if (operation == "jellyfin.mark_played")
-            {
-                item.MarkPlayed(user, DateTime.UtcNow, resetPosition: true);
-            }
-            else
-            {
-                item.MarkUnplayed(user);
-            }
-            // Jellyfin 10.11 removed BaseItem.IsPlayed(User) in favor of an
-            // overload that also accepts user data. Read the exact bound
-            // user's authoritative record through the stable manager contract
-            // so a successful mutation is not reported as failed because the
-            // plugin was compiled against Jellyfin 10.10.
-            var played = WatchedStateFromUserData(
-                BaseItem.UserDataManager.GetUserData(user, item)?.Played);
+            var method = operation == "jellyfin.mark_played"
+                ? HttpMethod.Post
+                : HttpMethod.Delete;
+            var readback = await SendLocalAsync(
+                configuration,
+                secrets,
+                method,
+                BuildWatchedMutationPath(itemId, jellyfinUserId),
+                null,
+                null,
+                cancellationToken).ConfigureAwait(false);
+            var played = ReadWatchedMutationState(readback.Payload, itemId);
             return new CommandResult(
                 200,
                 BuildWatchedMutationPayload(request, operation, itemId, played),
@@ -1242,6 +1234,40 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     }
 
     internal static bool WatchedStateFromUserData(bool? played) => played == true;
+
+    internal static string BuildWatchedMutationPath(string itemId, string jellyfinUserId)
+    {
+        return $"/UserPlayedItems/{Uri.EscapeDataString(itemId)}?userId={Uri.EscapeDataString(jellyfinUserId)}";
+    }
+
+    internal static bool ReadWatchedMutationState(JsonElement payload, string expectedItemId)
+    {
+        if (!TryGetResponseProperty(payload, "ItemId", "itemId", out var itemIdValue)
+            || itemIdValue.ValueKind != JsonValueKind.String
+            || !string.Equals(
+                itemIdValue.GetString()?.Replace("-", string.Empty, StringComparison.Ordinal),
+                expectedItemId.Replace("-", string.Empty, StringComparison.Ordinal),
+                StringComparison.OrdinalIgnoreCase)
+            || !TryGetResponseProperty(payload, "Played", "played", out var playedValue)
+            || playedValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            throw new InvalidOperationException("jellyfinWatchedStateReadbackInvalid");
+        }
+
+        return playedValue.GetBoolean();
+    }
+
+    private static bool TryGetResponseProperty(
+        JsonElement payload,
+        string contractName,
+        string webName,
+        out JsonElement value)
+    {
+        value = default;
+        return payload.ValueKind == JsonValueKind.Object
+            && (payload.TryGetProperty(contractName, out value)
+                || payload.TryGetProperty(webName, out value));
+    }
 
     private async Task CancelSonarrEpisodesAsync(
         KaevoConnectorSecrets secrets,

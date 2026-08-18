@@ -45,6 +45,62 @@ public sealed class RelayRequestContextTests
     }
 
     [Theory]
+    [InlineData(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "/UserPlayedItems/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?userId=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")]
+    [InlineData(
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        "/UserPlayedItems/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa?userId=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")]
+    public void WatchedMutationTargetsExactItemAndBoundUser(
+        string itemId,
+        string jellyfinUserId,
+        string expected)
+    {
+        Assert.Equal(
+            expected,
+            KaevoCloudConnectorService.BuildWatchedMutationPath(itemId, jellyfinUserId));
+    }
+
+    [Theory]
+    [InlineData("ItemId", "Played", true)]
+    [InlineData("itemId", "played", false)]
+    public void WatchedMutationUsesAuthoritativeJellyfinResponse(
+        string itemIdProperty,
+        string playedProperty,
+        bool played)
+    {
+        const string itemId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var payload = JsonSerializer.SerializeToElement(new Dictionary<string, object>
+        {
+            [itemIdProperty] = itemId,
+            [playedProperty] = played
+        });
+
+        Assert.Equal(
+            played,
+            KaevoCloudConnectorService.ReadWatchedMutationState(payload, itemId));
+    }
+
+    [Theory]
+    [InlineData("{\"ItemId\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"Played\":true}")]
+    [InlineData("{\"ItemId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}")]
+    [InlineData("{\"Played\":true}")]
+    [InlineData("{\"ItemId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"Played\":\"true\"}")]
+    public void WatchedMutationRejectsMissingOrMismatchedReadback(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            KaevoCloudConnectorService.ReadWatchedMutationState(
+                document.RootElement,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+
+        Assert.Equal("jellyfinWatchedStateReadbackInvalid", error.Message);
+    }
+
+    [Theory]
     [InlineData("HEAD", "/Videos/11111111111111111111111111111111/master.m3u8", true)]
     [InlineData("HEAD", "/Videos/11111111111111111111111111111111/master.m3u8?videoCodec=h264", true)]
     [InlineData("GET", "/Videos/11111111111111111111111111111111/master.m3u8", false)]
