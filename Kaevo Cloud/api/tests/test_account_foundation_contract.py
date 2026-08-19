@@ -773,6 +773,303 @@ def test_identity_me_accepts_member_account_in_owner_household(monkeypatch):
     assert body["household"]["canonical_role"] == "adult"
 
 
+def _prepare_account_deletion_context(monkeypatch, *, role="owner"):
+    tables = install_identity_context(monkeypatch, role=role)
+    session = protected_session(role=role)
+    profile = handler.identity_profiles_table.items["profile-1"]
+    profile["member_principal_id"] = "subject-1"
+    membership_id = household_membership_id("acct_1", "household-1")
+    membership = handler.household_memberships_table.items[("household-1", membership_id)]
+    membership["profile_id"] = "profile-1"
+    membership["household_access_role"] = "owner" if role == "owner" else "member"
+    context = {"household": {"canonical_role": role}}
+    return tables, session, context
+
+
+def test_account_deletion_plan_requires_owner_transfer_before_any_write(monkeypatch):
+    _tables, session, context = _prepare_account_deletion_context(monkeypatch)
+    add_active_normalized_member(
+        {
+            "accounts": handler.accounts_table,
+            "household-memberships": handler.household_memberships_table,
+        },
+        account_id="acct_2",
+        role="adult",
+    )
+    before = {
+        "accounts": dict(handler.accounts_table.items),
+        "memberships": dict(handler.household_memberships_table.items),
+        "profiles": dict(handler.identity_profiles_table.items),
+    }
+
+    with pytest.raises(AccountFoundationError, match="ownership_transfer_required"):
+        handler._account_deletion_plan(session, context)
+
+    assert handler.accounts_table.items == before["accounts"]
+    assert handler.household_memberships_table.items == before["memberships"]
+    assert handler.identity_profiles_table.items == before["profiles"]
+
+
+def test_sole_owner_account_deletion_plan_includes_managed_child_and_caller_last(monkeypatch):
+    _tables, session, context = _prepare_account_deletion_context(monkeypatch)
+    handler.principals_table.items["subject-1"]["profile_ids"].append("profile-child")
+    handler.identity_profiles_table.put_item(Item={
+        "profile_id": "profile-child",
+        "account_id": "acct_1",
+        "household_id": "household-1",
+        "owner_principal_id": "subject-1",
+        "profile_type": "child",
+        "managed_by_owner": True,
+        "state": "active",
+    })
+
+    plan = handler._account_deletion_plan(session, context)
+
+    assert plan["is_owner"] is True
+    assert plan["profile_ids"] == ["profile-child", "profile-1"]
+    assert plan["graphs"]["profile-child"]["member_subject"] == ""
+
+
+def test_member_account_deletion_plan_is_exact_self_scope(monkeypatch):
+    install_identity_context(
+        monkeypatch, account_id="member-account", subject="member-subject", role="adult",
+    )
+    handler.identity_households_table.items["household-1"]["account_id"] = "owner-account"
+    handler.identity_households_table.items["household-1"]["owner_principal_id"] = "owner-subject"
+    handler.principals_table.put_item(Item={
+        "principal_id": "owner-subject",
+        "account_id": "owner-account",
+        "household_id": "household-1",
+        "role": "owner",
+        "profile_ids": ["owner-profile"],
+        "state": "active",
+    })
+    profile = handler.identity_profiles_table.items["profile-1"]
+    profile["member_principal_id"] = "member-subject"
+    profile["owner_principal_id"] = "owner-subject"
+    membership_id = household_membership_id("member-account", "household-1")
+    handler.household_memberships_table.items[("household-1", membership_id)]["profile_id"] = "profile-1"
+    session = protected_session(
+        role="adult", account_id="member-account", subject="member-subject",
+    )
+
+    plan = handler._account_deletion_plan(
+        session, {"household": {"canonical_role": "adult"}},
+    )
+
+    assert plan["is_owner"] is False
+    assert plan["account_id"] == "member-account"
+    assert plan["profile_ids"] == ["profile-1"]
+
+
+def test_member_cloud_seat_release_uses_exact_household_not_owner_account(monkeypatch):
+    calls = []
+
+    class SeatLedger:
+        def update_item(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(handler, "identity_households_table", SeatLedger())
+
+    handler._release_deleted_profile_cloud_seat(
+        {
+            "profile_id": "member-profile",
+            "account_id": "member-account",
+            "household_id": "household-1",
+            "cloud_access_enabled": True,
+        },
+        household_id="household-1",
+        now_iso="2026-08-19T02:00:00Z",
+    )
+
+    assert len(calls) == 1
+    update = calls[0]
+    assert update["Key"] == {"household_id": "household-1"}
+    assert "account_id" not in update["ConditionExpression"]
+    assert ":account_id" not in update["ExpressionAttributeValues"]
+    assert update["ExpressionAttributeValues"][":profile_id_set"] == {"member-profile"}
+
+
+def test_main_api_account_deletion_execution_budget_is_thirty_seconds():
+    template = (Path(__file__).resolve().parents[2] / "infra" / "template.yaml").read_text()
+    main_api = template.split("  KaevoCloudApiFunction:", 1)[1].split(
+        "  KaevoIdentityV3ApiIntegration:", 1
+    )[0]
+
+    assert "      Timeout: 30" in main_api
+
+
+def test_account_deletion_success_returns_only_a_verified_terminal_receipt(monkeypatch):
+    class EmptyRecords:
+        def query(self, **_kwargs):
+            return {"Items": []}
+
+        def delete_item(self, **_kwargs):
+            return {}
+
+        def get_item(self, **_kwargs):
+            return {}
+
+    records = EmptyRecords()
+    for name in (
+        "profile_bindings_table", "auth_identities_table", "identity_memberships_table",
+        "principals_table", "accounts_table", "identity_profiles_table",
+    ):
+        monkeypatch.setattr(handler, name, records)
+    monkeypatch.setattr(handler, "_delete_cognito_account", lambda _subject: None)
+    monkeypatch.setattr(handler, "_execute_canonical_profile_deletion", lambda *_args, **_kwargs: None)
+    audit = []
+    monkeypatch.setattr(handler, "commit_security_audit", lambda item, **_kwargs: audit.append(item))
+
+    result = handler._execute_account_deletion(
+        {},
+        protected_session(
+            role="adult", account_id="member-account", subject="member-subject",
+        ),
+        {},
+        {
+            "account_id": "member-account",
+            "subject": "member-subject",
+            "profile_id": "profile-1",
+            "profile_ids": ["profile-1"],
+            "household_id": "household-1",
+            "is_owner": False,
+            "graphs": {"profile-1": {}},
+            "auth_identities": [],
+        },
+    )
+    receipt = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert receipt == {
+        "state": "account_deleted",
+        "deletion_scope": "member",
+        "session_revoked": True,
+        "provider_accounts_preserved": True,
+        "provider_deletion_requested": False,
+        "seerr_identity_absence_confirmed": False,
+        "jellyfin_identity_absence_confirmed": False,
+        "subscription_cancellation_required": True,
+    }
+    assert len(audit) == 1
+
+
+def test_account_deletion_route_rejects_client_authority_and_requires_exact_confirmation(monkeypatch):
+    _tables, session, _context = _prepare_account_deletion_context(monkeypatch)
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: session)
+    monkeypatch.setattr(handler, "COGNITO_USER_POOL_ID", "pool-1")
+    monkeypatch.setattr(handler, "commit_security_audit", lambda *_args, **_kwargs: None)
+    for name in (
+        "profiles_table", "profile_bindings_table", "profile_mappings_table",
+        "installations_table", "app_sessions_table", "household_invitations_table",
+            "household_join_transactions_table", "events_table", "profile_settings_table",
+            "entitlements_table", "devices_table", "security_audit_table",
+            "guest_passes_table", "home_connectors_table", "profile_binding_tombstones_table",
+    ):
+        if getattr(handler, name) is None:
+            monkeypatch.setattr(handler, name, Table("id", []))
+    invoked = []
+    monkeypatch.setattr(handler, "_normalized_profile_context", lambda *_args: ({}, None))
+    monkeypatch.setattr(handler, "_account_deletion_plan", lambda *_args: invoked.append("plan"))
+
+    result = handler.delete_account_v3({
+        "body": json.dumps({"explicit_confirmation": True, "account_id": "attacker"}),
+    })
+
+    assert result["statusCode"] == 400
+    assert json.loads(result["body"])["state"] == "account_deletion_confirmation_required"
+    assert invoked == []
+
+
+def test_account_deletion_provider_cleanup_is_exact_and_seerr_first(monkeypatch):
+    target = {
+        "profile_id": "profile-member",
+        "jellyfin_user_id": "a" * 32,
+        "seerr_user_id": "42",
+        "connectors": [{"connector_id": "connector-1"}],
+    }
+    monkeypatch.setattr(
+        handler, "_account_deletion_provider_targets", lambda _plan: [target],
+    )
+    calls = []
+
+    def execute(profile_id, connectors, operation, parameters, **_kwargs):
+        calls.append((profile_id, connectors, operation, parameters))
+        provider = "seerr" if operation.startswith("seerr.") else "jellyfin"
+        result = {
+            "provider": provider,
+            "state": "deleted",
+            "jellyfin_user_id": "a" * 32,
+            "absence_confirmed": True,
+        }
+        if provider == "seerr":
+            result["seerr_user_id"] = 42
+        return {"state": "completed", "result": result}
+
+    monkeypatch.setattr(handler, "_execute_profile_binding_connector_command", execute)
+
+    receipt = handler._execute_account_deletion_provider_cleanup({})
+
+    assert receipt == {
+        "requested": True,
+        "seerr_absence_confirmed": True,
+        "jellyfin_absence_confirmed": True,
+    }
+    assert [call[2] for call in calls] == [
+        "seerr.delete_exact_bound_user", "jellyfin.delete_exact_bound_user",
+    ]
+    assert calls[0][3] == {"jellyfin_user_id": "a" * 32, "seerr_user_id": 42}
+
+
+def test_account_deletion_provider_cleanup_refuses_mismatched_receipt(monkeypatch):
+    monkeypatch.setattr(handler, "_account_deletion_provider_targets", lambda _plan: [{
+        "profile_id": "profile-member",
+        "jellyfin_user_id": "a" * 32,
+        "seerr_user_id": "42",
+        "connectors": [{"connector_id": "connector-1"}],
+    }])
+    monkeypatch.setattr(
+        handler,
+        "_execute_profile_binding_connector_command",
+        lambda *_args, **_kwargs: {
+            "state": "completed",
+            "result": {
+                "provider": "seerr",
+                "state": "deleted",
+                "jellyfin_user_id": "b" * 32,
+                "seerr_user_id": 42,
+                "absence_confirmed": True,
+            },
+        },
+    )
+
+    with pytest.raises(AccountFoundationError, match="account_deletion_seerr_absence_unconfirmed"):
+        handler._execute_account_deletion_provider_cleanup({})
+
+
+def test_account_deletion_uses_exact_cognito_subject(monkeypatch):
+    calls = []
+    monkeypatch.setattr(handler, "COGNITO_USER_POOL_ID", "pool-1")
+    monkeypatch.setattr(
+        handler,
+        "resolve_cognito_username",
+        lambda _client, *, user_pool_id, subject: calls.append(
+            ("resolve", user_pool_id, subject),
+        ) or "cognito-username",
+    )
+    client = type("Cognito", (), {
+        "admin_delete_user": lambda _self, **kwargs: calls.append(("delete", kwargs)),
+    })()
+    monkeypatch.setattr(handler, "cognito_client", client)
+
+    handler._delete_cognito_account("exact-subject")
+
+    assert calls == [
+        ("resolve", "pool-1", "exact-subject"),
+        ("delete", {"UserPoolId": "pool-1", "Username": "cognito-username"}),
+    ]
+
+
 def test_membership_migration_audit_is_privacy_safe_and_dpop_boundary_remains_required(monkeypatch):
     tables, _transaction_client = install_account_backfilled_context(monkeypatch, subject="sensitive-subject", role="child")
     session = protected_session(subject="sensitive-subject", role="child")

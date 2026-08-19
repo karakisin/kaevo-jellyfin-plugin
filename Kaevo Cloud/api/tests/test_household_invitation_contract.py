@@ -77,6 +77,7 @@ def test_invitation_code_is_returned_once_but_only_hash_is_stored(monkeypatch):
     assert result["statusCode"] == 201
     assert payload["join_code"] not in json.dumps(invitations.item)
     assert invitations.item["code_hash"] == handler._join_code_hash(payload["join_code"])
+    assert payload["binding_handle"] == invitations.item["code_hash"]
     assert invitations.item["code_expires_at"] == payload["expires_at"]
     assert invitations.item["expires_at"] > invitations.item["code_expires_at"]
     assert payload["profile_id"] == invitations.item["profile_id"]

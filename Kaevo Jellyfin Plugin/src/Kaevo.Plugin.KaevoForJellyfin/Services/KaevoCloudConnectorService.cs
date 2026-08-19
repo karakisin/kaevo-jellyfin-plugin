@@ -19,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.3.1";
+    private const string PluginVersion = "0.3.2";
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
@@ -57,6 +57,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private readonly KaevoConnectorLifecycleStore _lifecycleStore;
     private readonly KaevoConnectorLifecycleClient _lifecycleClient;
     private readonly KaevoPairingV3Service _pairingV3;
+    private readonly KaevoSeerrIdentityProvisioningService _seerrIdentityProvisioning;
     private volatile bool _pairingV3Active;
     private readonly HttpClient _jellyfin = new() { Timeout = TimeSpan.FromSeconds(45) };
 
@@ -72,6 +73,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         KaevoConnectorLifecycleStore lifecycleStore,
         KaevoConnectorLifecycleClient lifecycleClient,
         KaevoPairingV3Service pairingV3,
+        KaevoSeerrIdentityProvisioningService seerrIdentityProvisioning,
         ILogger<KaevoCloudConnectorService> logger)
     {
         _secretStore = secretStore;
@@ -85,6 +87,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         _lifecycleStore = lifecycleStore;
         _lifecycleClient = lifecycleClient;
         _pairingV3 = pairingV3;
+        _seerrIdentityProvisioning = seerrIdentityProvisioning;
         _logger = logger;
     }
 
@@ -658,6 +661,110 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             });
         }
 
+        if (operation == "seerr.delete_exact_bound_user")
+        {
+            var jellyfinUserId = RequireBoundJellyfinUserId(
+                configuration,
+                request,
+                "profileJellyfinBindingMissing");
+            var requestedJellyfinUserId = RequireString(
+                parameters,
+                "jellyfin_user_id",
+                "providerIdentityInvalid");
+            if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                    requestedJellyfinUserId,
+                    out var normalizedRequestedUserId)
+                || !string.Equals(jellyfinUserId, normalizedRequestedUserId, StringComparison.Ordinal)
+                || !parameters.TryGetValue("seerr_user_id", out var seerrIDValue)
+                || !seerrIDValue.TryGetInt32(out var seerrUserId)
+                || seerrUserId <= 0)
+            {
+                throw new InvalidOperationException("providerIdentityMismatch");
+            }
+
+            var deletion = await _seerrIdentityProvisioning.DeleteExactJellyfinUserAsync(
+                secrets,
+                jellyfinUserId,
+                seerrUserId,
+                cancellationToken).ConfigureAwait(false);
+            if (deletion.State is not ("deleted" or "absent"))
+            {
+                throw new InvalidOperationException(deletion.State);
+            }
+            return CompleteCommand(request, operation, new
+            {
+                provider = "seerr",
+                state = deletion.State,
+                jellyfin_user_id = jellyfinUserId,
+                seerr_user_id = seerrUserId,
+                absence_confirmed = true
+            });
+        }
+
+        if (operation == "jellyfin.delete_exact_bound_user")
+        {
+            var jellyfinUserId = RequireBoundJellyfinUserId(
+                configuration,
+                request,
+                "profileJellyfinBindingMissing");
+            var requestedJellyfinUserId = RequireString(
+                parameters,
+                "jellyfin_user_id",
+                "providerIdentityInvalid");
+            if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                    requestedJellyfinUserId,
+                    out var normalizedRequestedUserId)
+                || !string.Equals(jellyfinUserId, normalizedRequestedUserId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("providerIdentityMismatch");
+            }
+
+            var usersBefore = await SendLocalAsync(
+                configuration, secrets, HttpMethod.Get, "/Users", null, null, cancellationToken).ConfigureAwait(false);
+            var exactBefore = ExactJellyfinUserOccurrences(usersBefore.Payload, jellyfinUserId);
+            if (exactBefore > 1)
+            {
+                throw new InvalidOperationException("jellyfinUserAmbiguous");
+            }
+            if (exactBefore == 1)
+            {
+                await SendLocalAsync(
+                    configuration,
+                    secrets,
+                    HttpMethod.Delete,
+                    $"/Users/{Uri.EscapeDataString(jellyfinUserId)}",
+                    null,
+                    null,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            var usersAfter = await SendLocalAsync(
+                configuration, secrets, HttpMethod.Get, "/Users", null, null, cancellationToken).ConfigureAwait(false);
+            if (ExactJellyfinUserOccurrences(usersAfter.Payload, jellyfinUserId) != 0)
+            {
+                throw new InvalidOperationException("jellyfinDeleteUnconfirmed");
+            }
+
+            lock (ProfileBindingSync)
+            {
+                if (!KaevoProfileJellyfinBindingStore.TryUnbind(
+                        configuration,
+                        request.ProfileId,
+                        jellyfinUserId))
+                {
+                    throw new InvalidOperationException("profileJellyfinBindingConflict");
+                }
+                KaevoPlugin.Instance?.SaveConfiguration();
+            }
+            return CompleteCommand(request, operation, new
+            {
+                provider = "jellyfin",
+                state = exactBefore == 0 ? "absent" : "deleted",
+                jellyfin_user_id = jellyfinUserId,
+                absence_confirmed = true
+            });
+        }
+
         if (operation == "optimizer.scan")
         {
             if (!configuration.MediaScanEnabled)
@@ -1215,6 +1322,36 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             operation,
             result
         }, JsonOptions), false);
+    }
+
+    internal static int ExactJellyfinUserOccurrences(JsonElement payload, string jellyfinUserId)
+    {
+        if (payload.ValueKind != JsonValueKind.Array
+            || !KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                jellyfinUserId,
+                out var normalizedUserId))
+        {
+            throw new InvalidOperationException("jellyfinUsersReadbackInvalid");
+        }
+
+        var matches = 0;
+        foreach (var user in payload.EnumerateArray())
+        {
+            if (user.ValueKind != JsonValueKind.Object
+                || !TryGetResponseProperty(user, "Id", "id", out var id)
+                || id.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+            if (KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                    id.GetString(),
+                    out var candidate)
+                && string.Equals(candidate, normalizedUserId, StringComparison.Ordinal))
+            {
+                matches++;
+            }
+        }
+        return matches;
     }
 
     internal static JsonElement BuildWatchedMutationPayload(

@@ -3328,6 +3328,8 @@ def _execute_profile_binding_connector_command(
     allowed_operations = {
         "jellyfin.inspect_profile_binding_owner",
         "jellyfin.reassign_stale_profile_binding",
+        "seerr.delete_exact_bound_user",
+        "jellyfin.delete_exact_bound_user",
     }
     if remote_requests_table is None or operation not in allowed_operations:
         return {"state": "profile_jellyfin_binding_command_unavailable"}
@@ -3403,6 +3405,7 @@ def _execute_profile_binding_connector_command(
         if status == "completed":
             payload = decode_remote_response_payload(current, None)
             result = payload.get("result") if isinstance(payload, dict) else None
+            expected_provider = "seerr" if operation.startswith("seerr.") else "jellyfin"
             valid = (
                 200 <= int(current.get("http_status") or 0) < 300
                 and isinstance(payload, dict)
@@ -3410,7 +3413,7 @@ def _execute_profile_binding_connector_command(
                 and payload.get("state") == "complete"
                 and payload.get("operation") == operation
                 and isinstance(result, dict)
-                and result.get("provider") == "jellyfin"
+                and result.get("provider") == expected_provider
             )
             _delete_profile_binding_recovery_request(
                 request_id, profile_id, connector_id,
@@ -3819,6 +3822,9 @@ def save_profile_jellyfin_binding_v3(event, path):
         return response(503, {"state": "profile_jellyfin_binding_unavailable"})
     profile_id = profile_jellyfin_binding_path_id(path)
     body = parse_json_body(event) or {}
+    invitation_binding_handle = str(
+        body.get("invitation_binding_handle") or ""
+    ).strip().lower()
     repair_from_consumed = body.get("repair_from_consumed_invitation") is True
     allow_inactive_reassignment = body.get("allow_inactive_reassignment") is True
     supplied_user_id = body.get("jellyfin_user_id")
@@ -3975,12 +3981,44 @@ def save_profile_jellyfin_binding_v3(event, path):
     else:
         connector_id = ""
 
-    matching_invitations = [
-        item for item in _household_invitation_records(household_id)
-        if isinstance(item, dict)
-        and item.get("state") == "pending"
-        and str(item.get("profile_id") or "") == profile_id
-    ]
+    matching_invitations = []
+    if invitation_binding_handle:
+        # A current client supplies the exact primary-key locator returned by
+        # invitation creation. Never fall back to the eventually-consistent
+        # household GSI when an explicit handle is present.
+        if not re.fullmatch(r"[0-9a-f]{64}", invitation_binding_handle):
+            return response(409, {
+                "state": "profile_jellyfin_binding_invitation_invalid",
+            })
+        exact_invitation = household_invitations_table.get_item(
+            Key={"code_hash": invitation_binding_handle},
+            ConsistentRead=True,
+        ).get("Item")
+        if not (
+            isinstance(exact_invitation, dict)
+            and exact_invitation.get("state") == "pending"
+            and hmac.compare_digest(
+                str(exact_invitation.get("household_id") or ""), household_id,
+            )
+            and hmac.compare_digest(
+                str(exact_invitation.get("profile_id") or ""), profile_id,
+            )
+            and household_invitation_code_expiration(exact_invitation) >= epoch_now()
+        ):
+            return response(409, {
+                "state": "profile_jellyfin_binding_invitation_invalid",
+            })
+        matching_invitations = [exact_invitation]
+    else:
+        # Backward compatibility for clients issued before exact invitation
+        # handles. This path can observe normal GSI propagation delay and is
+        # intentionally not used by current invitation creation.
+        matching_invitations = [
+            item for item in _household_invitation_records(household_id)
+            if isinstance(item, dict)
+            and item.get("state") == "pending"
+            and str(item.get("profile_id") or "") == profile_id
+        ]
     if canonical is None and len(matching_invitations) != 1:
         return response(404 if not matching_invitations else 409, {
             "state": (
@@ -5085,14 +5123,13 @@ def _release_deleted_profile_cloud_seat(profile, *, household_id, now_iso):
     if not bool_value(profile.get("cloud_access_enabled"), True):
         return
     profile_id = str(profile.get("profile_id") or "")
-    account_id = str(profile.get("account_id") or "")
-    if not profile_id or not account_id or identity_households_table is None:
+    if not profile_id or not household_id or identity_households_table is None:
         return
     try:
         identity_households_table.update_item(
             Key={"household_id": household_id},
             ConditionExpression=(
-                "account_id = :account_id AND #state = :active AND "
+                "#state = :active AND "
                 "(attribute_not_exists(cloud_seat_profile_ids) "
                 "OR contains(cloud_seat_profile_ids, :profile_id))"
             ),
@@ -5102,7 +5139,6 @@ def _release_deleted_profile_cloud_seat(profile, *, household_id, now_iso):
             ),
             ExpressionAttributeNames={"#state": "state"},
             ExpressionAttributeValues={
-                ":account_id": account_id,
                 ":active": "active",
                 ":profile_id": profile_id,
                 ":profile_id_set": {profile_id},
@@ -5445,6 +5481,491 @@ def _execute_canonical_profile_deletion(
         "absence_verified": mode == "immediate",
         "cognito_identity_deleted": False,
     })
+
+
+def _account_deletion_failure(event, session, state, *, status_code=409):
+    """Return a privacy-safe, retryable account-deletion failure."""
+    try:
+        commit_security_audit(_profile_binding_audit(
+            event, session, "account_deletion_rejected", "denied",
+            target_id=str(session.get("account_id") or ""), target_type="account",
+            reason_code=state,
+        ))
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    return response(status_code, {"state": state})
+
+
+def _account_auth_identity_records(account_id):
+    """Resolve one account's auth identities through its GSI and exact keys."""
+    records = []
+    query = {
+        "IndexName": "account_id-created_at_epoch-index",
+        "KeyConditionExpression": Key("account_id").eq(account_id),
+        "ConsistentRead": False,
+    }
+    while True:
+        page = auth_identities_table.query(**query)
+        for candidate in page.get("Items", []):
+            key = str(candidate.get("auth_identity_key") or "")
+            if not key:
+                continue
+            exact = auth_identities_table.get_item(
+                Key={"auth_identity_key": key}, ConsistentRead=True,
+            ).get("Item")
+            if isinstance(exact, dict) and hmac.compare_digest(
+                str(exact.get("account_id") or ""), account_id,
+            ):
+                records.append(exact)
+        last_key = page.get("LastEvaluatedKey")
+        if not last_key:
+            return records
+        query["ExclusiveStartKey"] = last_key
+
+
+def _household_home_connector_records(household_id):
+    """Resolve household connector bindings by GSI and exact primary key."""
+    if home_connectors_table is None:
+        return []
+    records = []
+    query = {
+        "IndexName": "household_id-updated_at-index",
+        "KeyConditionExpression": Key("household_id").eq(household_id),
+        "ConsistentRead": False,
+    }
+    while True:
+        page = home_connectors_table.query(**query)
+        for candidate in page.get("Items", []):
+            connector_id = str(candidate.get("connector_id") or "")
+            if not connector_id:
+                continue
+            exact = home_connectors_table.get_item(
+                Key={"connector_id": connector_id}, ConsistentRead=True,
+            ).get("Item")
+            if isinstance(exact, dict) and hmac.compare_digest(
+                str(exact.get("household_id") or ""), household_id,
+            ):
+                records.append(exact)
+        last_key = page.get("LastEvaluatedKey")
+        if not last_key:
+            return records
+        query["ExclusiveStartKey"] = last_key
+
+
+def _account_deletion_profile_graph(
+    *, profile_id, household_id, owner_principal, household_memberships,
+):
+    """Build one exact profile cleanup graph without display-field inference."""
+    profile = identity_profiles_table.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if (
+        not isinstance(profile, dict)
+        or not hmac.compare_digest(str(profile.get("household_id") or ""), household_id)
+        or profile.get("state") not in {"active", "deletion_pending", "deleting"}
+    ):
+        raise AccountFoundationError("account_deletion_authority_conflict")
+    matches = [
+        item for item in household_memberships
+        if isinstance(item, dict)
+        and item.get("entity_type") == "HouseholdMembership"
+        and str(item.get("profile_id") or "") == profile_id
+    ]
+    if len(matches) > 1:
+        raise AccountFoundationError("account_deletion_authority_conflict")
+    membership = matches[0] if matches else None
+    member_subject = str(profile.get("member_principal_id") or "").strip()
+    if not member_subject and not bool_value(profile.get("managed_by_owner"), False):
+        raise AccountFoundationError("account_deletion_authority_conflict")
+
+    member_principal = None
+    legacy_membership = None
+    if member_subject:
+        member_principal = principals_table.get_item(
+            Key={"principal_id": member_subject}, ConsistentRead=True,
+        ).get("Item")
+        legacy_membership = identity_memberships_table.get_item(
+            Key={"principal_id": member_subject}, ConsistentRead=True,
+        ).get("Item")
+        if (
+            not isinstance(member_principal, dict)
+            or str(member_principal.get("household_id") or "") != household_id
+            or (
+                isinstance(legacy_membership, dict)
+                and (
+                    str(legacy_membership.get("household_id") or "") != household_id
+                    or str(legacy_membership.get("profile_id") or "") != profile_id
+                )
+            )
+        ):
+            raise AccountFoundationError("account_deletion_authority_conflict")
+
+    recorded_owner = str(profile.get("owner_principal_id") or "")
+    exact_owner = str((owner_principal or {}).get("principal_id") or "")
+    if recorded_owner and not hmac.compare_digest(recorded_owner, exact_owner):
+        raise AccountFoundationError("account_deletion_authority_conflict")
+    return {
+        "profile": profile,
+        "membership": membership,
+        "member_principal": member_principal,
+        "legacy_membership": legacy_membership,
+        "owner_principal": owner_principal,
+        "household_memberships": household_memberships,
+        "member_subject": member_subject,
+    }
+
+
+def _account_deletion_plan(session, context):
+    """Create an exact, server-owned deletion plan before any mutation."""
+    subject = str(session.get("principal_id") or "")
+    account_id = str(session.get("account_id") or "")
+    household_id = str(session.get("household_id") or "")
+    profile_id = str(session.get("profile_id") or "")
+    role = str((context.get("household") or {}).get("canonical_role") or "")
+    if not all((subject, account_id, household_id, profile_id)):
+        raise AccountFoundationError("account_deletion_authority_conflict")
+
+    account = accounts_table.get_item(Key={"account_id": account_id}, ConsistentRead=True).get("Item")
+    principal = principals_table.get_item(Key={"principal_id": subject}, ConsistentRead=True).get("Item")
+    household = identity_households_table.get_item(Key={"household_id": household_id}, ConsistentRead=True).get("Item")
+    current_profile = identity_profiles_table.get_item(Key={"profile_id": profile_id}, ConsistentRead=True).get("Item")
+    cognito_identity = auth_identities_table.get_item(
+        Key={"auth_identity_key": provider_subject_key("cognito", subject)}, ConsistentRead=True,
+    ).get("Item")
+    if (
+        not isinstance(account, dict) or account.get("status") != "active"
+        or str(account.get("account_id") or "") != account_id
+        or not isinstance(principal, dict) or str(principal.get("account_id") or "") != account_id
+        or str(principal.get("household_id") or "") != household_id
+        or not isinstance(household, dict) or str(household.get("household_id") or "") != household_id
+        or not isinstance(current_profile, dict) or str(current_profile.get("account_id") or "") != account_id
+        or str(current_profile.get("household_id") or "") != household_id
+    ):
+        raise AccountFoundationError("account_deletion_authority_conflict")
+    assert_auth_identity_binding(
+        cognito_identity, account_id=account_id, provider="cognito", provider_subject=subject,
+    )
+
+    memberships = _household_membership_records(household_id)
+    is_owner = role == CanonicalRole.OWNER.value
+    if is_owner:
+        for membership in memberships:
+            other_account_id = str((membership or {}).get("account_id") or "")
+            if (
+                not isinstance(membership, dict)
+                or membership.get("entity_type") != "HouseholdMembership"
+                or membership.get("status") != "active"
+                or other_account_id in {"", account_id}
+                or str(membership.get("canonical_role") or "") != CanonicalRole.ADULT.value
+            ):
+                continue
+            other_account = accounts_table.get_item(Key={"account_id": other_account_id}, ConsistentRead=True).get("Item")
+            if isinstance(other_account, dict) and other_account.get("status") == "active":
+                raise AccountFoundationError("ownership_transfer_required")
+
+    owner_subject = str(household.get("owner_principal_id") or "")
+    owner_principal = principals_table.get_item(Key={"principal_id": owner_subject}, ConsistentRead=True).get("Item")
+    if (
+        not isinstance(owner_principal, dict)
+        or str(owner_principal.get("household_id") or "") != household_id
+        or str(owner_principal.get("role") or "") != CanonicalRole.OWNER.value
+        or (is_owner and not hmac.compare_digest(owner_subject, subject))
+    ):
+        raise AccountFoundationError("account_deletion_authority_conflict")
+
+    profile_ids = {profile_id}
+    if is_owner:
+        profile_ids.update(str(value) for value in list(owner_principal.get("profile_ids") or []) if str(value))
+        profile_ids.update(
+            str(item.get("profile_id") or "") for item in memberships
+            if isinstance(item, dict) and str(item.get("profile_id") or "")
+        )
+    graphs = {
+        target_id: _account_deletion_profile_graph(
+            profile_id=target_id, household_id=household_id,
+            owner_principal=owner_principal, household_memberships=memberships,
+        )
+        for target_id in profile_ids
+    }
+    ordered_profile_ids = sorted(target for target in profile_ids if target != profile_id)
+    ordered_profile_ids.append(profile_id)
+    return {
+        "subject": subject,
+        "account_id": account_id,
+        "household_id": household_id,
+        "profile_id": profile_id,
+        "is_owner": is_owner,
+        "graphs": graphs,
+        "profile_ids": ordered_profile_ids,
+        "auth_identities": _account_auth_identity_records(account_id),
+    }
+
+
+def _account_deletion_provider_targets(plan):
+    """Resolve only canonical immutable provider edges in deletion order."""
+    targets = []
+    connectors = _household_home_connector_records(plan["household_id"])
+    for profile_id in plan["profile_ids"]:
+        profile = plan["graphs"][profile_id]["profile"]
+        jellyfin_state = str(profile.get("jellyfin_binding_state") or "")
+        jellyfin_user_id = _normalized_jellyfin_user_id(profile.get("jellyfin_user_id"))
+        connector_id = str(profile.get("jellyfin_connector_id") or "")
+        if jellyfin_state != "active":
+            if jellyfin_user_id or connector_id:
+                raise AccountFoundationError("account_deletion_provider_binding_conflict")
+            continue
+        if not jellyfin_user_id or not connector_id:
+            raise AccountFoundationError("account_deletion_provider_binding_conflict")
+
+        exact_connectors = [
+            item for item in connectors
+            if isinstance(item, dict)
+            and hmac.compare_digest(str(item.get("connector_id") or ""), connector_id)
+        ]
+        if len(exact_connectors) != 1:
+            raise AccountFoundationError("account_deletion_provider_connector_unavailable")
+
+        seerr_state = str(profile.get("seerr_binding_state") or "")
+        seerr_user_id = _normalized_seerr_user_id(profile.get("seerr_user_id"))
+        seerr_jellyfin_user_id = _normalized_jellyfin_user_id(
+            profile.get("seerr_jellyfin_user_id")
+        )
+        seerr_connector_id = str(profile.get("seerr_connector_id") or "")
+        if seerr_state == "active":
+            if not (
+                seerr_user_id
+                and hmac.compare_digest(seerr_jellyfin_user_id, jellyfin_user_id)
+                and hmac.compare_digest(seerr_connector_id, connector_id)
+            ):
+                raise AccountFoundationError("account_deletion_provider_binding_conflict")
+        elif any((seerr_user_id, seerr_jellyfin_user_id, seerr_connector_id)):
+            raise AccountFoundationError("account_deletion_provider_binding_conflict")
+
+        targets.append({
+            "profile_id": profile_id,
+            "jellyfin_user_id": jellyfin_user_id,
+            "seerr_user_id": seerr_user_id,
+            "connectors": exact_connectors,
+        })
+    return targets
+
+
+def _execute_account_deletion_provider_cleanup(plan):
+    """Delete Seerr first and Jellyfin second, accepting verified absence only."""
+    targets = _account_deletion_provider_targets(plan)
+    for target in targets:
+        if not target["seerr_user_id"]:
+            continue
+        outcome = _execute_profile_binding_connector_command(
+            target["profile_id"],
+            target["connectors"],
+            "seerr.delete_exact_bound_user",
+            {
+                "jellyfin_user_id": target["jellyfin_user_id"],
+                "seerr_user_id": int(target["seerr_user_id"]),
+            },
+            timeout_seconds=8.0,
+        )
+        result = outcome.get("result") if isinstance(outcome, dict) else None
+        if not (
+            outcome.get("state") == "completed"
+            and isinstance(result, dict)
+            and result.get("absence_confirmed") is True
+            and str(result.get("state") or "") in {"deleted", "absent"}
+            and hmac.compare_digest(
+                _normalized_jellyfin_user_id(result.get("jellyfin_user_id")),
+                target["jellyfin_user_id"],
+            )
+            and hmac.compare_digest(
+                _normalized_seerr_user_id(result.get("seerr_user_id")),
+                target["seerr_user_id"],
+            )
+        ):
+            raise AccountFoundationError("account_deletion_seerr_absence_unconfirmed")
+
+    for target in targets:
+        outcome = _execute_profile_binding_connector_command(
+            target["profile_id"],
+            target["connectors"],
+            "jellyfin.delete_exact_bound_user",
+            {"jellyfin_user_id": target["jellyfin_user_id"]},
+            timeout_seconds=8.0,
+        )
+        result = outcome.get("result") if isinstance(outcome, dict) else None
+        if not (
+            outcome.get("state") == "completed"
+            and isinstance(result, dict)
+            and result.get("absence_confirmed") is True
+            and str(result.get("state") or "") in {"deleted", "absent"}
+            and hmac.compare_digest(
+                _normalized_jellyfin_user_id(result.get("jellyfin_user_id")),
+                target["jellyfin_user_id"],
+            )
+        ):
+            raise AccountFoundationError("account_deletion_jellyfin_absence_unconfirmed")
+    return {
+        "requested": True,
+        "seerr_absence_confirmed": True,
+        "jellyfin_absence_confirmed": True,
+    }
+
+
+def _delete_cognito_account(subject):
+    """Delete the exact Cognito identity; already absent is idempotent success."""
+    try:
+        username = resolve_cognito_username(
+            cognito_client, user_pool_id=COGNITO_USER_POOL_ID, subject=subject,
+        )
+        cognito_client.admin_delete_user(UserPoolId=COGNITO_USER_POOL_ID, Username=username)
+    except ClientError as error:
+        code = str((error.response or {}).get("Error", {}).get("Code") or "")
+        if code not in {"UserNotFoundException", "ResourceNotFoundException"}:
+            raise
+    except SocialIdentityError as error:
+        if error.reason not in {"identity_not_found", "identity_provider_user_not_found"}:
+            raise
+
+
+def _delete_household_account_artifacts(plan):
+    """Delete Kaevo-owned household bindings without touching providers/media."""
+    household_id = plan["household_id"]
+    invitations = _household_invitation_records(household_id)
+    for transaction in _profile_join_transaction_records(invitations):
+        household_join_transactions_table.delete_item(Key={"join_resume_hash": str(transaction.get("join_resume_hash") or "")})
+    for invitation in invitations:
+        household_invitations_table.delete_item(Key={"code_hash": str(invitation.get("code_hash") or "")})
+    for guest_pass in _guest_pass_records(household_id):
+        guest_passes_table.delete_item(Key={"pass_id": str(guest_pass.get("pass_id") or "")})
+    for connector in _household_home_connector_records(household_id):
+        home_connectors_table.delete_item(Key={"connector_id": str(connector.get("connector_id") or "")})
+    for membership in _household_membership_records(household_id):
+        household_memberships_table.delete_item(Key={
+            "household_id": household_id, "membership_id": str(membership.get("membership_id") or ""),
+        })
+    identity_households_table.delete_item(Key={"household_id": household_id})
+
+
+def _execute_account_deletion(event, session, context, plan):
+    """Execute a preflighted plan with the caller profile/session last."""
+    current_profile_id = plan["profile_id"]
+    for profile_id in plan["profile_ids"]:
+        if profile_id == current_profile_id:
+            continue
+        _execute_canonical_profile_deletion(
+            event, session, context, plan["graphs"][profile_id],
+            profile_id=profile_id, household_id=plan["household_id"], mode="immediate",
+        )
+
+    # Keep the caller's exact profile, installation, and session alive through
+    # every external step so a retryable Cognito failure can be safely retried.
+    _delete_cognito_account(plan["subject"])
+    _execute_canonical_profile_deletion(
+        event, session, context, plan["graphs"][current_profile_id],
+        profile_id=current_profile_id, household_id=plan["household_id"], mode="immediate",
+    )
+
+    if plan["is_owner"]:
+        _delete_household_account_artifacts(plan)
+    else:
+        for binding in profile_bindings_table.query(
+            KeyConditionExpression=Key("account_id").eq(plan["account_id"]), ConsistentRead=True,
+        ).get("Items", []):
+            profile_bindings_table.delete_item(Key={
+                "account_id": plan["account_id"], "profile_id": str(binding.get("profile_id") or ""),
+            })
+
+    for identity in plan["auth_identities"]:
+        auth_identities_table.delete_item(Key={"auth_identity_key": str(identity.get("auth_identity_key") or "")})
+    identity_memberships_table.delete_item(Key={"principal_id": plan["subject"]})
+    principals_table.delete_item(Key={"principal_id": plan["subject"]})
+    accounts_table.delete_item(Key={"account_id": plan["account_id"]})
+
+    if any((
+        accounts_table.get_item(Key={"account_id": plan["account_id"]}, ConsistentRead=True).get("Item") is not None,
+        principals_table.get_item(Key={"principal_id": plan["subject"]}, ConsistentRead=True).get("Item") is not None,
+        identity_profiles_table.get_item(Key={"profile_id": current_profile_id}, ConsistentRead=True).get("Item") is not None,
+        plan["is_owner"] and identity_households_table.get_item(
+            Key={"household_id": plan["household_id"]}, ConsistentRead=True,
+        ).get("Item") is not None,
+    )):
+        raise AccountFoundationError("account_deletion_absence_unconfirmed")
+
+    commit_security_audit(_profile_binding_audit(
+        event, session, "account_deletion_completed", "success",
+        target_id=plan["account_id"], target_type="account",
+        reason_code="household_deleted" if plan["is_owner"] else "member_deleted",
+    ))
+    return response(200, {
+        "state": "account_deleted",
+        "deletion_scope": "household" if plan["is_owner"] else "member",
+        "session_revoked": True,
+        "provider_accounts_preserved": not bool(plan.get("provider_deletion_requested")),
+        "provider_deletion_requested": bool(plan.get("provider_deletion_requested")),
+        "seerr_identity_absence_confirmed": bool(plan.get("seerr_identity_absence_confirmed")),
+        "jellyfin_identity_absence_confirmed": bool(plan.get("jellyfin_identity_absence_confirmed")),
+        "subscription_cancellation_required": True,
+    })
+
+
+def delete_account_v3(event):
+    """Delete only the account bound to the exact protected app session."""
+    required = (
+        accounts_table, auth_identities_table, household_memberships_table,
+        profiles_table, profile_bindings_table, profile_mappings_table,
+        principals_table, identity_memberships_table, identity_households_table,
+        identity_profiles_table, installations_table, app_sessions_table,
+        household_invitations_table, household_join_transactions_table,
+        events_table, profile_settings_table, entitlements_table, devices_table,
+        security_audit_table, guest_passes_table, home_connectors_table,
+        profile_binding_tombstones_table,
+    )
+    if any(table is None for table in required) or not COGNITO_USER_POOL_ID:
+        return response(503, {"state": "account_deletion_storage_unavailable"})
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    body = parse_json_body(event)
+    if (
+        not isinstance(body, dict)
+        or not set(body).issubset({
+            "explicit_confirmation", "delete_linked_provider_accounts",
+        })
+        or body.get("explicit_confirmation") is not True
+        or not isinstance(body.get("delete_linked_provider_accounts", False), bool)
+    ):
+        return _account_deletion_failure(
+            event, session, "account_deletion_confirmation_required", status_code=400,
+        )
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return failure
+    try:
+        plan = _account_deletion_plan(session, context)
+        delete_linked_providers = body.get("delete_linked_provider_accounts", False) is True
+        if delete_linked_providers:
+            provider_result = _execute_account_deletion_provider_cleanup(plan)
+            plan["provider_deletion_requested"] = True
+            plan["seerr_identity_absence_confirmed"] = bool(
+                provider_result.get("seerr_absence_confirmed")
+            )
+            plan["jellyfin_identity_absence_confirmed"] = bool(
+                provider_result.get("jellyfin_absence_confirmed")
+            )
+        return _execute_account_deletion(event, session, context, plan)
+    except AccountFoundationError as error:
+        return _account_deletion_failure(event, session, error.reason, status_code=409)
+    except SocialIdentityError:
+        return _account_deletion_failure(
+            event, session, "account_deletion_retry_required", status_code=503,
+        )
+    except ClientError as error:
+        code = str((error.response or {}).get("Error", {}).get("Code") or "")
+        state = "account_deletion_conflict" if code in {
+            "ConditionalCheckFailedException", "TransactionCanceledException",
+        } else "account_deletion_retry_required"
+        return _account_deletion_failure(
+            event, session, state, status_code=409 if state == "account_deletion_conflict" else 503,
+        )
 
 
 def delete_profile_v3(event, path):
@@ -10730,6 +11251,10 @@ def household_invitation_response(invitation, join_code, *, state):
         "switch_profile_ids": list(invitation.get("switch_profile_ids") or []),
         "join_code": join_code,
         "join_url": f"kaevo://join?code={join_code}",
+        # Opaque exact-key locator for the protected Owner binding flow. This
+        # SHA-256 value is not the one-time join secret and grants no authority
+        # by itself.
+        "binding_handle": str(invitation.get("code_hash") or ""),
         "expires_at": household_invitation_code_expiration(invitation),
     }
     # Keep the public contract compatible for invitations created before the
@@ -14514,6 +15039,7 @@ def lambda_handler(event, context):
                 "/v3/identity/profiles/{profileId}/jellyfin-binding-operations",
                 "/v3/identity/jellyfin-binding-operations/{operationId}",
                 "/v3/identity/profiles/{profileId}/deletion",
+                "/v3/identity/account-deletion",
                 "/v3/identity/profile-mappings",
                 "/v3/identity/profile-mappings/preview",
                 "/v3/identity/profile-mappings/confirm",
@@ -14703,6 +15229,9 @@ def lambda_handler(event, context):
 
     if method == "POST" and profile_deletion_path_id(path):
         return delete_profile_v3(event, path)
+
+    if method == "POST" and path == "/v3/identity/account-deletion":
+        return delete_account_v3(event)
 
     if method == "GET" and path == "/v3/identity/profile-mappings":
         return list_profile_mappings_v3(event)

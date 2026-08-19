@@ -8,6 +8,19 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 
 public sealed class RelayRequestContextTests
 {
+    [Fact]
+    public void ProviderDeletionReadbackCountsOnlyTheExactImmutableJellyfinId()
+    {
+        const string target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var payload = JsonSerializer.SerializeToElement(new[]
+        {
+            new { Id = target, Name = "not-authority" },
+            new { Id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Name = target }
+        });
+
+        Assert.Equal(1, KaevoCloudConnectorService.ExactJellyfinUserOccurrences(payload, target));
+    }
+
     [Theory]
     [InlineData(true, true)]
     [InlineData(false, false)]

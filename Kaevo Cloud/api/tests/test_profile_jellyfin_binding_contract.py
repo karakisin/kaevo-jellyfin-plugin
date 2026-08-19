@@ -27,6 +27,15 @@ class ExactInvitationTable:
     def __init__(self, invitation=None):
         self.invitation = invitation
 
+    def get_item(self, Key, ConsistentRead=False):
+        assert ConsistentRead is True
+        if (
+            self.invitation is not None
+            and self.invitation["code_hash"] == Key["code_hash"]
+        ):
+            return {"Item": dict(self.invitation)}
+        return {}
+
     def update_item(self, Key, ExpressionAttributeValues, **_kwargs):
         assert self.invitation["code_hash"] == Key["code_hash"]
         self.invitation.update({
@@ -232,20 +241,26 @@ def test_parent_managed_repair_accepts_retained_exact_active_binding(monkeypatch
 def test_manager_saves_exact_pending_invitation_binding(monkeypatch):
     install_manager(monkeypatch)
     profile_id = "profile_member_1234567890"
+    binding_handle = "a" * 64
     invitation = {
-        "code_hash": "opaque-hash",
+        "code_hash": binding_handle,
         "household_id": "household-1",
         "profile_id": profile_id,
         "state": "pending",
+        "code_expires_at": 2_000,
     }
     invitations = ExactInvitationTable(invitation)
     monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable())
     monkeypatch.setattr(handler, "household_invitations_table", invitations)
-    monkeypatch.setattr(handler, "_household_invitation_records", lambda _household_id: [invitation])
+    monkeypatch.setattr(handler, "epoch_now", lambda: 1_000)
+    # Reproduce a newly-created invitation that is not visible through the
+    # eventually-consistent household GSI yet.
+    monkeypatch.setattr(handler, "_household_invitation_records", lambda _household_id: [])
 
     result = handler.save_profile_jellyfin_binding_v3({"body": json.dumps({
         "jellyfin_user_id": "01234567-89ab-cdef-0123-456789abcdef",
         "explicit_confirmation": True,
+        "invitation_binding_handle": binding_handle,
     })}, f"/v3/identity/profiles/{profile_id}/jellyfin-binding")
 
     assert result["statusCode"] == 200
@@ -253,6 +268,72 @@ def test_manager_saves_exact_pending_invitation_binding(monkeypatch):
     assert invitation["jellyfin_binding_state"] == "active"
     assert invitation["jellyfin_connector_id"] == "connector-1"
     assert invitation["jellyfin_user_id"] == "0123456789abcdef0123456789abcdef"
+
+
+def test_manager_rejects_invalid_exact_pending_invitation_handle(monkeypatch):
+    install_manager(monkeypatch)
+    profile_id = "profile_member_1234567890"
+    binding_handle = "b" * 64
+    invitation = {
+        "code_hash": binding_handle,
+        "household_id": "household-other",
+        "profile_id": profile_id,
+        "state": "pending",
+        "code_expires_at": 2_000,
+    }
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable())
+    monkeypatch.setattr(
+        handler, "household_invitations_table", ExactInvitationTable(invitation),
+    )
+    monkeypatch.setattr(handler, "epoch_now", lambda: 1_000)
+    monkeypatch.setattr(handler, "_household_invitation_records", lambda _household_id: [])
+
+    result = handler.save_profile_jellyfin_binding_v3({"body": json.dumps({
+        "jellyfin_user_id": "01234567-89ab-cdef-0123-456789abcdef",
+        "explicit_confirmation": True,
+        "invitation_binding_handle": binding_handle,
+    })}, f"/v3/identity/profiles/{profile_id}/jellyfin-binding")
+
+    assert result["statusCode"] == 409
+    assert body(result) == {
+        "state": "profile_jellyfin_binding_invitation_invalid",
+    }
+    assert "jellyfin_binding_state" not in invitation
+    assert "jellyfin_user_id" not in invitation
+
+
+def test_manager_rejects_stale_or_mismatched_invitation_handles(monkeypatch):
+    install_manager(monkeypatch)
+    profile_id = "profile_member_1234567890"
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable())
+    monkeypatch.setattr(handler, "epoch_now", lambda: 1_000)
+    monkeypatch.setattr(handler, "_household_invitation_records", lambda _household_id: [])
+
+    cases = [
+        {"state": "consumed", "profile_id": profile_id, "household_id": "household-1", "code_expires_at": 2_000},
+        {"state": "revoked", "profile_id": profile_id, "household_id": "household-1", "code_expires_at": 2_000},
+        {"state": "pending", "profile_id": profile_id, "household_id": "household-1", "code_expires_at": 999},
+        {"state": "pending", "profile_id": "profile_other_12345678901", "household_id": "household-1", "code_expires_at": 2_000},
+    ]
+    for index, candidate in enumerate(cases):
+        binding_handle = format(index + 1, "064x")
+        invitation = {"code_hash": binding_handle, **candidate}
+        monkeypatch.setattr(
+            handler,
+            "household_invitations_table",
+            ExactInvitationTable(invitation),
+        )
+        result = handler.save_profile_jellyfin_binding_v3({"body": json.dumps({
+            "jellyfin_user_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "explicit_confirmation": True,
+            "invitation_binding_handle": binding_handle,
+        })}, f"/v3/identity/profiles/{profile_id}/jellyfin-binding")
+        assert result["statusCode"] == 409
+        assert body(result) == {
+            "state": "profile_jellyfin_binding_invitation_invalid",
+        }
+        assert "jellyfin_binding_state" not in invitation
+        assert "jellyfin_user_id" not in invitation
 
 
 def test_manager_rejects_provider_identity_already_owned_by_other_profile(monkeypatch):

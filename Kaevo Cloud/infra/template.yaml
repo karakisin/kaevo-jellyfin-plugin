@@ -1353,6 +1353,10 @@ Resources:
       FunctionName: !Sub kaevo-cloud-${EnvironmentName}-api
       CodeUri: ../api/src/
       Handler: handler.lambda_handler
+      # Exact account deletion verifies Cognito and canonical store absence
+      # before returning its receipt. Keep the shared API budget above that
+      # bounded operation while the iOS deletion route waits 35 seconds.
+      Timeout: 30
       Environment:
         Variables:
           KAEVO_ENV: !Ref EnvironmentName
@@ -1503,6 +1507,7 @@ Resources:
                 - cognito-idp:ListUsers
                 - cognito-idp:AdminGetUser
                 - cognito-idp:AdminLinkProviderForUser
+                - cognito-idp:AdminDeleteUser
               Resource: !GetAtt KaevoUserPool.Arn
             - Sid: ReadConfiguredSocialIdentityProviderCredentials
               Effect: Allow
@@ -2083,6 +2088,14 @@ Resources:
       ApiId: !Ref KaevoCloudHttpApi
       AuthorizationType: NONE
       RouteKey: POST /v3/identity/profiles/{profileId}/deletion
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3DeleteAccountRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/account-deletion
       Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
 
   KaevoIdentityV3ListProfileMappingsRoute:

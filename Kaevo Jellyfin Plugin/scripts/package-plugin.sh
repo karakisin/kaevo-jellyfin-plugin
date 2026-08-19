@@ -41,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Fixes Mark Watched and Mark Unwatched on Jellyfin 10.11 by using the supported exact-user playstate endpoint and validating its authoritative item readback.",
+  "changelog": "Adds optional exact linked-account cleanup during Kaevo account deletion, deleting Seerr first and Jellyfin second with immutable-ID absence verification.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",

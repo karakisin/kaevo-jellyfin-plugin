@@ -179,6 +179,14 @@ public sealed class KaevoSeerrIdentityProvisioningService
             var exactMatches = users
                 .Where(user => user.Id == seerrUserId && user.JellyfinUserId == normalizedUserId)
                 .ToArray();
+            var identifierMatches = users.Any(user => user.Id == seerrUserId);
+            var jellyfinMatches = users.Any(user => user.JellyfinUserId == normalizedUserId);
+            if (exactMatches.Length == 0 && !identifierMatches && !jellyfinMatches)
+            {
+                // A retry after an earlier confirmed DELETE is safe only when
+                // the authoritative collection contains neither immutable ID.
+                return new("absent");
+            }
             if (exactMatches.Length != 1) return new("seerr_identity_mismatch");
 
             // Refuse an ambiguous relationship even if one row happens to

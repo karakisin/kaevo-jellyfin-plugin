@@ -133,6 +133,21 @@ public sealed class SeerrIdentityProvisioningServiceTests
         Assert.False(deleted);
     }
 
+    [Fact]
+    public async Task RetryTreatsOnlyAuthoritativeDualIdentifierAbsenceAsSuccess()
+    {
+        var service = new KaevoSeerrIdentityProvisioningService((_, method, _, _, _) =>
+        {
+            Assert.NotEqual(HttpMethod.Delete, method);
+            return Task.FromResult(Response("{\"results\":[]}"));
+        });
+
+        var result = await service.DeleteExactJellyfinUserAsync(
+            Secrets(), JellyfinUserId, 42, CancellationToken.None);
+
+        Assert.Equal("absent", result.State);
+    }
+
     private static KaevoConnectorSecrets Secrets() => new(
         "connector", "playback", "jellyfin", Providers: new Dictionary<string, KaevoLocalProviderSecret>
         {
