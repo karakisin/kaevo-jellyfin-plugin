@@ -497,6 +497,7 @@ def test_template_declares_additive_account_foundation_storage_and_route():
     assert "RouteKey: GET /v3/identity/me" in template
     assert "RouteKey: POST /v3/identity/migrate-household-membership" in template
     assert "RouteKey: PUT /v3/identity/profiles/{profileId}/watching-targets" in template
+    assert "RouteKey: PUT /v3/identity/profiles/{profileId}/jellyfin-binding" in template
     assert "RouteKey: PUT /v3/identity/profiles/{profileId}/seerr-binding" in template
     assert "RouteKey: POST /v3/identity/profiles/{profileId}/deletion" in template
     assert "ACCOUNTS_TABLE: !Ref KaevoAccountsTable" in template
