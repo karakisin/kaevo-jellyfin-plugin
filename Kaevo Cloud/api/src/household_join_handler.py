@@ -33,6 +33,8 @@ from profile_mapping import build_confirmed_mapping, local_profile_source_id
 
 from handler import (  # Pure protocol helpers; this module never invokes handler.lambda_handler.
     _gateway_jwt_claims,
+    _normalized_jellyfin_user_id,
+    _normalized_seerr_user_id,
     epoch_now,
     household_invitation_code_expiration,
     parse_json_body,
@@ -1994,6 +1996,54 @@ def _consumed_invitation_jellyfin_binding(
     }
 
 
+def _consumed_invitation_provider_bindings(
+    invitation, *, household_id, profile_id, member_principal_id,
+):
+    """Return only the exact, internally consistent provider tuple on claim."""
+    binding = _consumed_invitation_jellyfin_binding(
+        invitation,
+        household_id=household_id,
+        profile_id=profile_id,
+        member_principal_id=member_principal_id,
+    )
+    seerr_state = str(invitation.get("seerr_binding_state") or "").strip().lower()
+    if not seerr_state:
+        return binding
+    if seerr_state != "active" or not binding:
+        raise AccountFoundationError("profile_seerr_binding_source_invalid")
+
+    seerr_connector_id = str(invitation.get("seerr_connector_id") or "").strip()
+    seerr_jellyfin_user_id = _normalized_jellyfin_user_id(
+        invitation.get("seerr_jellyfin_user_id"),
+    )
+    seerr_user_id = _normalized_seerr_user_id(invitation.get("seerr_user_id"))
+    if not (
+        seerr_connector_id
+        and seerr_jellyfin_user_id
+        and seerr_user_id
+        and invitation.get("request_access_enabled") is True
+        and hmac.compare_digest(
+            seerr_connector_id, str(binding.get("jellyfin_connector_id") or ""),
+        )
+        and hmac.compare_digest(
+            seerr_jellyfin_user_id, str(binding.get("jellyfin_user_id") or ""),
+        )
+    ):
+        raise AccountFoundationError("profile_seerr_binding_source_invalid")
+
+    binding.update({
+        "seerr_connector_id": seerr_connector_id,
+        "seerr_jellyfin_user_id": seerr_jellyfin_user_id,
+        "seerr_user_id": seerr_user_id,
+        "seerr_binding_state": "active",
+        "seerr_binding_updated_at": str(
+            invitation.get("seerr_binding_updated_at") or utc_now_iso()
+        ),
+        "request_access_enabled": True,
+    })
+    return binding
+
+
 def profile_setup(event):
     required = (joins, invitations, principals, memberships, profiles, cloud_profiles, entitlements, household_memberships, profile_bindings, profile_mappings)
     if households is None or any(table is None for table in required):
@@ -2092,7 +2142,7 @@ def profile_setup(event):
                 Key={"code_hash": invitation_code_hash}, ConsistentRead=True,
             ).get("Item")
             try:
-                jellyfin_binding = _consumed_invitation_jellyfin_binding(
+                provider_bindings = _consumed_invitation_provider_bindings(
                     consumed_invitation,
                     household_id=household_id,
                     profile_id=profile_id,
@@ -2121,7 +2171,7 @@ def profile_setup(event):
                 "state": "active",
                 "created_at": created,
                 "device_access_enabled": True,
-                **jellyfin_binding,
+                **provider_bindings,
             }
             normal_profile = {**creation.profile, **authority}
             binding = creation.binding

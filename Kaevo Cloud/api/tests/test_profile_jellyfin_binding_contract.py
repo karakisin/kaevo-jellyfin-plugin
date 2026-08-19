@@ -15,12 +15,22 @@ class ExactProfileTable:
 
     def update_item(self, Key, ExpressionAttributeValues, **_kwargs):
         item = self.records[Key["profile_id"]]
-        item.update({
-            "jellyfin_connector_id": ExpressionAttributeValues[":connector_id"],
-            "jellyfin_user_id": ExpressionAttributeValues[":user_id"],
-            "jellyfin_binding_state": ExpressionAttributeValues[":binding_state"],
-            "jellyfin_binding_updated_at": ExpressionAttributeValues[":updated_at"],
-        })
+        if ":seerr_user_id" in ExpressionAttributeValues:
+            item.update({
+                "seerr_connector_id": ExpressionAttributeValues[":connector_id"],
+                "seerr_jellyfin_user_id": ExpressionAttributeValues[":jellyfin_user_id"],
+                "seerr_user_id": ExpressionAttributeValues[":seerr_user_id"],
+                "seerr_binding_state": ExpressionAttributeValues[":binding_state"],
+                "seerr_binding_updated_at": ExpressionAttributeValues[":updated_at"],
+                "request_access_enabled": ExpressionAttributeValues[":request_access_enabled"],
+            })
+        else:
+            item.update({
+                "jellyfin_connector_id": ExpressionAttributeValues[":connector_id"],
+                "jellyfin_user_id": ExpressionAttributeValues[":user_id"],
+                "jellyfin_binding_state": ExpressionAttributeValues[":binding_state"],
+                "jellyfin_binding_updated_at": ExpressionAttributeValues[":updated_at"],
+            })
 
 
 class ExactInvitationTable:
@@ -38,12 +48,31 @@ class ExactInvitationTable:
 
     def update_item(self, Key, ExpressionAttributeValues, **_kwargs):
         assert self.invitation["code_hash"] == Key["code_hash"]
-        self.invitation.update({
-            "jellyfin_connector_id": ExpressionAttributeValues[":connector_id"],
-            "jellyfin_user_id": ExpressionAttributeValues[":user_id"],
-            "jellyfin_binding_state": ExpressionAttributeValues[":binding_state"],
-            "jellyfin_binding_updated_at": ExpressionAttributeValues[":updated_at"],
-        })
+        if ":cleanup_state" in ExpressionAttributeValues:
+            self.invitation.update({
+                "provider_cleanup_state": ExpressionAttributeValues[":cleanup_state"],
+                "provider_cleanup_updated_at": ExpressionAttributeValues[":updated_at"],
+            })
+            if ":seerr_binding_state" in ExpressionAttributeValues:
+                self.invitation["seerr_binding_state"] = ExpressionAttributeValues[":seerr_binding_state"]
+            if ":jellyfin_binding_state" in ExpressionAttributeValues:
+                self.invitation["jellyfin_binding_state"] = ExpressionAttributeValues[":jellyfin_binding_state"]
+        elif ":seerr_user_id" in ExpressionAttributeValues:
+            self.invitation.update({
+                "seerr_connector_id": ExpressionAttributeValues[":connector_id"],
+                "seerr_jellyfin_user_id": ExpressionAttributeValues[":jellyfin_user_id"],
+                "seerr_user_id": ExpressionAttributeValues[":seerr_user_id"],
+                "seerr_binding_state": ExpressionAttributeValues[":binding_state"],
+                "seerr_binding_updated_at": ExpressionAttributeValues[":updated_at"],
+                "request_access_enabled": ExpressionAttributeValues[":request_access_enabled"],
+            })
+        else:
+            self.invitation.update({
+                "jellyfin_connector_id": ExpressionAttributeValues[":connector_id"],
+                "jellyfin_user_id": ExpressionAttributeValues[":user_id"],
+                "jellyfin_binding_state": ExpressionAttributeValues[":binding_state"],
+                "jellyfin_binding_updated_at": ExpressionAttributeValues[":updated_at"],
+            })
 
 
 class BindingOperationTable:
@@ -103,6 +132,209 @@ def install_manager(monkeypatch):
     monkeypatch.setattr(handler, "home_connectors_table", object())
     monkeypatch.setattr(handler, "_household_membership_records", lambda _household_id: [])
     monkeypatch.setattr(handler, "_repair_legacy_active_membership_profile_pointer", lambda value: value)
+
+
+def install_seerr_owner(monkeypatch):
+    session = {
+        "record_type": "access",
+        "profile_id": "profile_owner_1234567890",
+        "principal_id": "principal-owner",
+        "account_id": "account-owner",
+        "household_id": "household-1",
+    }
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: session)
+    monkeypatch.setattr(handler, "_normalized_profile_context", lambda _event, _session: ({
+        "household": {
+            "household_id": "household-1",
+            "role": "owner",
+        },
+    }, None))
+    monkeypatch.setattr(handler, "security_audit_table", object())
+    monkeypatch.setattr(handler, "commit_security_audit", lambda _item: None)
+
+
+def pending_provider_invitation(*, household_id="household-1"):
+    jellyfin_user_id = "0123456789abcdef0123456789abcdef"
+    return {
+        "code_hash": "a" * 64,
+        "state": "pending",
+        "household_id": household_id,
+        "profile_id": "profile_member_1234567890",
+        "code_expires_at": handler.epoch_now() + 900,
+        "jellyfin_connector_id": "connector-1",
+        "jellyfin_user_id": jellyfin_user_id,
+        "jellyfin_binding_state": "active",
+        "seerr_connector_id": "connector-1",
+        "seerr_jellyfin_user_id": jellyfin_user_id,
+        "seerr_user_id": 16,
+        "seerr_binding_state": "active",
+    }
+
+
+def install_pending_provider_cleanup(monkeypatch, invitation):
+    install_seerr_owner(monkeypatch)
+    monkeypatch.setattr(handler, "household_invitations_table", ExactInvitationTable(invitation))
+    monkeypatch.setattr(handler, "identity_profiles_table", object())
+    monkeypatch.setattr(handler, "remote_requests_table", object())
+    monkeypatch.setattr(handler, "_home_connectors_for_profile_access", lambda _profile_id: [{
+        "connector_id": "connector-1",
+    }])
+
+
+def pending_cleanup_event(invitation):
+    return {"body": json.dumps({
+        "jellyfin_user_id": invitation["jellyfin_user_id"],
+        "seerr_user_id": invitation["seerr_user_id"],
+        "created_by_this_attempt": True,
+        "explicit_confirmation": True,
+        "invitation_binding_handle": invitation["code_hash"],
+    })}
+
+
+def test_pending_provider_cleanup_is_transactionally_seerr_then_jellyfin(monkeypatch):
+    invitation = pending_provider_invitation()
+    install_pending_provider_cleanup(monkeypatch, invitation)
+    operations = []
+
+    def execute(profile_id, _connectors, operation, parameters, **_kwargs):
+        operations.append((profile_id, operation, dict(parameters)))
+        if operation == "seerr.delete_exact_bound_user":
+            return {"state": "completed", "result": {
+                "state": "deleted",
+                "jellyfin_user_id": invitation["jellyfin_user_id"],
+                "seerr_user_id": invitation["seerr_user_id"],
+                "absence_confirmed": True,
+            }}
+        assert operation == "jellyfin.delete_pending_exact_user"
+        return {"state": "completed", "result": {
+            "state": "deleted",
+            "jellyfin_user_id": invitation["jellyfin_user_id"],
+            "absence_confirmed": True,
+        }}
+
+    monkeypatch.setattr(handler, "_execute_profile_binding_connector_command", execute)
+    path = "/v3/identity/profiles/profile_member_1234567890/pending-provider-cleanup"
+    result = handler.cleanup_pending_profile_providers_v3(pending_cleanup_event(invitation), path)
+
+    assert result["statusCode"] == 200, result
+    assert body(result)["state"] == "pending_provider_cleanup_complete"
+    assert [item[1] for item in operations] == [
+        "seerr.delete_exact_bound_user",
+        "jellyfin.delete_pending_exact_user",
+    ]
+    assert invitation["provider_cleanup_state"] == "complete"
+    assert invitation["seerr_binding_state"] == "absent"
+    assert invitation["jellyfin_binding_state"] == "absent"
+
+
+def test_pending_provider_cleanup_retains_retry_state_and_never_deletes_jellyfin_first(monkeypatch):
+    invitation = pending_provider_invitation()
+    install_pending_provider_cleanup(monkeypatch, invitation)
+    operations = []
+
+    def execute(_profile_id, _connectors, operation, _parameters, **_kwargs):
+        operations.append(operation)
+        return {"state": "failed", "result": None}
+
+    monkeypatch.setattr(handler, "_execute_profile_binding_connector_command", execute)
+    path = "/v3/identity/profiles/profile_member_1234567890/pending-provider-cleanup"
+    result = handler.cleanup_pending_profile_providers_v3(pending_cleanup_event(invitation), path)
+
+    assert result["statusCode"] == 202, result
+    assert body(result)["state"] == "pending_provider_cleanup_retryable"
+    assert operations == ["seerr.delete_exact_bound_user"]
+    assert invitation["provider_cleanup_state"] == "seerr_retryable"
+    assert invitation["jellyfin_binding_state"] == "active"
+
+
+def test_pending_provider_cleanup_denies_exact_receipt_mismatch(monkeypatch):
+    invitation = pending_provider_invitation()
+    install_pending_provider_cleanup(monkeypatch, invitation)
+    commands = []
+    monkeypatch.setattr(
+        handler,
+        "_execute_profile_binding_connector_command",
+        lambda *_args, **_kwargs: commands.append(True),
+    )
+    event = pending_cleanup_event(invitation)
+    event["body"] = json.dumps({**json.loads(event["body"]), "seerr_user_id": 99})
+    path = "/v3/identity/profiles/profile_member_1234567890/pending-provider-cleanup"
+    result = handler.cleanup_pending_profile_providers_v3(event, path)
+
+    assert result["statusCode"] in {403, 409}
+    assert commands == []
+
+
+def test_pending_provider_cleanup_denies_cross_household_handle(monkeypatch):
+    invitation = pending_provider_invitation(household_id="household-other")
+    install_pending_provider_cleanup(monkeypatch, invitation)
+    commands = []
+    monkeypatch.setattr(
+        handler,
+        "_execute_profile_binding_connector_command",
+        lambda *_args, **_kwargs: commands.append(True),
+    )
+    path = "/v3/identity/profiles/profile_member_1234567890/pending-provider-cleanup"
+    result = handler.cleanup_pending_profile_providers_v3(
+        pending_cleanup_event(invitation), path,
+    )
+
+    assert result["statusCode"] in {403, 409}
+    assert commands == []
+
+
+def test_pending_provider_cleanup_never_deletes_an_identity_not_created_by_attempt(monkeypatch):
+    invitation = pending_provider_invitation()
+    install_pending_provider_cleanup(monkeypatch, invitation)
+    commands = []
+    monkeypatch.setattr(
+        handler,
+        "_execute_profile_binding_connector_command",
+        lambda *_args, **_kwargs: commands.append(True),
+    )
+    event = pending_cleanup_event(invitation)
+    event["body"] = json.dumps({
+        **json.loads(event["body"]),
+        "created_by_this_attempt": False,
+    })
+    path = "/v3/identity/profiles/profile_member_1234567890/pending-provider-cleanup"
+    result = handler.cleanup_pending_profile_providers_v3(event, path)
+
+    assert result["statusCode"] == 409
+    assert commands == []
+
+
+def test_owner_exact_seerr_orphan_repair_requires_authoritative_jellyfin_absence(monkeypatch):
+    install_seerr_owner(monkeypatch)
+    monkeypatch.setattr(handler, "remote_requests_table", object())
+    monkeypatch.setattr(handler, "_home_connectors_for_profile_access", lambda _profile_id: [{
+        "connector_id": "connector-1",
+    }])
+    operations = []
+
+    def execute(_profile_id, _connectors, operation, parameters, **_kwargs):
+        operations.append((operation, dict(parameters)))
+        return {"state": "completed", "result": {
+            "state": "deleted",
+            "jellyfin_user_id": parameters["jellyfin_user_id"],
+            "seerr_user_id": parameters["seerr_user_id"],
+            "jellyfin_absence_confirmed": True,
+            "absence_confirmed": True,
+        }}
+
+    monkeypatch.setattr(handler, "_execute_profile_binding_connector_command", execute)
+    event = {"body": json.dumps({
+        "jellyfin_user_id": "0123456789abcdef0123456789abcdef",
+        "seerr_user_id": 16,
+        "explicit_confirmation": True,
+    })}
+    result = handler.repair_exact_seerr_orphan_v3(event)
+
+    assert result["statusCode"] == 200
+    assert operations == [("seerr.delete_orphaned_jellyfin_user", {
+        "jellyfin_user_id": "0123456789abcdef0123456789abcdef",
+        "seerr_user_id": 16,
+    })]
 
 
 class CompletedRecoveryTable:
@@ -334,6 +566,177 @@ def test_manager_rejects_stale_or_mismatched_invitation_handles(monkeypatch):
         }
         assert "jellyfin_binding_state" not in invitation
         assert "jellyfin_user_id" not in invitation
+
+
+def test_owner_saves_exact_seerr_binding_on_pending_invitation(monkeypatch):
+    install_seerr_owner(monkeypatch)
+    profile_id = "profile_member_1234567890"
+    binding_handle = "d" * 64
+    jellyfin_user_id = "0123456789abcdef0123456789abcdef"
+    invitation = {
+        "code_hash": binding_handle,
+        "household_id": "household-1",
+        "profile_id": profile_id,
+        "state": "pending",
+        "code_expires_at": 2_000,
+        "jellyfin_binding_state": "active",
+        "jellyfin_connector_id": "connector-1",
+        "jellyfin_user_id": jellyfin_user_id,
+    }
+    invitations = ExactInvitationTable(invitation)
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable())
+    monkeypatch.setattr(handler, "household_invitations_table", invitations)
+    monkeypatch.setattr(handler, "epoch_now", lambda: 1_000)
+
+    result = handler.save_profile_seerr_binding_v3({"body": json.dumps({
+        "jellyfin_user_id": jellyfin_user_id,
+        "seerr_user_id": 42,
+        "explicit_confirmation": True,
+        "invitation_binding_handle": binding_handle,
+    })}, f"/v3/identity/profiles/{profile_id}/seerr-binding")
+
+    assert result["statusCode"] == 200
+    assert body(result) == {"state": "profile_seerr_binding_saved"}
+    assert invitation["seerr_binding_state"] == "active"
+    assert invitation["seerr_connector_id"] == "connector-1"
+    assert invitation["seerr_jellyfin_user_id"] == jellyfin_user_id
+    assert invitation["seerr_user_id"] == "42"
+    assert invitation["request_access_enabled"] is True
+
+
+def test_owner_rejects_invalid_or_wrong_pending_seerr_binding_handle(monkeypatch):
+    install_seerr_owner(monkeypatch)
+    profile_id = "profile_member_1234567890"
+    jellyfin_user_id = "0123456789abcdef0123456789abcdef"
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable())
+    monkeypatch.setattr(handler, "epoch_now", lambda: 1_000)
+
+    cases = [
+        {"state": "consumed", "profile_id": profile_id, "household_id": "household-1", "code_expires_at": 2_000},
+        {"state": "revoked", "profile_id": profile_id, "household_id": "household-1", "code_expires_at": 2_000},
+        {"state": "pending", "profile_id": profile_id, "household_id": "household-1", "code_expires_at": 999},
+        {"state": "pending", "profile_id": profile_id, "household_id": "household-other", "code_expires_at": 2_000},
+        {"state": "pending", "profile_id": "profile_other_12345678901", "household_id": "household-1", "code_expires_at": 2_000},
+    ]
+    for index, candidate in enumerate(cases):
+        binding_handle = format(index + 20, "064x")
+        invitation = {
+            "code_hash": binding_handle,
+            "jellyfin_binding_state": "active",
+            "jellyfin_connector_id": "connector-1",
+            "jellyfin_user_id": jellyfin_user_id,
+            **candidate,
+        }
+        monkeypatch.setattr(
+            handler,
+            "household_invitations_table",
+            ExactInvitationTable(invitation),
+        )
+        result = handler.save_profile_seerr_binding_v3({"body": json.dumps({
+            "jellyfin_user_id": jellyfin_user_id,
+            "seerr_user_id": 42,
+            "explicit_confirmation": True,
+            "invitation_binding_handle": binding_handle,
+        })}, f"/v3/identity/profiles/{profile_id}/seerr-binding")
+        assert result["statusCode"] == 409
+        assert body(result) == {
+            "state": "profile_seerr_binding_invitation_invalid",
+        }
+        assert "seerr_binding_state" not in invitation
+
+
+def test_owner_rejects_pending_seerr_binding_with_wrong_jellyfin_tuple(monkeypatch):
+    install_seerr_owner(monkeypatch)
+    profile_id = "profile_member_1234567890"
+    binding_handle = "e" * 64
+    invitation = {
+        "code_hash": binding_handle,
+        "household_id": "household-1",
+        "profile_id": profile_id,
+        "state": "pending",
+        "code_expires_at": 2_000,
+        "jellyfin_binding_state": "active",
+        "jellyfin_connector_id": "connector-1",
+        "jellyfin_user_id": "0123456789abcdef0123456789abcdef",
+    }
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable())
+    monkeypatch.setattr(
+        handler, "household_invitations_table", ExactInvitationTable(invitation),
+    )
+    monkeypatch.setattr(handler, "epoch_now", lambda: 1_000)
+
+    result = handler.save_profile_seerr_binding_v3({"body": json.dumps({
+        "jellyfin_user_id": "fedcba9876543210fedcba9876543210",
+        "seerr_user_id": 42,
+        "explicit_confirmation": True,
+        "invitation_binding_handle": binding_handle,
+    })}, f"/v3/identity/profiles/{profile_id}/seerr-binding")
+
+    assert result["statusCode"] == 409
+    assert body(result) == {
+        "state": "profile_seerr_binding_jellyfin_mismatch",
+    }
+    assert "seerr_binding_state" not in invitation
+
+
+def test_owner_retains_active_profile_seerr_binding_path(monkeypatch):
+    install_seerr_owner(monkeypatch)
+    profile_id = "profile_member_1234567890"
+    jellyfin_user_id = "0123456789abcdef0123456789abcdef"
+    profiles = ExactProfileTable([{
+        "profile_id": profile_id,
+        "household_id": "household-1",
+        "state": "active",
+        "jellyfin_binding_state": "active",
+        "jellyfin_connector_id": "connector-1",
+        "jellyfin_user_id": jellyfin_user_id,
+    }])
+    monkeypatch.setattr(handler, "identity_profiles_table", profiles)
+    monkeypatch.setattr(handler, "household_invitations_table", ExactInvitationTable())
+
+    result = handler.save_profile_seerr_binding_v3({"body": json.dumps({
+        "jellyfin_user_id": jellyfin_user_id,
+        "seerr_user_id": 42,
+        "explicit_confirmation": True,
+    })}, f"/v3/identity/profiles/{profile_id}/seerr-binding")
+
+    assert result["statusCode"] == 200
+    assert profiles.records[profile_id]["seerr_user_id"] == "42"
+    assert profiles.records[profile_id]["request_access_enabled"] is True
+
+
+def test_invitation_claim_promotes_only_consistent_exact_seerr_tuple():
+    jellyfin_user_id = "0123456789abcdef0123456789abcdef"
+    invitation = {
+        "jellyfin_binding_state": "active",
+        "jellyfin_connector_id": "connector-1",
+        "jellyfin_user_id": jellyfin_user_id,
+        "jellyfin_binding_updated_at": "2026-08-19T06:00:00Z",
+        "seerr_binding_state": "active",
+        "seerr_connector_id": "connector-1",
+        "seerr_jellyfin_user_id": jellyfin_user_id,
+        "seerr_user_id": "42",
+        "seerr_binding_updated_at": "2026-08-19T06:01:00Z",
+    }
+
+    promoted = handler._promote_invitation_provider_bindings(
+        {}, invitation, "2026-08-19T06:02:00Z",
+    )
+
+    assert promoted["jellyfin_user_id"] == jellyfin_user_id
+    assert promoted["seerr_connector_id"] == "connector-1"
+    assert promoted["seerr_jellyfin_user_id"] == jellyfin_user_id
+    assert promoted["seerr_user_id"] == "42"
+    assert promoted["seerr_binding_state"] == "active"
+    assert promoted["request_access_enabled"] is True
+
+    mismatched = dict(invitation)
+    mismatched["seerr_jellyfin_user_id"] = "fedcba9876543210fedcba9876543210"
+    refused = handler._promote_invitation_provider_bindings(
+        {}, mismatched, "2026-08-19T06:02:00Z",
+    )
+    assert "seerr_user_id" not in refused
+    assert "seerr_binding_state" not in refused
 
 
 def test_manager_rejects_provider_identity_already_owned_by_other_profile(monkeypatch):

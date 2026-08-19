@@ -143,7 +143,10 @@ public sealed class KaevoSeerrIdentityProvisioningService
                 return new("seerr_permission_failed");
             }
 
-            return new("ready", verified.Id);
+            // This provenance is part of the rollback receipt.  Callers may
+            // delete the exact Seerr identity during a failed transaction only
+            // when this exact provisioning attempt created it.
+            return new("ready", verified.Id, createdByThisAttempt);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

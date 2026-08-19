@@ -146,7 +146,8 @@ public sealed record KaevoSeerrJellyfinUserProvisionRequest(
 
 public sealed record KaevoSeerrJellyfinUserProvisionResponse(
     string State,
-    int? SeerrUserId = null);
+    int? SeerrUserId = null,
+    bool CreatedByThisAttempt = false);
 
 /// <summary>
 /// Deletes one exact Seerr identity which was previously imported from the

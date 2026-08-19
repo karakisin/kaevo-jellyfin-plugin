@@ -831,11 +831,57 @@ def test_profile_setup_promotes_only_the_exact_consumed_invitation_jellyfin_bind
         )
 
 
+def test_profile_setup_promotes_only_the_consistent_consumed_invitation_seerr_binding():
+    jellyfin_user_id = "0123456789abcdef0123456789abcdef"
+    valid = {
+        "state": "consumed",
+        "household_id": "household-1",
+        "profile_id": "profile_member_1234567890",
+        "member_principal_id": "principal-member",
+        "jellyfin_binding_state": "active",
+        "jellyfin_connector_id": "connector-1",
+        "jellyfin_user_id": jellyfin_user_id,
+        "seerr_binding_state": "active",
+        "seerr_connector_id": "connector-1",
+        "seerr_jellyfin_user_id": jellyfin_user_id,
+        "seerr_user_id": "42",
+        "request_access_enabled": True,
+    }
+
+    bindings = join._consumed_invitation_provider_bindings(
+        valid,
+        household_id="household-1",
+        profile_id="profile_member_1234567890",
+        member_principal_id="principal-member",
+    )
+
+    assert bindings["jellyfin_user_id"] == jellyfin_user_id
+    assert bindings["seerr_connector_id"] == "connector-1"
+    assert bindings["seerr_jellyfin_user_id"] == jellyfin_user_id
+    assert bindings["seerr_user_id"] == "42"
+    assert bindings["seerr_binding_state"] == "active"
+    assert bindings["request_access_enabled"] is True
+
+    for conflict in (
+        {"seerr_connector_id": "connector-other"},
+        {"seerr_jellyfin_user_id": "fedcba9876543210fedcba9876543210"},
+        {"request_access_enabled": False},
+        {"seerr_binding_state": "pending"},
+    ):
+        with pytest.raises(join.AccountFoundationError):
+            join._consumed_invitation_provider_bindings(
+                {**valid, **conflict},
+                household_id="household-1",
+                profile_id="profile_member_1234567890",
+                member_principal_id="principal-member",
+            )
+
+
 def test_profile_setup_binding_promotion_is_exact_get_item_only_without_scan():
     source = (Path(__file__).parents[2] / "api" / "src" / "household_join_handler.py").read_text()
     profile_setup_source = source[source.index("def profile_setup(event):"):source.index("def _canonical_route_path", source.index("def profile_setup(event):"))]
     assert 'Key={"code_hash": invitation_code_hash}, ConsistentRead=True' in profile_setup_source
-    assert "_consumed_invitation_jellyfin_binding(" in profile_setup_source
+    assert "_consumed_invitation_provider_bindings(" in profile_setup_source
     assert ".scan(" not in profile_setup_source
 
 

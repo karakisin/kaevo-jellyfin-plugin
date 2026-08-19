@@ -787,7 +787,9 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             normalizedUserId,
             request.SeerrUserId,
             cancellationToken).ConfigureAwait(false);
-        return response.State == "deleted"
+        // An authoritative dual-ID absence is the idempotent success state for
+        // a cleanup retry whose first response may have been lost.
+        return response.State is "deleted" or "absent"
             ? Ok(response)
             : StatusCode(502, response);
     }

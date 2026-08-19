@@ -3104,6 +3104,13 @@ def profile_seerr_binding_path_id(path):
     return match.group(1) if match else ""
 
 
+def profile_pending_provider_cleanup_path_id(path):
+    match = re.fullmatch(
+        r"/v3/identity/profiles/([^/]+)/pending-provider-cleanup", str(path or ""),
+    )
+    return match.group(1) if match else ""
+
+
 def _normalized_jellyfin_user_id(value):
     compact = str(value or "").strip().replace("-", "")
     return compact.lower() if re.fullmatch(r"[0-9a-fA-F]{32}", compact) else ""
@@ -3330,6 +3337,8 @@ def _execute_profile_binding_connector_command(
         "jellyfin.reassign_stale_profile_binding",
         "seerr.delete_exact_bound_user",
         "jellyfin.delete_exact_bound_user",
+        "seerr.delete_orphaned_jellyfin_user",
+        "jellyfin.delete_pending_exact_user",
     }
     if remote_requests_table is None or operation not in allowed_operations:
         return {"state": "profile_jellyfin_binding_command_unavailable"}
@@ -4317,25 +4326,71 @@ def save_profile_seerr_binding_v3(event, path):
         return _profile_switch_failure(event, session, "profile_seerr_binding_owner_required", profile_id=profile_id)
     supplied_jellyfin_user_id = _normalized_jellyfin_user_id(body.get("jellyfin_user_id"))
     seerr_user_id = _normalized_seerr_user_id(body.get("seerr_user_id"))
+    invitation_binding_handle = str(
+        body.get("invitation_binding_handle") or ""
+    ).strip().lower()
     if not supplied_jellyfin_user_id or not seerr_user_id:
         return _profile_switch_failure(event, session, "profile_seerr_binding_invalid", profile_id=profile_id)
     household_id = str((context.get("household") or {}).get("household_id") or "")
     try:
-        canonical = _exact_identity_profile(profile_id, household_id=household_id)
-        bound_jellyfin_user_id = _normalized_jellyfin_user_id(canonical.get("jellyfin_user_id"))
-        connector_id = str(canonical.get("jellyfin_connector_id") or "")
+        canonical = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
         if not (
-            str(canonical.get("jellyfin_binding_state") or "") == "active"
+            isinstance(canonical, dict)
+            and canonical.get("state") == "active"
+            and hmac.compare_digest(
+                str(canonical.get("household_id") or ""), household_id,
+            )
+        ):
+            canonical = None
+
+        pending_invitation = None
+        if invitation_binding_handle:
+            if (
+                household_invitations_table is None
+                or not re.fullmatch(r"[0-9a-f]{64}", invitation_binding_handle)
+            ):
+                raise AccountFoundationError("profile_seerr_binding_invitation_invalid")
+            pending_invitation = household_invitations_table.get_item(
+                Key={"code_hash": invitation_binding_handle}, ConsistentRead=True,
+            ).get("Item")
+            if not (
+                isinstance(pending_invitation, dict)
+                and pending_invitation.get("state") == "pending"
+                and hmac.compare_digest(
+                    str(pending_invitation.get("household_id") or ""), household_id,
+                )
+                and hmac.compare_digest(
+                    str(pending_invitation.get("profile_id") or ""), profile_id,
+                )
+                and household_invitation_code_expiration(pending_invitation) >= epoch_now()
+            ):
+                raise AccountFoundationError("profile_seerr_binding_invitation_invalid")
+            if canonical is not None:
+                raise AccountFoundationError("profile_seerr_binding_conflict")
+        elif canonical is None:
+            raise AccountFoundationError("profile_switch_target_not_authorized")
+
+        binding_target = pending_invitation or canonical
+        bound_jellyfin_user_id = _normalized_jellyfin_user_id(
+            binding_target.get("jellyfin_user_id")
+        )
+        connector_id = str(binding_target.get("jellyfin_connector_id") or "")
+        if not (
+            str(binding_target.get("jellyfin_binding_state") or "") == "active"
             and connector_id
             and hmac.compare_digest(bound_jellyfin_user_id, supplied_jellyfin_user_id)
         ):
             raise AccountFoundationError("profile_seerr_binding_jellyfin_mismatch")
-        existing_state = str(canonical.get("seerr_binding_state") or "")
-        existing_connector_id = str(canonical.get("seerr_connector_id") or "")
+        existing_state = str(binding_target.get("seerr_binding_state") or "")
+        existing_connector_id = str(binding_target.get("seerr_connector_id") or "")
         existing_jellyfin_user_id = _normalized_jellyfin_user_id(
-            canonical.get("seerr_jellyfin_user_id")
+            binding_target.get("seerr_jellyfin_user_id")
         )
-        existing_seerr_user_id = _normalized_seerr_user_id(canonical.get("seerr_user_id"))
+        existing_seerr_user_id = _normalized_seerr_user_id(
+            binding_target.get("seerr_user_id")
+        )
         if existing_state == "active" and not (
             hmac.compare_digest(existing_connector_id, connector_id)
             and hmac.compare_digest(existing_jellyfin_user_id, supplied_jellyfin_user_id)
@@ -4344,32 +4399,54 @@ def save_profile_seerr_binding_v3(event, path):
             raise AccountFoundationError("profile_seerr_binding_conflict")
         if existing_state == "active":
             return response(200, {"state": "profile_seerr_binding_saved"})
-        identity_profiles_table.update_item(
-            Key={"profile_id": profile_id},
-            UpdateExpression=(
-                "SET seerr_connector_id = :connector_id, "
-                "seerr_jellyfin_user_id = :jellyfin_user_id, "
-                "seerr_user_id = :seerr_user_id, "
-                "seerr_binding_state = :binding_state, "
-                "request_access_enabled = :request_access_enabled, "
-                "seerr_binding_updated_at = :updated_at"
-            ),
-            ConditionExpression=(
-                "#state = :active AND household_id = :household_id "
-                "AND jellyfin_binding_state = :binding_state "
-                "AND jellyfin_connector_id = :connector_id "
-                "AND jellyfin_user_id = :jellyfin_user_id"
-            ),
-            ExpressionAttributeNames={"#state": "state"},
-            ExpressionAttributeValues={
-                ":active": "active", ":household_id": household_id,
-                ":connector_id": connector_id,
-                ":jellyfin_user_id": supplied_jellyfin_user_id,
-                ":seerr_user_id": seerr_user_id,
-                ":binding_state": "active", ":updated_at": utc_now_iso(),
-                ":request_access_enabled": True,
-            },
+        values = {
+            ":household_id": household_id,
+            ":connector_id": connector_id,
+            ":jellyfin_user_id": supplied_jellyfin_user_id,
+            ":seerr_user_id": seerr_user_id,
+            ":binding_state": "active",
+            ":updated_at": utc_now_iso(),
+            ":request_access_enabled": True,
+        }
+        update = (
+            "SET seerr_connector_id = :connector_id, "
+            "seerr_jellyfin_user_id = :jellyfin_user_id, "
+            "seerr_user_id = :seerr_user_id, "
+            "seerr_binding_state = :binding_state, "
+            "request_access_enabled = :request_access_enabled, "
+            "seerr_binding_updated_at = :updated_at"
         )
+        if pending_invitation is not None:
+            household_invitations_table.update_item(
+                Key={"code_hash": invitation_binding_handle},
+                UpdateExpression=update,
+                ConditionExpression=(
+                    "#state = :pending AND household_id = :household_id "
+                    "AND profile_id = :profile_id "
+                    "AND code_expires_at >= :now "
+                    "AND jellyfin_binding_state = :binding_state "
+                    "AND jellyfin_connector_id = :connector_id "
+                    "AND jellyfin_user_id = :jellyfin_user_id"
+                ),
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={
+                    **values, ":pending": "pending", ":profile_id": profile_id,
+                    ":now": epoch_now(),
+                },
+            )
+        else:
+            identity_profiles_table.update_item(
+                Key={"profile_id": profile_id},
+                UpdateExpression=update,
+                ConditionExpression=(
+                    "#state = :active AND household_id = :household_id "
+                    "AND jellyfin_binding_state = :binding_state "
+                    "AND jellyfin_connector_id = :connector_id "
+                    "AND jellyfin_user_id = :jellyfin_user_id"
+                ),
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={**values, ":active": "active"},
+            )
         commit_security_audit(_profile_binding_audit(
             event, session, "profile_seerr_binding_saved", "success", target_id=profile_id,
         ))
@@ -4380,6 +4457,322 @@ def save_profile_seerr_binding_v3(event, path):
     except ClientError:
         return _profile_switch_failure(event, session, "profile_seerr_binding_conflict", profile_id=profile_id)
     return response(200, {"state": "profile_seerr_binding_saved"})
+
+
+def _set_pending_provider_cleanup_state(
+    binding_handle,
+    *,
+    profile_id,
+    jellyfin_user_id,
+    seerr_user_id,
+    state,
+    seerr_binding_state=None,
+    jellyfin_binding_state=None,
+):
+    """CAS one exact pending cleanup receipt without discarding its IDs."""
+    update = "SET provider_cleanup_state = :cleanup_state, provider_cleanup_updated_at = :updated_at"
+    values = {
+        ":cleanup_state": state,
+        ":updated_at": utc_now_iso(),
+        ":profile_id": profile_id,
+        ":jellyfin_user_id": jellyfin_user_id,
+        ":seerr_user_id": seerr_user_id,
+    }
+    if seerr_binding_state is not None:
+        update += ", seerr_binding_state = :seerr_binding_state"
+        values[":seerr_binding_state"] = seerr_binding_state
+    if jellyfin_binding_state is not None:
+        update += ", jellyfin_binding_state = :jellyfin_binding_state"
+        values[":jellyfin_binding_state"] = jellyfin_binding_state
+    household_invitations_table.update_item(
+        Key={"code_hash": binding_handle},
+        UpdateExpression=update,
+        ConditionExpression=(
+            "#state = :pending AND profile_id = :profile_id "
+            "AND jellyfin_user_id = :jellyfin_user_id "
+            "AND seerr_user_id = :seerr_user_id"
+        ),
+        ExpressionAttributeNames={"#state": "state"},
+        ExpressionAttributeValues={**values, ":pending": "pending"},
+    )
+
+
+def cleanup_pending_profile_providers_v3(event, path):
+    """Durably delete a failed invitation's exact Seerr then Jellyfin edge.
+
+    The invitation is the transaction ledger.  IDs remain on it through every
+    retry; no timeout, failed connector response, or expired invitation can
+    silently turn a confirmed provider account into an orphan.
+    """
+    required = (
+        household_invitations_table, identity_profiles_table,
+        security_audit_table, remote_requests_table,
+    )
+    if any(table is None for table in required):
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return failure
+    profile_id = profile_pending_provider_cleanup_path_id(path)
+    body = parse_json_body(event)
+    if not (
+        re.fullmatch(r"profile_[A-Za-z0-9_-]{16,128}", profile_id)
+        and isinstance(body, dict)
+        and body.get("explicit_confirmation") is True
+        and body.get("created_by_this_attempt") is True
+    ):
+        return _profile_switch_failure(
+            event, session, "pending_provider_cleanup_invalid", profile_id=profile_id,
+        )
+    if str((context.get("household") or {}).get("role") or "").lower() != CanonicalRole.OWNER.value:
+        return _profile_switch_failure(
+            event, session, "pending_provider_cleanup_owner_required", profile_id=profile_id,
+        )
+
+    household_id = str((context.get("household") or {}).get("household_id") or "")
+    owner_profile_id = str(session.get("profile_id") or "")
+    binding_handle = str(body.get("invitation_binding_handle") or "").strip().lower()
+    jellyfin_user_id = _normalized_jellyfin_user_id(body.get("jellyfin_user_id"))
+    seerr_user_id = _normalized_seerr_user_id(body.get("seerr_user_id"))
+    if not (
+        re.fullmatch(r"[0-9a-f]{64}", binding_handle)
+        and jellyfin_user_id
+        and seerr_user_id
+    ):
+        return _profile_switch_failure(
+            event, session, "pending_provider_cleanup_invalid", profile_id=profile_id,
+        )
+
+    try:
+        invitation = household_invitations_table.get_item(
+            Key={"code_hash": binding_handle}, ConsistentRead=True,
+        ).get("Item")
+        cleanup_state = str((invitation or {}).get("provider_cleanup_state") or "")
+        retry_states = {
+            "seerr_pending", "seerr_retryable", "jellyfin_pending",
+            "jellyfin_retryable", "complete",
+        }
+        invitation_is_current = (
+            isinstance(invitation, dict)
+            and invitation.get("state") == "pending"
+            and hmac.compare_digest(str(invitation.get("household_id") or ""), household_id)
+            and hmac.compare_digest(str(invitation.get("profile_id") or ""), profile_id)
+            and (
+                household_invitation_code_expiration(invitation) >= epoch_now()
+                or cleanup_state in retry_states
+            )
+        )
+        if not invitation_is_current:
+            raise AccountFoundationError("pending_provider_cleanup_invitation_invalid")
+
+        receipt_matches = (
+            hmac.compare_digest(
+                _normalized_jellyfin_user_id(invitation.get("jellyfin_user_id")),
+                jellyfin_user_id,
+            )
+            and hmac.compare_digest(
+                _normalized_jellyfin_user_id(invitation.get("seerr_jellyfin_user_id")),
+                jellyfin_user_id,
+            )
+            and hmac.compare_digest(
+                _normalized_seerr_user_id(invitation.get("seerr_user_id")),
+                seerr_user_id,
+            )
+            and str(invitation.get("jellyfin_connector_id") or "")
+            and hmac.compare_digest(
+                str(invitation.get("jellyfin_connector_id") or ""),
+                str(invitation.get("seerr_connector_id") or ""),
+            )
+        )
+        if not receipt_matches:
+            raise AccountFoundationError("pending_provider_cleanup_identity_mismatch")
+
+        if cleanup_state == "complete":
+            return response(200, {
+                "state": "pending_provider_cleanup_complete",
+                "jellyfin_user_id": jellyfin_user_id,
+                "seerr_user_id": int(seerr_user_id),
+            })
+        if not cleanup_state:
+            if not (
+                invitation.get("jellyfin_binding_state") == "active"
+                and invitation.get("seerr_binding_state") == "active"
+            ):
+                raise AccountFoundationError("pending_provider_cleanup_binding_invalid")
+            _set_pending_provider_cleanup_state(
+                binding_handle,
+                profile_id=profile_id,
+                jellyfin_user_id=jellyfin_user_id,
+                seerr_user_id=seerr_user_id,
+                state="seerr_pending",
+            )
+            cleanup_state = "seerr_pending"
+
+        connectors = _home_connectors_for_profile_access(owner_profile_id)
+        connector_id = str(invitation.get("jellyfin_connector_id") or "")
+        exact_connectors = [
+            item for item in connectors
+            if isinstance(item, dict)
+            and hmac.compare_digest(str(item.get("connector_id") or ""), connector_id)
+        ]
+        if len(exact_connectors) != 1:
+            _set_pending_provider_cleanup_state(
+                binding_handle, profile_id=profile_id,
+                jellyfin_user_id=jellyfin_user_id, seerr_user_id=seerr_user_id,
+                state=("jellyfin_retryable" if cleanup_state.startswith("jellyfin") else "seerr_retryable"),
+            )
+            return response(202, {"state": "pending_provider_cleanup_retryable"})
+
+        if cleanup_state in {"seerr_pending", "seerr_retryable"}:
+            outcome = _execute_profile_binding_connector_command(
+                profile_id,
+                exact_connectors,
+                "seerr.delete_exact_bound_user",
+                {
+                    "jellyfin_user_id": jellyfin_user_id,
+                    "seerr_user_id": int(seerr_user_id),
+                },
+                timeout_seconds=8.0,
+            )
+            result = outcome.get("result") if isinstance(outcome, dict) else None
+            confirmed = (
+                outcome.get("state") == "completed"
+                and isinstance(result, dict)
+                and result.get("absence_confirmed") is True
+                and str(result.get("state") or "") in {"deleted", "absent"}
+                and hmac.compare_digest(
+                    _normalized_jellyfin_user_id(result.get("jellyfin_user_id")), jellyfin_user_id,
+                )
+                and hmac.compare_digest(
+                    _normalized_seerr_user_id(result.get("seerr_user_id")), seerr_user_id,
+                )
+            )
+            if not confirmed:
+                _set_pending_provider_cleanup_state(
+                    binding_handle, profile_id=profile_id,
+                    jellyfin_user_id=jellyfin_user_id, seerr_user_id=seerr_user_id,
+                    state="seerr_retryable",
+                )
+                return response(202, {"state": "pending_provider_cleanup_retryable"})
+            _set_pending_provider_cleanup_state(
+                binding_handle, profile_id=profile_id,
+                jellyfin_user_id=jellyfin_user_id, seerr_user_id=seerr_user_id,
+                state="jellyfin_pending", seerr_binding_state="absent",
+            )
+
+        outcome = _execute_profile_binding_connector_command(
+            profile_id,
+            exact_connectors,
+            "jellyfin.delete_pending_exact_user",
+            {"jellyfin_user_id": jellyfin_user_id},
+            timeout_seconds=8.0,
+        )
+        result = outcome.get("result") if isinstance(outcome, dict) else None
+        confirmed = (
+            outcome.get("state") == "completed"
+            and isinstance(result, dict)
+            and result.get("absence_confirmed") is True
+            and str(result.get("state") or "") in {"deleted", "absent"}
+            and hmac.compare_digest(
+                _normalized_jellyfin_user_id(result.get("jellyfin_user_id")), jellyfin_user_id,
+            )
+        )
+        if not confirmed:
+            _set_pending_provider_cleanup_state(
+                binding_handle, profile_id=profile_id,
+                jellyfin_user_id=jellyfin_user_id, seerr_user_id=seerr_user_id,
+                state="jellyfin_retryable",
+            )
+            return response(202, {"state": "pending_provider_cleanup_retryable"})
+        _set_pending_provider_cleanup_state(
+            binding_handle, profile_id=profile_id,
+            jellyfin_user_id=jellyfin_user_id, seerr_user_id=seerr_user_id,
+            state="complete", jellyfin_binding_state="absent",
+        )
+        commit_security_audit(_profile_binding_audit(
+            event, session, "pending_provider_cleanup_complete", "success",
+            target_id=profile_id,
+        ))
+        return response(200, {
+            "state": "pending_provider_cleanup_complete",
+            "jellyfin_user_id": jellyfin_user_id,
+            "seerr_user_id": int(seerr_user_id),
+        })
+    except AccountFoundationError as error:
+        return _profile_switch_failure(event, session, error.reason, profile_id=profile_id)
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    except ClientError:
+        return _profile_switch_failure(
+            event, session, "pending_provider_cleanup_conflict", profile_id=profile_id,
+        )
+
+
+def repair_exact_seerr_orphan_v3(event):
+    """Owner-confirmed removal of one exact Seerr pair after Jellyfin absence."""
+    if security_audit_table is None or remote_requests_table is None:
+        return response(503, {"state": "identity_context_storage_unavailable"})
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    context, failure = _normalized_profile_context(event, session)
+    if failure:
+        return failure
+    if str((context.get("household") or {}).get("role") or "").lower() != CanonicalRole.OWNER.value:
+        return _profile_switch_failure(event, session, "seerr_orphan_repair_owner_required")
+    body = parse_json_body(event)
+    jellyfin_user_id = _normalized_jellyfin_user_id((body or {}).get("jellyfin_user_id"))
+    seerr_user_id = _normalized_seerr_user_id((body or {}).get("seerr_user_id"))
+    if not (
+        isinstance(body, dict)
+        and body.get("explicit_confirmation") is True
+        and jellyfin_user_id
+        and seerr_user_id
+    ):
+        return _profile_switch_failure(event, session, "seerr_orphan_repair_invalid")
+    owner_profile_id = str(session.get("profile_id") or "")
+    connectors = _home_connectors_for_profile_access(owner_profile_id)
+    outcome = _execute_profile_binding_connector_command(
+        owner_profile_id,
+        connectors,
+        "seerr.delete_orphaned_jellyfin_user",
+        {
+            "jellyfin_user_id": jellyfin_user_id,
+            "seerr_user_id": int(seerr_user_id),
+        },
+        timeout_seconds=8.0,
+    )
+    result = outcome.get("result") if isinstance(outcome, dict) else None
+    confirmed = (
+        outcome.get("state") == "completed"
+        and isinstance(result, dict)
+        and result.get("absence_confirmed") is True
+        and result.get("jellyfin_absence_confirmed") is True
+        and str(result.get("state") or "") in {"deleted", "absent"}
+        and hmac.compare_digest(
+            _normalized_jellyfin_user_id(result.get("jellyfin_user_id")), jellyfin_user_id,
+        )
+        and hmac.compare_digest(
+            _normalized_seerr_user_id(result.get("seerr_user_id")), seerr_user_id,
+        )
+    )
+    if not confirmed:
+        return _profile_switch_failure(event, session, "seerr_orphan_repair_unconfirmed")
+    try:
+        commit_security_audit(_profile_binding_audit(
+            event, session, "seerr_orphan_repair_complete", "success",
+            target_id=owner_profile_id,
+        ))
+    except AuditReferenceError:
+        return audit_unavailable_response()
+    return response(200, {
+        "state": "seerr_orphan_repair_complete",
+        "jellyfin_user_id": jellyfin_user_id,
+        "seerr_user_id": int(seerr_user_id),
+    })
 
 
 def create_profile_binding_v3(event, path, *, verified_session=None, retry_on_conflict=True):
@@ -11959,6 +12352,62 @@ def delete_household_invitation(event, path):
     return response(200, {"state": "invitation_deleted"})
 
 
+def _promote_invitation_provider_bindings(profile, invitation, created_at):
+    """Promote only complete, internally consistent exact provider tuples."""
+    invitation_jellyfin_user_id = _normalized_jellyfin_user_id(
+        invitation.get("jellyfin_user_id"),
+    )
+    invitation_jellyfin_connector_id = str(
+        invitation.get("jellyfin_connector_id") or "",
+    )
+    if (
+        str(invitation.get("jellyfin_binding_state") or "") == "active"
+        and invitation_jellyfin_user_id
+        and invitation_jellyfin_connector_id
+    ):
+        profile.update({
+            "jellyfin_connector_id": invitation_jellyfin_connector_id,
+            "jellyfin_user_id": invitation_jellyfin_user_id,
+            "jellyfin_binding_state": "active",
+            "jellyfin_binding_updated_at": str(
+                invitation.get("jellyfin_binding_updated_at") or created_at,
+            ),
+        })
+
+    invitation_seerr_user_id = _normalized_seerr_user_id(
+        invitation.get("seerr_user_id"),
+    )
+    invitation_seerr_jellyfin_user_id = _normalized_jellyfin_user_id(
+        invitation.get("seerr_jellyfin_user_id"),
+    )
+    invitation_seerr_connector_id = str(
+        invitation.get("seerr_connector_id") or "",
+    )
+    if (
+        str(invitation.get("seerr_binding_state") or "") == "active"
+        and invitation_seerr_user_id
+        and invitation_jellyfin_user_id
+        and invitation_jellyfin_connector_id
+        and hmac.compare_digest(
+            invitation_seerr_jellyfin_user_id, invitation_jellyfin_user_id,
+        )
+        and hmac.compare_digest(
+            invitation_seerr_connector_id, invitation_jellyfin_connector_id,
+        )
+    ):
+        profile.update({
+            "seerr_connector_id": invitation_seerr_connector_id,
+            "seerr_jellyfin_user_id": invitation_seerr_jellyfin_user_id,
+            "seerr_user_id": invitation_seerr_user_id,
+            "seerr_binding_state": "active",
+            "seerr_binding_updated_at": str(
+                invitation.get("seerr_binding_updated_at") or created_at,
+            ),
+            "request_access_enabled": True,
+        })
+    return profile
+
+
 def join_household(event):
     if not all((household_invitations_table, principals_table, identity_memberships_table, identity_profiles_table)):
         return response(503, {"state": "identity_storage_unavailable"})
@@ -12101,25 +12550,7 @@ def join_household(event):
         "created_at": str((existing_managed_profile or {}).get("created_at") or created_at),
         "device_access_enabled": True,
     })
-    invitation_jellyfin_user_id = _normalized_jellyfin_user_id(
-        invitation.get("jellyfin_user_id"),
-    )
-    invitation_jellyfin_connector_id = str(
-        invitation.get("jellyfin_connector_id") or "",
-    )
-    if (
-        str(invitation.get("jellyfin_binding_state") or "") == "active"
-        and invitation_jellyfin_user_id
-        and invitation_jellyfin_connector_id
-    ):
-        profile.update({
-            "jellyfin_connector_id": invitation_jellyfin_connector_id,
-            "jellyfin_user_id": invitation_jellyfin_user_id,
-            "jellyfin_binding_state": "active",
-            "jellyfin_binding_updated_at": str(
-                invitation.get("jellyfin_binding_updated_at") or created_at,
-            ),
-        })
+    _promote_invitation_provider_bindings(profile, invitation, created_at)
     profile.pop("pending_invitation_id", None)
     consumed = dict(invitation)
     consumed.update({"state": "consumed", "consumed_at": created_at, "member_principal_id": subject})
@@ -15220,6 +15651,12 @@ def lambda_handler(event, context):
 
     if method == "PUT" and profile_seerr_binding_path_id(path):
         return save_profile_seerr_binding_v3(event, path)
+
+    if method == "POST" and profile_pending_provider_cleanup_path_id(path):
+        return cleanup_pending_profile_providers_v3(event, path)
+
+    if method == "POST" and path == "/v3/identity/provider-orphans/seerr/repair":
+        return repair_exact_seerr_orphan_v3(event)
 
     if method == "POST" and profile_jellyfin_binding_preflight_path_id(path):
         return preflight_profile_jellyfin_binding_v3(event, path)
