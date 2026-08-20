@@ -130,3 +130,20 @@ def test_named_tables_and_pairing_key_are_environment_scoped():
     api_environment = resources["KaevoCloudApiFunction"]["Properties"]["Environment"]["Variables"]
     key_id = api_environment["PAIRING_V3_AUTHORIZATION_KEY_ID"]["Fn::If"]
     assert key_id == ["IsProduction", "v3-production-20260820-1", "v3-dev-20260722-1"]
+
+
+def test_main_api_dynamodb_permissions_are_consolidated_without_broadening_resources():
+    function = template()["Resources"]["KaevoCloudApiFunction"]
+    policies = function["Properties"]["Policies"]
+    crud = next(
+        statement
+        for policy in policies
+        for statement in policy.get("Statement", [])
+        if statement.get("Sid") == "KaevoCloudApiDynamoDBCrud"
+    )
+
+    assert not any("DynamoDBCrudPolicy" in policy for policy in policies)
+    assert "dynamodb:ConditionCheckItem" in crud["Action"]
+    assert "dynamodb:TransactWriteItems" not in crud["Action"]
+    assert len(crud["Resource"]) == 44
+    assert all("*" not in str(resource) or "/index/*" in str(resource) for resource in crud["Resource"])

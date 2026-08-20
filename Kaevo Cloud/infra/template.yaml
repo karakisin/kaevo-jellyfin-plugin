@@ -1421,32 +1421,69 @@ Resources:
           # integrates creates a circular dependency for a brand-new stack.
           PUBLIC_API_BASE_URL: !Ref PublicApiBaseUrl
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoProfileEventsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoProfileSettingsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoDevicesTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoEntitlementsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoHomeConnectorsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoRemoteRequestsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoBindingOperationsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoProfileBindingTombstonesTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoAppSessionsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoGuestPassesTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoAccountsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoAuthIdentitiesTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoHouseholdMembershipsTable
+        # SAM expands every DynamoDBCrudPolicy template into a repeated IAM
+        # statement. With the complete Kaevo table set, that exceeds IAM's
+        # 10,240-byte inline-role policy limit on a brand-new stack. Preserve
+        # the same CRUD action set while listing the exact table/index ARNs once.
+        - Statement:
+            - Sid: KaevoCloudApiDynamoDBCrud
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+                - dynamodb:PutItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+                - dynamodb:ConditionCheckItem
+              Resource:
+                - !GetAtt KaevoProfileEventsTable.Arn
+                - !Sub ${KaevoProfileEventsTable.Arn}/index/*
+                - !GetAtt KaevoProfileSettingsTable.Arn
+                - !Sub ${KaevoProfileSettingsTable.Arn}/index/*
+                - !GetAtt KaevoDevicesTable.Arn
+                - !Sub ${KaevoDevicesTable.Arn}/index/*
+                - !GetAtt KaevoEntitlementsTable.Arn
+                - !Sub ${KaevoEntitlementsTable.Arn}/index/*
+                - !GetAtt KaevoHomeConnectorsTable.Arn
+                - !Sub ${KaevoHomeConnectorsTable.Arn}/index/*
+                - !GetAtt KaevoRemoteRequestsTable.Arn
+                - !Sub ${KaevoRemoteRequestsTable.Arn}/index/*
+                - !GetAtt KaevoBindingOperationsTable.Arn
+                - !Sub ${KaevoBindingOperationsTable.Arn}/index/*
+                - !GetAtt KaevoProfileBindingTombstonesTable.Arn
+                - !Sub ${KaevoProfileBindingTombstonesTable.Arn}/index/*
+                - !GetAtt KaevoAppSessionsTable.Arn
+                - !Sub ${KaevoAppSessionsTable.Arn}/index/*
+                - !GetAtt KaevoGuestPassesTable.Arn
+                - !Sub ${KaevoGuestPassesTable.Arn}/index/*
+                - !GetAtt KaevoAccountsTable.Arn
+                - !Sub ${KaevoAccountsTable.Arn}/index/*
+                - !GetAtt KaevoAuthIdentitiesTable.Arn
+                - !Sub ${KaevoAuthIdentitiesTable.Arn}/index/*
+                - !GetAtt KaevoHouseholdMembershipsTable.Arn
+                - !Sub ${KaevoHouseholdMembershipsTable.Arn}/index/*
+                - !GetAtt KaevoProfilesTable.Arn
+                - !Sub ${KaevoProfilesTable.Arn}/index/*
+                - !GetAtt KaevoProfileBindingsTable.Arn
+                - !Sub ${KaevoProfileBindingsTable.Arn}/index/*
+                - !GetAtt KaevoProfileMappingsTable.Arn
+                - !Sub ${KaevoProfileMappingsTable.Arn}/index/*
+                - !GetAtt KaevoPrincipalsTable.Arn
+                - !Sub ${KaevoPrincipalsTable.Arn}/index/*
+                - !GetAtt KaevoIdentityMembershipsTable.Arn
+                - !Sub ${KaevoIdentityMembershipsTable.Arn}/index/*
+                - !GetAtt KaevoIdentityHouseholdsTable.Arn
+                - !Sub ${KaevoIdentityHouseholdsTable.Arn}/index/*
+                - !GetAtt KaevoIdentityProfilesTable.Arn
+                - !Sub ${KaevoIdentityProfilesTable.Arn}/index/*
+                - !GetAtt KaevoHouseholdInvitationsTable.Arn
+                - !Sub ${KaevoHouseholdInvitationsTable.Arn}/index/*
+                - !GetAtt KaevoInstallationsTable.Arn
+                - !Sub ${KaevoInstallationsTable.Arn}/index/*
         # The roster projection is a protected, read-only identity endpoint.
         # Keep this explicit Query grant alongside the broader legacy CRUD
         # policy so a future transform or role-policy recovery cannot remove
@@ -1457,22 +1494,6 @@ Resources:
               Action:
                 - dynamodb:Query
               Resource: !GetAtt KaevoHouseholdMembershipsTable.Arn
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoProfilesTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoProfileBindingsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoProfileMappingsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoPrincipalsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoIdentityMembershipsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoIdentityHouseholdsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoIdentityProfilesTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoHouseholdInvitationsTable
         - Statement:
             - Sid: DeleteExactProfileJoinTransactions
               Effect: Allow
@@ -1484,8 +1505,6 @@ Resources:
               Resource:
                 - !GetAtt KaevoHouseholdJoinTransactionsTable.Arn
                 - !Sub ${KaevoHouseholdJoinTransactionsTable.Arn}/index/invitation_id-created_at_epoch-index
-        - DynamoDBCrudPolicy:
-            TableName: !Ref KaevoInstallationsTable
         - Statement:
             - Sid: ConnectorLifecycleAndIdentityTransactions
               Effect: Allow
