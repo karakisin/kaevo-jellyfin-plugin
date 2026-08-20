@@ -85,6 +85,7 @@ Conditions:
   HasNativeOidc: !Or
     - !Condition IsDevelopment
     - !Condition IsSecurityStage
+    - !Condition IsProduction
   HasInstallationSessionIndex: !Equals [!Ref EnableInstallationSessionIndex, "true"]
   HasSocialIdentityUserPoolId: !Not [!Equals [!Ref SocialIdentityUserPoolId, ""]]
   HasGoogleIdentityProvider: !And
@@ -103,7 +104,9 @@ Conditions:
     - !Not [!Equals [!Ref CognitoCustomDomainName, ""]]
     - !Not [!Equals [!Ref CognitoCustomDomainCertificateArn, ""]]
   HasApiCustomDomain: !And
-    - !Condition IsDevelopment
+    - !Or
+      - !Condition IsDevelopment
+      - !Condition IsProduction
     - !Not [!Equals [!Ref ApiCustomDomainName, ""]]
     - !Not [!Equals [!Ref ApiCustomDomainCertificateArn, ""]]
 
@@ -119,7 +122,7 @@ Resources:
   KaevoCloudHttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
-      StageName: dev
+      StageName: !Ref EnvironmentName
       DefaultRouteSettings:
         ThrottlingBurstLimit: 80
         ThrottlingRateLimit: 40
@@ -964,7 +967,10 @@ Resources:
     Type: AWS::Cognito::UserPoolClient
     Condition: HasNativeOidc
     Properties:
-      ClientName: !If [IsSecurityStage, kaevo-security-stage-native-oidc, kaevo-cloud-dev-native-oidc]
+      ClientName: !If
+        - IsSecurityStage
+        - kaevo-security-stage-native-oidc
+        - !If [IsProduction, kaevo-cloud-production-native-oidc, kaevo-cloud-dev-native-oidc]
       UserPoolId: !Ref KaevoUserPool
       GenerateSecret: false
       PreventUserExistenceErrors: ENABLED
@@ -1039,7 +1045,13 @@ Resources:
     Condition: HasNativeOidc
     Properties:
       UserPoolId: !Ref KaevoUserPool
-      Domain: !If [IsSecurityStage, kaevo-security-stage-48c1664d38f4, kaevo-cloud-dev-295055514343-us-west-2]
+      Domain: !If
+        - IsSecurityStage
+        - kaevo-security-stage-48c1664d38f4
+        - !If
+          - IsProduction
+          - !Sub kaevo-cloud-production-${AWS::AccountId}-${AWS::Region}
+          - kaevo-cloud-dev-295055514343-us-west-2
       ManagedLoginVersion: 2
 
   KaevoCustomUserPoolDomain:
@@ -1069,7 +1081,7 @@ Resources:
     Properties:
       ApiId: !Ref KaevoCloudHttpApi
       DomainName: !Ref ApiCustomDomainName
-      Stage: dev
+      Stage: !Ref EnvironmentName
 
   KaevoSecurityStageManagedLoginBranding:
     Type: AWS::Cognito::ManagedLoginBranding
@@ -2324,12 +2336,21 @@ Resources:
           COGNITO_USER_POOL_ID: !Ref KaevoUserPool
           EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
           EXPECTED_NATIVE_CLIENT_ID: !If [HasNativeOidc, !Ref KaevoSecurityStageNativeOidcClient, ""]
-          EXPECTED_NATIVE_CALLBACK_URI: !If [IsSecurityStage, kaevo-security-stage://oauth/callback, !If [IsDevelopment, kaevo://oauth/callback, ""]]
+          EXPECTED_NATIVE_CALLBACK_URI: !If [IsSecurityStage, kaevo-security-stage://oauth/callback, !If [HasNativeOidc, kaevo://oauth/callback, ""]]
           # The app exchanges the authorization code against its configured
           # custom domain.  The browser handoff must use that same domain;
           # otherwise Cognito rejects the cross-domain code redemption after
           # a successful managed-login callback.
-          NATIVE_OIDC_AUTHORIZATION_ENDPOINT: !If [HasCognitoCustomDomain, !Sub "https://${CognitoCustomDomainName}/oauth2/authorize", !If [IsSecurityStage, https://kaevo-security-stage-48c1664d38f4.auth.us-west-2.amazoncognito.com/oauth2/authorize, !If [IsDevelopment, https://kaevo-cloud-dev-295055514343-us-west-2.auth.us-west-2.amazoncognito.com/oauth2/authorize, ""]]]
+          NATIVE_OIDC_AUTHORIZATION_ENDPOINT: !If
+            - HasCognitoCustomDomain
+            - !Sub "https://${CognitoCustomDomainName}/oauth2/authorize"
+            - !If
+              - IsSecurityStage
+              - https://kaevo-security-stage-48c1664d38f4.auth.us-west-2.amazoncognito.com/oauth2/authorize
+              - !If
+                - IsProduction
+                - !Sub https://kaevo-cloud-production-${AWS::AccountId}-${AWS::Region}.auth.${AWS::Region}.amazoncognito.com/oauth2/authorize
+                - !If [IsDevelopment, https://kaevo-cloud-dev-295055514343-us-west-2.auth.us-west-2.amazoncognito.com/oauth2/authorize, ""]
           PUBLIC_API_BASE_URL: !If
             - HasApiCustomDomain
             - !Sub https://${ApiCustomDomainName}
@@ -2681,8 +2702,8 @@ Resources:
 
 Outputs:
   ApiUrl:
-    Description: Kaevo Cloud dev API URL
-    Value: !Sub "https://${KaevoCloudHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/dev"
+    Description: Environment-scoped Kaevo Cloud API URL
+    Value: !Sub "https://${KaevoCloudHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${EnvironmentName}"
 
   ProfileEventsTableName:
     Description: Kaevo profile events table
@@ -2773,6 +2794,41 @@ Outputs:
     Condition: IsDevelopment
     Description: Logout endpoint for normal Kaevo development managed login
     Value: https://kaevo-cloud-dev-295055514343-us-west-2.auth.us-west-2.amazoncognito.com/logout
+
+  ProductionNativeOidcClientId:
+    Condition: IsProduction
+    Description: Public native OIDC client ID for the isolated Production app contract
+    Value: !Ref KaevoSecurityStageNativeOidcClient
+
+  ProductionCognitoDomain:
+    Condition: IsProduction
+    Description: Cognito prefix domain for isolated Production managed login
+    Value: !Sub kaevo-cloud-production-${AWS::AccountId}-${AWS::Region}
+
+  ProductionAuthorizationEndpoint:
+    Condition: IsProduction
+    Description: Authorization endpoint for isolated Production managed login
+    Value: !Sub https://kaevo-cloud-production-${AWS::AccountId}-${AWS::Region}.auth.${AWS::Region}.amazoncognito.com/oauth2/authorize
+
+  ProductionTokenEndpoint:
+    Condition: IsProduction
+    Description: Token endpoint for isolated Production managed login
+    Value: !Sub https://kaevo-cloud-production-${AWS::AccountId}-${AWS::Region}.auth.${AWS::Region}.amazoncognito.com/oauth2/token
+
+  ProductionLogoutEndpoint:
+    Condition: IsProduction
+    Description: Logout endpoint for isolated Production managed login
+    Value: !Sub https://kaevo-cloud-production-${AWS::AccountId}-${AWS::Region}.auth.${AWS::Region}.amazoncognito.com/logout
+
+  ProductionCallbackUri:
+    Condition: IsProduction
+    Description: Exact registered callback URI for the isolated Production app
+    Value: kaevo://oauth/callback
+
+  ProductionLogoutUri:
+    Condition: IsProduction
+    Description: Exact registered logout URI for the isolated Production app
+    Value: kaevo://oauth/logout
 
   CustomCognitoDomain:
     Condition: HasCognitoCustomDomain

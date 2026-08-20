@@ -116,7 +116,7 @@ def test_source_template_defines_regional_root_api_mapping():
     assert mapping["Properties"] == {
         "ApiId": {"Ref": "KaevoCloudHttpApi"},
         "DomainName": {"Ref": "ApiCustomDomainName"},
-        "Stage": "dev",
+        "Stage": {"Ref": "EnvironmentName"},
     }
     assert "ApiMappingKey" not in mapping["Properties"]
 
