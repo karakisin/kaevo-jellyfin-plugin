@@ -53,6 +53,12 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("Nothing extra.", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoConfigForm { width:100%; max-width:none; margin:0; }", page, StringComparison.Ordinal);
         Assert.Contains("class=\"kaevo-toggle-row\"", page, StringComparison.Ordinal);
+        Assert.Contains("grid-template-columns:auto minmax(0,1fr)", page, StringComparison.Ordinal);
+        Assert.Contains("height:auto !important; min-height:0 !important", page, StringComparison.Ordinal);
+        Assert.Contains("class=\"fieldDescription kaevo-inline-help\"", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help", page, StringComparison.Ordinal);
+        Assert.Contains("white-space:normal !important; overflow-wrap:anywhere", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoConfigPage .kaevo-toggle-row + h3 { margin-top:1.5rem; }", page, StringComparison.Ordinal);
         Assert.Contains("class=\"fieldDescription kaevo-toggle-description\"", page, StringComparison.Ordinal);
         Assert.Contains("position:static !important", page, StringComparison.Ordinal);
         Assert.Contains("Settings → Connections → Jellyfin Plugins", page, StringComparison.Ordinal);

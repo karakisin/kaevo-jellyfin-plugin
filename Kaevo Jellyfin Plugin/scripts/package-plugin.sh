@@ -41,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Adds separate default-off consent for two-way Kaevo profile deletion, reports the signed permission to Kaevo Cloud, and blocks exact Jellyfin or Seerr user deletion unless the server administrator enables it. Media files remain unchanged.",
+  "changelog": "Fixes wrapped permission descriptions in the Kaevo plugin settings so helper text keeps its full height and no longer overlaps the next section heading.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",

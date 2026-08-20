@@ -109,6 +109,24 @@
             padding: 1rem; margin: 1rem 0; border: 1px solid rgba(255,255,255,.1);
             border-radius: 16px; background: rgba(9,11,14,.35);
         }
+        #KaevoConfigPage .kaevo-toggle-row {
+            display: grid !important; grid-template-columns: auto minmax(0, 1fr);
+            gap: .65rem; align-items: start !important; position: static !important;
+            height: auto !important; min-height: 0 !important; margin: 1rem 0 1.25rem;
+            color: var(--kaevo-text); line-height: 1.35;
+        }
+        #KaevoConfigPage .kaevo-toggle-row input[type="checkbox"] {
+            width: auto; flex: 0 0 auto; box-sizing: initial;
+        }
+        #KaevoConfigPage .kaevo-toggle-row > span { display: block !important; min-width: 0; }
+        #KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help {
+            position: static !important; display: block !important;
+            width: auto !important; max-width: none !important;
+            height: auto !important; min-height: 0 !important;
+            margin: .2rem 0 0 !important; line-height: 1.4 !important;
+            white-space: normal !important; overflow-wrap: anywhere;
+        }
+        #KaevoConfigPage .kaevo-toggle-row + h3 { margin-top: 1.5rem; }
         #KaevoConfigPage .kaevo-toggle-description {
             position: static !important; display: block; margin: -.55rem 0 1.5rem 3.1rem;
             max-width: calc(100% - 3.1rem); line-height: 1.45;
@@ -239,13 +257,23 @@
             #KaevoConfigPage .kaevo-provider-card .inputContainer,
             #KaevoConfigPage .kaevo-provider-card input:not([type="checkbox"]) { width:100%; box-sizing:border-box; }
             #KaevoConfigPage .kaevo-toggle-row {
-                display:flex; gap:.65em; align-items:flex-start; margin:1em 0;
+                display:grid !important; grid-template-columns:auto minmax(0,1fr);
+                gap:.65rem; align-items:start !important; position:static !important;
+                height:auto !important; min-height:0 !important; margin:1rem 0 1.25rem;
                 color:var(--kaevo-text); line-height:1.35;
             }
             #KaevoConfigPage .kaevo-toggle-row input[type="checkbox"] {
                 width:auto; flex:0 0 auto; box-sizing:initial;
             }
-            #KaevoConfigPage .kaevo-toggle-row > span { display:block; }
+            #KaevoConfigPage .kaevo-toggle-row > span { display:block !important; min-width:0; }
+            #KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help {
+                position:static !important; display:block !important;
+                width:auto !important; max-width:none !important;
+                height:auto !important; min-height:0 !important;
+                margin:.2rem 0 0 !important; line-height:1.4 !important;
+                white-space:normal !important; overflow-wrap:anywhere;
+            }
+            #KaevoConfigPage .kaevo-toggle-row + h3 { margin-top:1.5rem; }
             #KaevoConfigPage .kaevo-toggle-description {
                 position:static !important; display:block; margin:-.55rem 0 1.5rem 3.1rem;
                 max-width:calc(100% - 3.1rem); line-height:1.45;
@@ -308,14 +336,14 @@
                         <input id="RemoteMediaDeletionEnabled" type="checkbox" is="emby-checkbox" />
                         <span>
                             Allow Kaevo to delete media
-                            <span class="fieldDescription" style="display:block">Kaevo still requires an in-app confirmation before deleting a movie or episode.</span>
+                            <span class="fieldDescription kaevo-inline-help">Kaevo still requires an in-app confirmation before deleting a movie or episode.</span>
                         </span>
                     </label>
                     <label class="kaevo-toggle-row">
                         <input id="TwoWayProfileDeletionEnabled" type="checkbox" is="emby-checkbox" />
                         <span>
                             Allow two-way profile deletion
-                            <span class="fieldDescription" style="display:block">Allows an explicitly confirmed Kaevo deletion to remove the exact linked Seerr and Jellyfin users. Libraries and media files are never included.</span>
+                            <span class="fieldDescription kaevo-inline-help">Allows an explicitly confirmed Kaevo deletion to remove the exact linked Seerr and Jellyfin users. Libraries and media files are never included.</span>
                         </span>
                     </label>
                     <h3>Jellyfin Plugin Integrations</h3>
