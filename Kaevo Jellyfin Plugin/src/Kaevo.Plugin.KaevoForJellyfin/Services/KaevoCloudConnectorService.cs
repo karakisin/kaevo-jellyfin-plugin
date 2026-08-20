@@ -19,7 +19,7 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.3.2";
+    private static string PluginVersion => KaevoPlugin.BuildVersion;
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
@@ -663,6 +663,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
         if (operation == "seerr.delete_exact_bound_user")
         {
+            KaevoTwoWayProfileDeletionPolicy.Require(configuration);
             var jellyfinUserId = RequireBoundJellyfinUserId(
                 configuration,
                 request,
@@ -703,6 +704,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
         if (operation == "seerr.delete_orphaned_jellyfin_user")
         {
+            KaevoTwoWayProfileDeletionPolicy.Require(configuration);
             var requestedJellyfinUserId = RequireString(
                 parameters,
                 "jellyfin_user_id",
@@ -749,6 +751,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
         if (operation == "jellyfin.delete_exact_bound_user")
         {
+            KaevoTwoWayProfileDeletionPolicy.Require(configuration);
             var jellyfinUserId = RequireBoundJellyfinUserId(
                 configuration,
                 request,
@@ -813,6 +816,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
         if (operation == "jellyfin.delete_pending_exact_user")
         {
+            KaevoTwoWayProfileDeletionPolicy.Require(configuration);
             var requestedJellyfinUserId = RequireString(
                 parameters,
                 "jellyfin_user_id",
@@ -3761,7 +3765,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private static ProviderReachability ProviderStatus(bool ok, bool configured, string version, string? reason)
         => new(ok, configured, version, reason);
 
-    private static IReadOnlyDictionary<string, ProviderReachability> BuildProviderStatus(
+    internal static IReadOnlyDictionary<string, ProviderReachability> BuildProviderStatus(
         KaevoConnectorSecrets secrets,
         PluginConfiguration configuration,
         bool includeOptimizer)
@@ -3810,6 +3814,16 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             configuration.RemotePlaybackEnabled,
             PluginVersion,
             configuration.RemotePlaybackEnabled ? null : "disabled");
+        // This is an authenticated capability projection, not deletion
+        // authority. Cloud still resolves the exact canonical profile and
+        // connector edge, while provider deletion re-checks this setting at
+        // execution time. Publishing it here lets clients fail closed before
+        // they offer the destructive Everything scope.
+        result["profile_deletion"] = ProviderStatus(
+            configuration.TwoWayProfileDeletionEnabled,
+            true,
+            PluginVersion,
+            configuration.TwoWayProfileDeletionEnabled ? null : "disabled");
         return result;
     }
 
@@ -3873,7 +3887,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         bool IsPaused);
 
     private sealed record CommandResult(int Status, JsonElement Payload, bool Truncated);
-    private sealed record ProviderReachability(bool Ok, bool Configured, string Version, string? Reason);
+    internal sealed record ProviderReachability(bool Ok, bool Configured, string Version, string? Reason);
 
     [GeneratedRegex("^[0-9a-fA-F]{32}$", RegexOptions.CultureInvariant)]
     private static partial Regex ItemIdRegex();

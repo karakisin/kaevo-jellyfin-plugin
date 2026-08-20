@@ -11,6 +11,11 @@ public sealed class KaevoPlugin : BasePlugin<PluginConfiguration>, IHasWebPages
 {
     public static readonly Guid PluginId = Guid.Parse("80c77b84-7f2d-4b52-84c7-7dfe68cd95ae");
 
+    // Use the built assembly as the single source of truth for every version
+    // exposed by the plugin UI, API, registration, and signed heartbeat.
+    public static string BuildVersion =>
+        typeof(KaevoPlugin).Assembly.GetName().Version?.ToString(3) ?? "unknown";
+
     public KaevoPlugin(IApplicationPaths applicationPaths, IXmlSerializer xmlSerializer)
         : base(applicationPaths, xmlSerializer)
     {

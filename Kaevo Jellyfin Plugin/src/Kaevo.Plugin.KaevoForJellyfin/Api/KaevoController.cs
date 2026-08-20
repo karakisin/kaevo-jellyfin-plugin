@@ -20,7 +20,6 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
-    private const string PluginVersion = "0.2.96";
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey, bool RequiresUsernamePassword, string Category)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey, bool RequiresUsernamePassword, string Category)>(StringComparer.OrdinalIgnoreCase)
         {
@@ -121,7 +120,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         return Ok(new KaevoStatusResponse(
             "ok",
             "Kaevo",
-            PluginVersion,
+            KaevoPlugin.BuildVersion,
             configuration.CloudConnectorEnabled,
             cloud.Status,
             cloud.LastHeartbeatUtc,
@@ -134,6 +133,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             "hls-bounded-buffer-v3",
             configuration.OptimizerExecutionEnabled,
             KaevoProfileJellyfinBindingStore.ProfileBindingState(configuration),
+            configuration.TwoWayProfileDeletionEnabled,
             configuration.JellyfinPluginIntegrationsEnabled,
             _pluginManager.Plugins.Any(plugin =>
                 plugin.IsEnabledAndSupported
@@ -447,6 +447,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         configuration.RemoteArtworkEnabled = true;
         configuration.RemoteWritesEnabled = true;
         configuration.RemoteMediaDeletionEnabled = false;
+        configuration.TwoWayProfileDeletionEnabled = false;
         configuration.RemotePlaybackEnabled = false;
         configuration.OptimizerPlanningEnabled = true;
         configuration.OptimizerExecutionEnabled = false;
@@ -605,6 +606,12 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         if (configuration is null)
         {
             return StatusCode(503, new KaevoProfileJellyfinBindingResponse("unavailable"));
+        }
+
+        if (!KaevoTwoWayProfileDeletionPolicy.Allows(configuration))
+        {
+            return Conflict(new KaevoProfileJellyfinBindingResponse(
+                KaevoTwoWayProfileDeletionPolicy.DisabledState));
         }
 
         if (!KaevoProfileJellyfinBindingStore.TryUnbind(
@@ -768,6 +775,12 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         [FromBody] KaevoSeerrJellyfinUserDeletionRequest request,
         CancellationToken cancellationToken)
     {
+        if (!KaevoTwoWayProfileDeletionPolicy.Allows(KaevoPlugin.Instance?.Configuration))
+        {
+            return Conflict(new KaevoSeerrJellyfinUserDeletionResponse(
+                KaevoTwoWayProfileDeletionPolicy.DisabledState));
+        }
+
         if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
                 request.JellyfinUserId,
                 out var normalizedUserId)

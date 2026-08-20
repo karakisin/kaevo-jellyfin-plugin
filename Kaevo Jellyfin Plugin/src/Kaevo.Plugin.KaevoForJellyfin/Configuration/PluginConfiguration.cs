@@ -34,6 +34,11 @@ public sealed class PluginConfiguration : BasePluginConfiguration
 
     public bool RemoteMediaDeletionEnabled { get; set; }
 
+    // Separate, default-off server-administrator consent for deleting the
+    // exact Jellyfin and Seerr users linked to a Kaevo profile. This never
+    // authorizes media-file deletion.
+    public bool TwoWayProfileDeletionEnabled { get; set; }
+
     public bool RemotePlaybackEnabled { get; set; }
 
     // Explicit server-administrator consent for integrations that consume

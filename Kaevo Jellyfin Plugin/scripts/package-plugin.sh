@@ -41,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Makes household-member provisioning transactional by retaining exact provider receipts, rolling back Seerr before Jellyfin with authoritative absence verification, and enabling owner-confirmed exact-ID orphan repair.",
+  "changelog": "Adds separate default-off consent for two-way Kaevo profile deletion, reports the signed permission to Kaevo Cloud, and blocks exact Jellyfin or Seerr user deletion unless the server administrator enables it. Media files remain unchanged.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",

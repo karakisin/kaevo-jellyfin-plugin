@@ -311,6 +311,13 @@
                             <span class="fieldDescription" style="display:block">Kaevo still requires an in-app confirmation before deleting a movie or episode.</span>
                         </span>
                     </label>
+                    <label class="kaevo-toggle-row">
+                        <input id="TwoWayProfileDeletionEnabled" type="checkbox" is="emby-checkbox" />
+                        <span>
+                            Allow two-way profile deletion
+                            <span class="fieldDescription" style="display:block">Allows an explicitly confirmed Kaevo deletion to remove the exact linked Seerr and Jellyfin users. Libraries and media files are never included.</span>
+                        </span>
+                    </label>
                     <h3>Jellyfin Plugin Integrations</h3>
                     <label class="kaevo-toggle-row">
                         <input id="JellyfinPluginIntegrationsEnabled" type="checkbox" is="emby-checkbox" />
@@ -393,6 +400,7 @@
                 return {
                     snapshotItemLimit: Math.max(1, Math.min(100, value || 50)),
                     remoteMediaDeletionEnabled: document.querySelector('#RemoteMediaDeletionEnabled').checked,
+                    twoWayProfileDeletionEnabled: document.querySelector('#TwoWayProfileDeletionEnabled').checked,
                     jellyfinPluginIntegrationsEnabled: document.querySelector('#JellyfinPluginIntegrationsEnabled').checked
                 };
             }
@@ -403,6 +411,7 @@
                 var current = readConfigurationSettings();
                 return current.snapshotItemLimit === saved.snapshotItemLimit
                     && current.remoteMediaDeletionEnabled === saved.remoteMediaDeletionEnabled
+                    && current.twoWayProfileDeletionEnabled === saved.twoWayProfileDeletionEnabled
                     && current.jellyfinPluginIntegrationsEnabled === saved.jellyfinPluginIntegrationsEnabled;
             }
 
@@ -602,6 +611,7 @@
                 ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
                     document.querySelector('#SnapshotItemLimit').value = config.SnapshotItemLimit || 50;
                     document.querySelector('#RemoteMediaDeletionEnabled').checked = config.RemoteMediaDeletionEnabled === true;
+                    document.querySelector('#TwoWayProfileDeletionEnabled').checked = config.TwoWayProfileDeletionEnabled === true;
                     document.querySelector('#JellyfinPluginIntegrationsEnabled').checked = config.JellyfinPluginIntegrationsEnabled === true;
                     KaevoConfig.savedSettings = readConfigurationSettings();
                     refreshConfigurationSaveState();
@@ -752,6 +762,7 @@
                 ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
                     config.SnapshotItemLimit = settingsToSave.snapshotItemLimit;
                     config.RemoteMediaDeletionEnabled = settingsToSave.remoteMediaDeletionEnabled;
+                    config.TwoWayProfileDeletionEnabled = settingsToSave.twoWayProfileDeletionEnabled;
                     config.JellyfinPluginIntegrationsEnabled = settingsToSave.jellyfinPluginIntegrationsEnabled;
                     config.OptimizerExecutionEnabled = false;
                     return ApiClient.updatePluginConfiguration(KaevoConfig.pluginUniqueId, config);
