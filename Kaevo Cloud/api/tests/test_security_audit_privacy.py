@@ -236,11 +236,12 @@ def test_privileged_installation_mutation_fails_closed_before_write(monkeypatch)
     assert table.writes == []
 
 
-def test_iac_grants_exact_secret_read_to_only_two_audit_writers():
+def test_iac_grants_exact_secret_read_to_only_three_audit_runtimes():
     template = (pathlib.Path(__file__).resolve().parents[2] / "infra" / "template.yaml").read_text()
-    # V3 has its own exact-secret reader; it must not widen the audit-secret
-    # boundary, which remains limited to the two audit writers.
-    assert template.count("AUDIT_REFERENCE_SECRET_ARN: !Ref KaevoAuditReferenceSecret") == 2
+    # The primary and bounded remote APIs run the same handler under one role;
+    # Household Join is the third runtime and second role. V3 has its own
+    # exact-secret reader and must not widen this named audit boundary.
+    assert template.count("AUDIT_REFERENCE_SECRET_ARN: !Ref KaevoAuditReferenceSecret") == 3
     assert template.count("Resource: !Ref KaevoAuditReferenceSecret") == 2
     assert "DynamoDBCrudPolicy:\n            TableName: !Ref KaevoSecurityAuditTable" not in template
     assert "secretsmanager:PutSecretValue" not in template

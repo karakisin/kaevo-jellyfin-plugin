@@ -162,3 +162,31 @@ def test_optional_social_secret_permission_disappears_as_a_complete_statement():
     assert conditional[1]["Sid"] == "ReadConfiguredSocialIdentityProviderCredentials"
     assert conditional[1]["Action"] == ["secretsmanager:GetSecretValue"]
     assert conditional[2] == {"Ref": "AWS::NoValue"}
+
+
+def test_remote_api_routes_share_runtime_authority_without_sharing_lambda_policy_size():
+    resources = template()["Resources"]
+    primary = resources["KaevoCloudApiFunction"]["Properties"]
+    remote = resources["KaevoCloudRemoteApiFunction"]["Properties"]
+
+    assert remote["CodeUri"] == primary["CodeUri"]
+    assert remote["Handler"] == primary["Handler"]
+    assert remote["Timeout"] == primary["Timeout"]
+    assert remote["Environment"] == primary["Environment"]
+    assert remote["Role"] == {"Fn::GetAtt": "KaevoCloudApiFunctionRole.Arn"}
+
+    expected_remote_events = {
+        "CreateConnectorRelayTicket",
+        "RemoteRoutes",
+        "RemoteRequestCreate",
+        "RemoteCommandCreate",
+        "RemoteRequestClaim",
+        "CreatePlaybackGrant",
+        "RemoteRequestGet",
+        "RemoteRequestComplete",
+        "RemoteRequestFail",
+        "RemoteImageProxy",
+    }
+    assert set(remote["Events"]) == expected_remote_events
+    assert expected_remote_events.isdisjoint(primary["Events"])
+    assert all(event["Type"] == "HttpApi" for event in remote["Events"].values())

@@ -1934,19 +1934,77 @@ Resources:
             Auth:
               Authorizer: KaevoOwnerAuthorizer
 
-        CreateConnectorRelayTicket:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v1/home-connectors/{connectorId}/relay-ticket
-            Method: POST
-
         HomeConnectorStatus:
           Type: HttpApi
           Properties:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v1/home-connectors/status
             Method: GET
+
+  # SAM synthesizes one Lambda resource-policy statement for every HttpApi
+  # event. The shared API reached Lambda's 20,480-byte resource-policy limit
+  # before a brand-new production stack could finish creating. Keep the exact
+  # same handler, environment, execution role, routes, and authorization while
+  # assigning the bounded remote/playback surface to a second function. This
+  # leaves durable policy headroom on both Lambda resources.
+  KaevoCloudRemoteApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-remote-api
+      CodeUri: ../api/src/
+      Handler: handler.lambda_handler
+      Timeout: 30
+      Role: !GetAtt KaevoCloudApiFunctionRole.Arn
+      Environment:
+        Variables:
+          KAEVO_ENV: !Ref EnvironmentName
+          DEV_API_KEY: !If [IsProduction, "", !Ref DevApiKey]
+          PROFILE_EVENTS_TABLE: !Ref KaevoProfileEventsTable
+          PROFILE_SETTINGS_TABLE: !Ref KaevoProfileSettingsTable
+          DEVICES_TABLE: !Ref KaevoDevicesTable
+          ENTITLEMENTS_TABLE: !Ref KaevoEntitlementsTable
+          HOME_CONNECTORS_TABLE: !Ref KaevoHomeConnectorsTable
+          REMOTE_REQUESTS_TABLE: !Ref KaevoRemoteRequestsTable
+          BINDING_OPERATIONS_TABLE: !Ref KaevoBindingOperationsTable
+          PROFILE_BINDING_TOMBSTONES_TABLE: !Ref KaevoProfileBindingTombstonesTable
+          REMOTE_PAYLOADS_BUCKET: !Ref KaevoRemotePayloadsBucket
+          PROFILE_AVATARS_BUCKET: !Ref KaevoProfileAvatarsBucket
+          APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
+          ACCOUNTS_TABLE: !Ref KaevoAccountsTable
+          AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable
+          HOUSEHOLD_MEMBERSHIPS_TABLE: !Ref KaevoHouseholdMembershipsTable
+          PROFILES_TABLE: !Ref KaevoProfilesTable
+          PROFILE_BINDINGS_TABLE: !Ref KaevoProfileBindingsTable
+          PROFILE_MAPPINGS_TABLE: !Ref KaevoProfileMappingsTable
+          PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
+          IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
+          IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
+          IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
+          HOUSEHOLD_INVITATIONS_TABLE: !Ref KaevoHouseholdInvitationsTable
+          GUEST_PASSES_TABLE: !Ref KaevoGuestPassesTable
+          HOUSEHOLD_JOIN_TRANSACTIONS_TABLE: !Ref KaevoHouseholdJoinTransactionsTable
+          INSTALLATIONS_TABLE: !Ref KaevoInstallationsTable
+          SECURITY_AUDIT_TABLE: !Ref KaevoSecurityAuditTable
+          AUDIT_REFERENCE_SECRET_ARN: !Ref KaevoAuditReferenceSecret
+          PAIRING_V3_AUTHORIZATION_SIGNING_SEED: !Sub '{{resolve:secretsmanager:${KaevoPairingV3AuthorizationSigningSecret}:SecretString}}'
+          PAIRING_V3_AUTHORIZATION_KEY_ID: !If [IsProduction, v3-production-20260820-1, v3-dev-20260722-1]
+          PLAYBACK_GRANT_SIGNING_KEY: !Ref PlaybackGrantSigningKey
+          PLAYBACK_RELAY_PUBLIC_URL: !Ref PlaybackRelayPublicUrl
+          EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
+          EXPECTED_MAIN_CLIENT_ID: !Ref KaevoUserPoolClient
+          EXPECTED_NATIVE_CLIENT_ID: !If [HasNativeOidc, !Ref KaevoSecurityStageNativeOidcClient, ""]
+          COGNITO_USER_POOL_ID: !Ref KaevoUserPool
+          GOOGLE_IDENTITY_PROVIDER_SECRET_ARN: !If [HasGoogleIdentityProvider, !Ref GoogleIdentityProviderSecretArn, ""]
+          APPLE_IDENTITY_PROVIDER_SECRET_ARN: !If [HasAppleIdentityProvider, !Ref AppleIdentityProviderSecretArn, ""]
+          SOCIAL_IDENTITY_LINK_CALLBACK_URL: !Ref SocialIdentityLinkCallbackUrl
+          PUBLIC_API_BASE_URL: !Ref PublicApiBaseUrl
+      Events:
+        CreateConnectorRelayTicket:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/{connectorId}/relay-ticket
+            Method: POST
 
         RemoteRoutes:
           Type: HttpApi
