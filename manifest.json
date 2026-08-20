@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.7.0",
+        "changelog": "Restores Jellyfin checkbox outlines by preserving each toggle row as the outline positioning anchor and isolating Kaevo text layout from Jellyfin's generated checkbox elements.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.7/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "d6e324819c2a57225844949fec85d4a0",
+        "timestamp": "2026-08-20T10:05:10Z"
+      },
+      {
         "version": "0.3.6.0",
         "changelog": "Restores Jellyfin checkbox controls and card spacing, and removes Lidarr, Readarr, Prowlarr, Bazarr, and Tdarr from supported Kaevo connections.",
         "targetAbi": "10.11.0.0",
