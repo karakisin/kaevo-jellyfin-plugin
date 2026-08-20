@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.8.0",
+        "changelog": "Reloads Jellyfin's saved plugin configuration before signed heartbeats and remote commands so two-way profile deletion status and enforcement update without a server restart.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.8/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "6315eb57009675ac5cceef56c28ea7aa",
+        "timestamp": "2026-08-20T10:23:53Z"
+      },
+      {
         "version": "0.3.7.0",
         "changelog": "Restores Jellyfin checkbox outlines by preserving each toggle row as the outline positioning anchor and isolating Kaevo text layout from Jellyfin's generated checkbox elements.",
         "targetAbi": "10.11.0.0",
