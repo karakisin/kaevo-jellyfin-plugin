@@ -1774,50 +1774,6 @@ Resources:
             Path: /v1/app-sessions/revoke
             Method: POST
 
-        StartHomeConnectorPairing:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v1/home-connectors/pairing/start
-            Method: POST
-            Auth:
-              Authorizer: KaevoOwnerAuthorizer
-
-        MintHomeConnectorPairingGrant:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v2/home-connectors/pairing/grants
-            Method: POST
-
-        StartHomeConnectorPairingWithGrant:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v2/home-connectors/pairing/start
-            Method: POST
-
-        IssueHomeConnectorPairingAuthorizationV3:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v3/home-connectors/pairing/authorizations
-            Method: POST
-
-        RedeemHomeConnectorPairingAuthorizationV3:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v3/home-connectors/pairing/redemptions
-            Method: POST
-
-        GetHomeConnectorPairingAttemptV3:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v3/home-connectors/pairing/attempts/{pairingAttemptId}
-            Method: POST
-
         HouseholdInvitations:
           Type: HttpApi
           Properties:
@@ -1904,43 +1860,6 @@ Resources:
             Auth:
               Authorizer: KaevoEnrollmentAuthorizer
 
-        ExchangeHomeConnectorPairing:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v1/home-connectors/pairing/exchange
-            Method: POST
-
-        RegisterHomeConnector:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v1/home-connectors/register
-            Method: POST
-
-        HeartbeatHomeConnector:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v1/home-connectors/{connectorId}/heartbeat
-            Method: POST
-
-        RevokeHomeConnector:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v1/home-connectors/{connectorId}/revoke
-            Method: POST
-            Auth:
-              Authorizer: KaevoOwnerAuthorizer
-
-        HomeConnectorStatus:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref KaevoCloudHttpApi
-            Path: /v1/home-connectors/status
-            Method: GET
-
   # SAM synthesizes one Lambda resource-policy statement for every HttpApi
   # event. The shared API reached Lambda's 20,480-byte resource-policy limit
   # before a brand-new production stack could finish creating. Keep the exact
@@ -1999,6 +1918,87 @@ Resources:
           SOCIAL_IDENTITY_LINK_CALLBACK_URL: !Ref SocialIdentityLinkCallbackUrl
           PUBLIC_API_BASE_URL: !Ref PublicApiBaseUrl
       Events:
+        StartHomeConnectorPairing:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/pairing/start
+            Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
+
+        MintHomeConnectorPairingGrant:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/home-connectors/pairing/grants
+            Method: POST
+
+        StartHomeConnectorPairingWithGrant:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v2/home-connectors/pairing/start
+            Method: POST
+
+        IssueHomeConnectorPairingAuthorizationV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/home-connectors/pairing/authorizations
+            Method: POST
+
+        RedeemHomeConnectorPairingAuthorizationV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/home-connectors/pairing/redemptions
+            Method: POST
+
+        GetHomeConnectorPairingAttemptV3:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v3/home-connectors/pairing/attempts/{pairingAttemptId}
+            Method: POST
+
+        ExchangeHomeConnectorPairing:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/pairing/exchange
+            Method: POST
+
+        RegisterHomeConnector:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/register
+            Method: POST
+
+        HeartbeatHomeConnector:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/{connectorId}/heartbeat
+            Method: POST
+
+        RevokeHomeConnector:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/{connectorId}/revoke
+            Method: POST
+            Auth:
+              Authorizer: KaevoOwnerAuthorizer
+
+        HomeConnectorStatus:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/home-connectors/status
+            Method: GET
+
         CreateConnectorRelayTicket:
           Type: HttpApi
           Properties:

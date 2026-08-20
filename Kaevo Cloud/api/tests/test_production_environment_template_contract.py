@@ -176,6 +176,17 @@ def test_remote_api_routes_share_runtime_authority_without_sharing_lambda_policy
     assert remote["Role"] == {"Fn::GetAtt": "KaevoCloudApiFunctionRole.Arn"}
 
     expected_remote_events = {
+        "StartHomeConnectorPairing",
+        "MintHomeConnectorPairingGrant",
+        "StartHomeConnectorPairingWithGrant",
+        "IssueHomeConnectorPairingAuthorizationV3",
+        "RedeemHomeConnectorPairingAuthorizationV3",
+        "GetHomeConnectorPairingAttemptV3",
+        "ExchangeHomeConnectorPairing",
+        "RegisterHomeConnector",
+        "HeartbeatHomeConnector",
+        "RevokeHomeConnector",
+        "HomeConnectorStatus",
         "CreateConnectorRelayTicket",
         "RemoteRoutes",
         "RemoteRequestCreate",
@@ -190,3 +201,7 @@ def test_remote_api_routes_share_runtime_authority_without_sharing_lambda_policy
     assert set(remote["Events"]) == expected_remote_events
     assert expected_remote_events.isdisjoint(primary["Events"])
     assert all(event["Type"] == "HttpApi" for event in remote["Events"].values())
+    for event_name in ("StartHomeConnectorPairing", "RevokeHomeConnector"):
+        assert remote["Events"][event_name]["Properties"]["Auth"] == {
+            "Authorizer": "KaevoOwnerAuthorizer"
+        }
