@@ -56,11 +56,15 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("#KaevoConfigForm { width:100%; max-width:none; margin:0; }", page, StringComparison.Ordinal);
         Assert.Contains("class=\"kaevo-toggle-row\"", page, StringComparison.Ordinal);
         Assert.Contains("display:flex !important; flex-wrap:nowrap", page, StringComparison.Ordinal);
+        Assert.Contains("position:relative !important", page, StringComparison.Ordinal);
+        Assert.Contains(".kaevo-toggle-row > .kaevo-toggle-content", page, StringComparison.Ordinal);
         Assert.Contains("flex:1 1 auto; min-width:0", page, StringComparison.Ordinal);
         Assert.Contains("height:auto !important; min-height:0 !important", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoConfigPage #KaevoConfigForm > .kaevo-card + .kaevo-card { margin-top:1.5rem !important; }", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoConfigPage #KaevoConfigForm > .kaevo-warning + .kaevo-card { margin-top:1.5rem !important; }", page, StringComparison.Ordinal);
         Assert.Contains("class=\"fieldDescription kaevo-inline-help\"", page, StringComparison.Ordinal);
+        Assert.Contains("class=\"kaevo-toggle-content\"", page, StringComparison.Ordinal);
+        Assert.DoesNotContain(".kaevo-toggle-row > span {", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help", page, StringComparison.Ordinal);
         Assert.Contains("white-space:normal !important; overflow-wrap:anywhere", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoConfigPage .kaevo-toggle-row + h3 { margin-top:1.5rem; }", page, StringComparison.Ordinal);

@@ -113,14 +113,14 @@
         }
         #KaevoConfigPage .kaevo-toggle-row {
             display: flex !important; flex-wrap: nowrap; gap: .65rem;
-            align-items: flex-start !important; position: static !important;
+            align-items: flex-start !important; position: relative !important;
             height: auto !important; min-height: 0 !important; margin: 1rem 0 1.25rem;
             color: var(--kaevo-text); line-height: 1.35;
         }
         #KaevoConfigPage .kaevo-toggle-row input[type="checkbox"] {
             width: auto; flex: 0 0 auto; box-sizing: initial;
         }
-        #KaevoConfigPage .kaevo-toggle-row > span { display: block !important; flex: 1 1 auto; min-width: 0; }
+        #KaevoConfigPage .kaevo-toggle-row > .kaevo-toggle-content { display: block !important; flex: 1 1 auto; min-width: 0; }
         #KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help {
             position: static !important; display: block !important;
             width: auto !important; max-width: none !important;
@@ -262,14 +262,14 @@
             #KaevoConfigPage .kaevo-provider-card input:not([type="checkbox"]) { width:100%; box-sizing:border-box; }
             #KaevoConfigPage .kaevo-toggle-row {
                 display:flex !important; flex-wrap:nowrap; gap:.65rem;
-                align-items:flex-start !important; position:static !important;
+                align-items:flex-start !important; position:relative !important;
                 height:auto !important; min-height:0 !important; margin:1rem 0 1.25rem;
                 color:var(--kaevo-text); line-height:1.35;
             }
             #KaevoConfigPage .kaevo-toggle-row input[type="checkbox"] {
                 width:auto; flex:0 0 auto; box-sizing:initial;
             }
-            #KaevoConfigPage .kaevo-toggle-row > span { display:block !important; flex:1 1 auto; min-width:0; }
+            #KaevoConfigPage .kaevo-toggle-row > .kaevo-toggle-content { display:block !important; flex:1 1 auto; min-width:0; }
             #KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help {
                 position:static !important; display:block !important;
                 width:auto !important; max-width:none !important;
@@ -338,14 +338,14 @@
                     <h3>Media Management</h3>
                     <label class="kaevo-toggle-row">
                         <input id="RemoteMediaDeletionEnabled" type="checkbox" is="emby-checkbox" />
-                        <span>
+                        <span class="kaevo-toggle-content">
                             Allow Kaevo to delete media
                             <span class="fieldDescription kaevo-inline-help">Kaevo still requires an in-app confirmation before deleting a movie or episode.</span>
                         </span>
                     </label>
                     <label class="kaevo-toggle-row">
                         <input id="TwoWayProfileDeletionEnabled" type="checkbox" is="emby-checkbox" />
-                        <span>
+                        <span class="kaevo-toggle-content">
                             Allow two-way profile deletion
                             <span class="fieldDescription kaevo-inline-help">Allows an explicitly confirmed Kaevo deletion to remove the exact linked Seerr and Jellyfin users. Libraries and media files are never included.</span>
                         </span>
@@ -353,7 +353,7 @@
                     <h3>Jellyfin Plugin Integrations</h3>
                     <label class="kaevo-toggle-row">
                         <input id="JellyfinPluginIntegrationsEnabled" type="checkbox" is="emby-checkbox" />
-                        <span>Enable Jellyfin Plugin Integrations</span>
+                        <span class="kaevo-toggle-content">Enable Jellyfin Plugin Integrations</span>
                     </label>
                     <p class="fieldDescription kaevo-toggle-description">
                         Allows Kaevo to use supported capabilities from installed Jellyfin plugins. Plugins are installed and configured by a Jellyfin administrator.
@@ -618,7 +618,7 @@
                         + '<div class="fieldDescription">Status: <strong id="KaevoProvider-' + provider.Provider + '-status">'
                         + (connected ? 'Connected' : provider.Configured ? 'Off' : 'Not Connected') + '</strong></div>'
                         + '<label class="kaevo-toggle-row"><input id="KaevoProvider-' + provider.Provider + '-enabled" type="checkbox" is="emby-checkbox" '
-                        + (provider.Enabled ? 'checked' : '') + ' /><span>Use ' + provider.DisplayName + '</span></label>'
+                        + (provider.Enabled ? 'checked' : '') + ' /><span class="kaevo-toggle-content">Use ' + provider.DisplayName + '</span></label>'
                         + '<div class="inputContainer"><label class="inputLabel inputLabelUnfocused">Local address</label>'
                         + '<input id="KaevoProvider-' + provider.Provider + '-url" type="url" is="emby-input" value="' + escapeHtml(provider.BaseUrl) + '" placeholder="http://192.168.1.10:port" /></div>'
                         + keyField

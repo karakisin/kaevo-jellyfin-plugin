@@ -41,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Restores Jellyfin checkbox controls and card spacing, and removes Lidarr, Readarr, Prowlarr, Bazarr, and Tdarr from supported Kaevo connections.",
+  "changelog": "Restores Jellyfin checkbox outlines by preserving each toggle row as the outline positioning anchor and isolating Kaevo text layout from Jellyfin's generated checkbox elements.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
