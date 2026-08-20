@@ -1545,13 +1545,16 @@ Resources:
                 - cognito-idp:AdminLinkProviderForUser
                 - cognito-idp:AdminDeleteUser
               Resource: !GetAtt KaevoUserPool.Arn
-            - Sid: ReadConfiguredSocialIdentityProviderCredentials
-              Effect: Allow
-              Action:
-                - secretsmanager:GetSecretValue
-              Resource:
-                - !If [HasGoogleIdentityProvider, !Ref GoogleIdentityProviderSecretArn, !Ref AWS::NoValue]
-                - !If [HasAppleIdentityProvider, !Ref AppleIdentityProviderSecretArn, !Ref AWS::NoValue]
+            - !If
+              - HasSocialIdentityProvider
+              - Sid: ReadConfiguredSocialIdentityProviderCredentials
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !If [HasGoogleIdentityProvider, !Ref GoogleIdentityProviderSecretArn, !Ref AWS::NoValue]
+                  - !If [HasAppleIdentityProvider, !Ref AppleIdentityProviderSecretArn, !Ref AWS::NoValue]
+              - !Ref AWS::NoValue
         - Statement:
             - Sid: ReadAndStoreBoundedRemoteResponses
               Effect: Allow

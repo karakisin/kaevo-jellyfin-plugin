@@ -147,3 +147,18 @@ def test_main_api_dynamodb_permissions_are_consolidated_without_broadening_resou
     assert "dynamodb:TransactWriteItems" not in crud["Action"]
     assert len(crud["Resource"]) == 44
     assert all("*" not in str(resource) or "/index/*" in str(resource) for resource in crud["Resource"])
+
+
+def test_optional_social_secret_permission_disappears_as_a_complete_statement():
+    policies = template()["Resources"]["KaevoCloudApiFunction"]["Properties"]["Policies"]
+    conditional = next(
+        statement["Fn::If"]
+        for policy in policies
+        for statement in policy.get("Statement", [])
+        if "Fn::If" in statement
+        and statement["Fn::If"][0] == "HasSocialIdentityProvider"
+    )
+
+    assert conditional[1]["Sid"] == "ReadConfiguredSocialIdentityProviderCredentials"
+    assert conditional[1]["Action"] == ["secretsmanager:GetSecretValue"]
+    assert conditional[2] == {"Ref": "AWS::NoValue"}
