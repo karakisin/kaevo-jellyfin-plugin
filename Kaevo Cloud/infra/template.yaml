@@ -173,7 +173,7 @@ Resources:
   KaevoProfileEventsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: kaevo-cloud-dev-profile-events
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-profile-events
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: profile_id
@@ -192,7 +192,7 @@ Resources:
   KaevoProfileSettingsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: kaevo-cloud-dev-profile-settings
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-profile-settings
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: profile_id
@@ -204,7 +204,7 @@ Resources:
   KaevoDevicesTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: kaevo-cloud-dev-devices
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-devices
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: device_id
@@ -228,7 +228,7 @@ Resources:
   KaevoEntitlementsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: kaevo-cloud-dev-entitlements
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-entitlements
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: profile_id
@@ -240,7 +240,7 @@ Resources:
   KaevoAppSessionsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: kaevo-cloud-dev-app-sessions
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-app-sessions
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: token_hash
@@ -710,7 +710,7 @@ Resources:
   KaevoHomeConnectorsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: kaevo-cloud-dev-home-connectors
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-home-connectors
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: connector_id
@@ -745,7 +745,7 @@ Resources:
   KaevoRemoteRequestsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: kaevo-cloud-dev-remote-requests
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-remote-requests
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: request_id
@@ -1406,7 +1406,7 @@ Resources:
           SECURITY_AUDIT_TABLE: !Ref KaevoSecurityAuditTable
           AUDIT_REFERENCE_SECRET_ARN: !Ref KaevoAuditReferenceSecret
           PAIRING_V3_AUTHORIZATION_SIGNING_SEED: !Sub '{{resolve:secretsmanager:${KaevoPairingV3AuthorizationSigningSecret}:SecretString}}'
-          PAIRING_V3_AUTHORIZATION_KEY_ID: v3-dev-20260722-1
+          PAIRING_V3_AUTHORIZATION_KEY_ID: !If [IsProduction, v3-production-20260820-1, v3-dev-20260722-1]
           PLAYBACK_GRANT_SIGNING_KEY: !Ref PlaybackGrantSigningKey
           PLAYBACK_RELAY_PUBLIC_URL: !Ref PlaybackRelayPublicUrl
           EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}

@@ -112,3 +112,21 @@ def test_lambda_public_origins_are_explicit_inputs_not_self_references():
     }
     assert "KaevoCloudHttpApi" not in str(api_environment)
     assert "KaevoCloudHttpApi" not in str(join_environment)
+
+
+def test_named_tables_and_pairing_key_are_environment_scoped():
+    data = template()
+    resources = data["Resources"]
+
+    named_tables = [
+        resource["Properties"]["TableName"]
+        for resource in resources.values()
+        if resource.get("Type") == "AWS::DynamoDB::Table"
+        and "TableName" in resource.get("Properties", {})
+    ]
+    assert named_tables
+    assert all("${EnvironmentName}" in str(name) for name in named_tables)
+
+    api_environment = resources["KaevoCloudApiFunction"]["Properties"]["Environment"]["Variables"]
+    key_id = api_environment["PAIRING_V3_AUTHORIZATION_KEY_ID"]["Fn::If"]
+    assert key_id == ["IsProduction", "v3-production-20260820-1", "v3-dev-20260722-1"]

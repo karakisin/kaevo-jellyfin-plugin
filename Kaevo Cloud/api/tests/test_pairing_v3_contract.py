@@ -479,7 +479,7 @@ def test_iac_scopes_the_v3_authorization_signing_secret_to_only_the_api_lambda()
     assert "PAIRING_V3_AUTHORIZATION_SIGNING_SEED" not in owner
     assert "ReadPairingV3AuthorizationSigningKey" not in owner
     assert "PAIRING_V3_AUTHORIZATION_SIGNING_SEED" in api
-    assert "PAIRING_V3_AUTHORIZATION_KEY_ID: v3-dev-20260722-1" in api
+    assert "PAIRING_V3_AUTHORIZATION_KEY_ID: !If [IsProduction, v3-production-20260820-1, v3-dev-20260722-1]" in api
     assert "ReadPairingV3AuthorizationSigningKey" in api
     assert "Resource: !Ref KaevoPairingV3AuthorizationSigningSecret" in api
 
