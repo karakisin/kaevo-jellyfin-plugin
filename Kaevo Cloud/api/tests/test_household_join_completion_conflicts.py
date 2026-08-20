@@ -184,6 +184,35 @@ def test_cloud_seat_reservation_uses_only_exact_active_device_memberships(monkey
     assert update["ExpressionAttributeValues"][":baseline_count"] == 1
 
 
+def test_cloud_seat_ledger_uses_canonical_household_owner_not_joining_member(monkeypatch):
+    household = ExactTable({
+        "household_id": "household-1",
+        "account_id": "owner-account",
+        "state": "active",
+        "cloud_seat_profile_ids": {"owner-profile"},
+    })
+    monkeypatch.setattr(join, "households", household)
+    monkeypatch.setattr(join, "HOUSEHOLDS_TABLE", "safe-households")
+
+    owner_account_id, stored = join._household_cloud_seat_authority("household-1")
+    operation = join._household_seat_reservation_operation(
+        household_id="household-1",
+        account_id=owner_account_id,
+        profile_id="member-profile",
+        seat_limit=6,
+        existing_profile_ids={"owner-profile"},
+        stored_profile_ids=stored,
+        now_iso="2026-08-20T01:00:00Z",
+    )
+
+    assert owner_account_id == "owner-account"
+    assert owner_account_id != "joining-member-account"
+    assert household.calls == [{"household_id": "household-1"}]
+    values = operation["transaction"]["Update"]["ExpressionAttributeValues"]
+    assert values[":account_id"] == "owner-account"
+    assert values[":reservation"] == {"member-profile"}
+
+
 def test_cloud_seat_reservation_rejects_capacity_without_client_supplied_limit(monkeypatch):
     monkeypatch.setattr(join, "households", object())
     with pytest.raises(join.AccountFoundationError, match="family_seat_limit_reached"):

@@ -2098,6 +2098,14 @@ Resources:
       RouteKey: POST /v3/identity/account-deletion
       Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
 
+  KaevoIdentityV3AccountDeletionStatusRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: GET /v3/identity/account-deletions/{deletionAttemptId}
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
   KaevoIdentityV3ListProfileMappingsRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:

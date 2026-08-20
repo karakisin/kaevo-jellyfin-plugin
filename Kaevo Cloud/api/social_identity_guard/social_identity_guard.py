@@ -41,7 +41,16 @@ def guard_external_provider_signup(event: Mapping[str, Any], *, cognito: Any):
     # collision check below are the stable security boundary here.
     escaped = email.replace("\\", "\\\\").replace('"', '\\"')
     matches = cognito.list_users(UserPoolId=pool_id, Filter=f'email = "{escaped}"', Limit=2).get("Users") or []
-    if matches:
+    # During PreSignUp_ExternalProvider Cognito can expose the provisional
+    # federated user through ListUsers before this trigger returns.  That
+    # record is the exact provider subject currently being authorized, not a
+    # pre-existing account.  Exclude only that immutable username; any other
+    # user retaining the normalized email remains a fail-closed collision.
+    conflicts = [
+        match for match in matches
+        if str((match or {}).get("Username") or "") != username
+    ]
+    if conflicts:
         LOGGER.warning("social_identity_signup_denied reason=existing_account_link_required provider=%s", provider)
         raise ValueError("existing_account_link_required")
     LOGGER.info("social_identity_signup_allowed provider=%s", provider)

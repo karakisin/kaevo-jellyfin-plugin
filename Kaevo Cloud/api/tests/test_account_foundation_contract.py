@@ -863,6 +863,74 @@ def test_member_account_deletion_plan_is_exact_self_scope(monkeypatch):
     assert plan["profile_ids"] == ["profile-1"]
 
 
+def test_account_deletion_plan_includes_exact_pending_join_lookup(monkeypatch):
+    _tables, session, context = _prepare_account_deletion_context(monkeypatch)
+    installation_id = "installation.member"
+    installation_hash = handler.hashlib.sha256(installation_id.encode("utf-8")).hexdigest()
+    lookup_key = handler._account_deletion_pending_lookup_key(
+        "subject-1", installation_id,
+    )
+    assert lookup_key == "pending_" + handler.hashlib.sha256(
+        f"subject-1:{installation_hash}".encode("utf-8")
+    ).hexdigest()
+    monkeypatch.setattr(handler, "installations_table", Table("installation_id", [{
+        "installation_id": installation_id,
+        "principal_id": "subject-1",
+        "account_id": "acct_1",
+        "household_id": "household-1",
+    }]))
+    monkeypatch.setattr(
+        handler,
+        "household_join_transactions_table",
+        Table("join_resume_hash", [{
+            "join_resume_hash": lookup_key,
+            "entity_type": "HouseholdJoinPendingLookup",
+            "member_principal_id": "subject-1",
+            "account_id": "acct_1",
+            "household_id": "household-1",
+            "device_binding_hash": installation_hash,
+            "profile_id": "profile-1",
+        }]),
+    )
+
+    plan = handler._account_deletion_plan(session, context)
+
+    assert plan["installation_ids"] == [installation_id]
+    assert plan["pending_lookup_keys"] == [lookup_key]
+
+
+def test_account_deletion_plan_rejects_mismatched_pending_join_lookup(monkeypatch):
+    _tables, session, context = _prepare_account_deletion_context(monkeypatch)
+    installation_id = "installation.member"
+    lookup_key = handler._account_deletion_pending_lookup_key(
+        "subject-1", installation_id,
+    )
+    monkeypatch.setattr(handler, "installations_table", Table("installation_id", [{
+        "installation_id": installation_id,
+        "principal_id": "subject-1",
+        "account_id": "acct_1",
+        "household_id": "household-1",
+    }]))
+    monkeypatch.setattr(
+        handler,
+        "household_join_transactions_table",
+        Table("join_resume_hash", [{
+            "join_resume_hash": lookup_key,
+            "entity_type": "HouseholdJoinPendingLookup",
+            "member_principal_id": "subject-1",
+            "account_id": "another-account",
+            "household_id": "household-1",
+            "device_binding_hash": handler.hashlib.sha256(
+                installation_id.encode("utf-8")
+            ).hexdigest(),
+            "profile_id": "profile-1",
+        }]),
+    )
+
+    with pytest.raises(AccountFoundationError, match="account_deletion_authority_conflict"):
+        handler._account_deletion_plan(session, context)
+
+
 def test_member_cloud_seat_release_uses_exact_household_not_owner_account(monkeypatch):
     calls = []
 
@@ -898,6 +966,7 @@ def test_main_api_account_deletion_execution_budget_is_thirty_seconds():
     )[0]
 
     assert "      Timeout: 30" in main_api
+    assert "RouteKey: GET /v3/identity/account-deletions/{deletionAttemptId}" in template
 
 
 def test_account_deletion_success_returns_only_a_verified_terminal_receipt(monkeypatch):
@@ -917,6 +986,14 @@ def test_account_deletion_success_returns_only_a_verified_terminal_receipt(monke
         "principals_table", "accounts_table", "identity_profiles_table",
     ):
         monkeypatch.setattr(handler, name, records)
+    lookup_key = "pending_" + "a" * 64
+    pending_lookups = Table("join_resume_hash", [{
+        "join_resume_hash": lookup_key,
+        "entity_type": "HouseholdJoinPendingLookup",
+    }])
+    monkeypatch.setattr(
+        handler, "household_join_transactions_table", pending_lookups,
+    )
     monkeypatch.setattr(handler, "_delete_cognito_account", lambda _subject: None)
     monkeypatch.setattr(handler, "_execute_canonical_profile_deletion", lambda *_args, **_kwargs: None)
     audit = []
@@ -937,6 +1014,7 @@ def test_account_deletion_success_returns_only_a_verified_terminal_receipt(monke
             "is_owner": False,
             "graphs": {"profile-1": {}},
             "auth_identities": [],
+            "pending_lookup_keys": [lookup_key],
         },
     )
     receipt = json.loads(result["body"])
@@ -952,6 +1030,9 @@ def test_account_deletion_success_returns_only_a_verified_terminal_receipt(monke
         "jellyfin_identity_absence_confirmed": False,
         "subscription_cancellation_required": True,
     }
+    assert pending_lookups.get_item(
+        Key={"join_resume_hash": lookup_key}, ConsistentRead=True,
+    ) == {}
     assert len(audit) == 1
 
 
@@ -980,6 +1061,76 @@ def test_account_deletion_route_rejects_client_authority_and_requires_exact_conf
     assert result["statusCode"] == 400
     assert json.loads(result["body"])["state"] == "account_deletion_confirmation_required"
     assert invoked == []
+
+
+def test_account_deletion_attempt_cannot_cross_account_or_subject(monkeypatch):
+    _prepare_account_deletion_context(monkeypatch)
+    session = protected_session()
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: session)
+    monkeypatch.setattr(handler, "COGNITO_USER_POOL_ID", "pool-1")
+    monkeypatch.setattr(handler, "commit_security_audit", lambda *_args, **_kwargs: None)
+    attempt_id = "del_0123456789abcdef0123456789abcdef"
+    receipt = {
+        "token_hash": handler._account_deletion_receipt_key(attempt_id),
+        "record_type": "account_deletion_receipt",
+        "deletion_attempt_id": attempt_id,
+        "account_id": "another-account",
+        "principal_id": "another-subject",
+        "state": "in_progress",
+        "updated_at_epoch": handler.epoch_now(),
+    }
+    monkeypatch.setattr(handler, "app_sessions_table", Table("token_hash", [receipt]))
+    for name in (
+        "installations_table", "household_invitations_table",
+        "household_join_transactions_table", "events_table",
+        "profile_settings_table", "entitlements_table", "devices_table",
+        "security_audit_table", "guest_passes_table", "home_connectors_table",
+        "profile_binding_tombstones_table",
+    ):
+        if getattr(handler, name) is None:
+            monkeypatch.setattr(handler, name, Table("id", []))
+
+    result = handler.delete_account_v3({"body": json.dumps({
+        "explicit_confirmation": True,
+        "delete_linked_provider_accounts": False,
+        "deletion_attempt_id": attempt_id,
+    })})
+
+    assert result["statusCode"] == 409
+    assert json.loads(result["body"])["state"] == "account_deletion_attempt_conflict"
+
+
+def test_account_deletion_status_exposes_only_terminal_receipt(monkeypatch):
+    attempt_id = "del_0123456789abcdef0123456789abcdef"
+    receipt = {
+        "token_hash": handler._account_deletion_receipt_key(attempt_id),
+        "record_type": "account_deletion_receipt",
+        "deletion_attempt_id": attempt_id,
+        "account_id": "private-account",
+        "principal_id": "private-subject",
+        "household_id": "private-household",
+        "state": "completed",
+        "deletion_scope": "member",
+        "session_revoked": True,
+        "provider_accounts_preserved": True,
+        "provider_deletion_requested": False,
+        "seerr_identity_absence_confirmed": False,
+        "jellyfin_identity_absence_confirmed": False,
+        "subscription_cancellation_required": True,
+    }
+    monkeypatch.setattr(handler, "app_sessions_table", Table("token_hash", [receipt]))
+
+    result = handler.account_deletion_status_v3(
+        {}, f"/v3/identity/account-deletions/{attempt_id}",
+    )
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert body["state"] == "account_deleted"
+    assert body["deletion_attempt_id"] == attempt_id
+    assert "account_id" not in body
+    assert "principal_id" not in body
+    assert "household_id" not in body
 
 
 def test_account_deletion_provider_cleanup_is_exact_and_seerr_first(monkeypatch):
@@ -1058,9 +1209,18 @@ def test_account_deletion_uses_exact_cognito_subject(monkeypatch):
             ("resolve", user_pool_id, subject),
         ) or "cognito-username",
     )
-    client = type("Cognito", (), {
-        "admin_delete_user": lambda _self, **kwargs: calls.append(("delete", kwargs)),
-    })()
+    class Cognito:
+        def admin_delete_user(self, **kwargs):
+            calls.append(("delete", kwargs))
+
+        def admin_get_user(self, **kwargs):
+            calls.append(("readback", kwargs))
+            raise ClientError(
+                {"Error": {"Code": "UserNotFoundException"}},
+                "AdminGetUser",
+            )
+
+    client = Cognito()
     monkeypatch.setattr(handler, "cognito_client", client)
 
     handler._delete_cognito_account("exact-subject")
@@ -1068,7 +1228,27 @@ def test_account_deletion_uses_exact_cognito_subject(monkeypatch):
     assert calls == [
         ("resolve", "pool-1", "exact-subject"),
         ("delete", {"UserPoolId": "pool-1", "Username": "cognito-username"}),
+        ("readback", {"UserPoolId": "pool-1", "Username": "cognito-username"}),
     ]
+
+
+def test_account_deletion_retry_accepts_exact_cognito_subject_already_absent(monkeypatch):
+    monkeypatch.setattr(handler, "COGNITO_USER_POOL_ID", "pool-1")
+    monkeypatch.setattr(
+        handler,
+        "resolve_cognito_username",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            handler.SocialIdentityError("existing_account_not_found", 409)
+        ),
+    )
+    client = type("Cognito", (), {
+        "admin_delete_user": lambda *_args, **_kwargs: pytest.fail(
+            "An already absent exact subject must not be deleted again"
+        ),
+    })()
+    monkeypatch.setattr(handler, "cognito_client", client)
+
+    handler._delete_cognito_account("exact-subject")
 
 
 def test_membership_migration_audit_is_privacy_safe_and_dpop_boundary_remains_required(monkeypatch):
@@ -1255,6 +1435,9 @@ def test_identity_me_exposes_only_the_exact_normalized_self_profile_for_replacem
         "parental_controls": None,
         "switch_protection": "not_configured",
         "allowed_viewing_profile_ids": ["profile-1"],
+        "jellyfin_binding_status": "not_linked",
+        "seerr_binding_status": "not_linked",
+        "provider_deletion_status": "unavailable",
     }]
 
     # The exact profile edge is mandatory: a stale or unrelated pointer is
@@ -1287,8 +1470,13 @@ def test_identity_me_exposes_only_exact_self_seerr_binding(monkeypatch):
     identity_profile = handler.identity_profiles_table.items["profile-1"]
     identity_profile.update({
         "display_name": "Owner",
+        "jellyfin_binding_state": "active",
+        "jellyfin_user_id": "0123456789abcdef0123456789abcdef",
+        "jellyfin_connector_id": "connector-1",
         "seerr_binding_state": "active",
+        "seerr_jellyfin_user_id": "0123456789abcdef0123456789abcdef",
         "seerr_user_id": "42",
+        "seerr_connector_id": "connector-1",
     })
 
     response = handler.identity_me_v3({}, verified_session=session)
@@ -1299,10 +1487,83 @@ def test_identity_me_exposes_only_exact_self_seerr_binding(monkeypatch):
     assert self_access[0]["profile_id"] == "profile-1"
     assert self_access[0]["is_self"] is True
     assert self_access[0]["seerr_user_id"] == "42"
+    assert self_access[0]["jellyfin_binding_status"] == "linked"
+    assert self_access[0]["seerr_binding_status"] == "linked"
 
     identity_profile["seerr_binding_state"] = "inactive"
     response = handler.identity_me_v3({}, verified_session=session)
     assert "seerr_user_id" not in json.loads(response["body"])["profile_access"][0]
+    assert json.loads(response["body"])["profile_access"][0]["seerr_binding_status"] == "needs_review"
+
+
+@pytest.mark.parametrize(("enabled", "expected"), [
+    (True, "enabled"),
+    (False, "disabled"),
+])
+def test_identity_me_projects_signed_exact_connector_deletion_setting(
+    monkeypatch, enabled, expected,
+):
+    tables, _transaction_client, session = install_normalized_profile_context(monkeypatch)
+    membership_id = household_membership_id("acct_1", "household-1")
+    tables["household-memberships"].items[("household-1", membership_id)]["profile_id"] = "profile-1"
+    identity_profile = handler.identity_profiles_table.items["profile-1"]
+    identity_profile.update({
+        "display_name": "Owner",
+        "jellyfin_binding_state": "active",
+        "jellyfin_user_id": "0123456789abcdef0123456789abcdef",
+        "jellyfin_connector_id": "connector-1",
+    })
+    connector = {
+        "connector_id": "connector-1",
+        "protocol_version": handler.PAIRING_V3_PROTOCOL,
+        "auth_state": "v3_active",
+        "state": "active",
+        "revoked": False,
+        "last_seen_epoch": handler.epoch_now(),
+        "provider_status_json": json.dumps({
+            "profile_deletion": {
+                "ok": enabled,
+                "configured": True,
+                "version": "0.3.3",
+                "reason": None if enabled else "disabled",
+            },
+        }),
+    }
+    connector_table = Table("connector_id", [connector])
+    monkeypatch.setattr(handler, "home_connectors_table", connector_table)
+
+    result = handler.identity_me_v3({}, verified_session=session)
+
+    assert result["statusCode"] == 200
+    access = json.loads(result["body"])["profile_access"][0]
+    assert access["provider_deletion_status"] == expected
+
+
+def test_identity_me_fails_closed_for_stale_or_missing_deletion_capability(monkeypatch):
+    tables, _transaction_client, session = install_normalized_profile_context(monkeypatch)
+    membership_id = household_membership_id("acct_1", "household-1")
+    tables["household-memberships"].items[("household-1", membership_id)]["profile_id"] = "profile-1"
+    identity_profile = handler.identity_profiles_table.items["profile-1"]
+    identity_profile.update({
+        "display_name": "Owner",
+        "jellyfin_binding_state": "active",
+        "jellyfin_user_id": "0123456789abcdef0123456789abcdef",
+        "jellyfin_connector_id": "connector-1",
+    })
+    monkeypatch.setattr(handler, "home_connectors_table", Table("connector_id", [{
+        "connector_id": "connector-1",
+        "protocol_version": handler.PAIRING_V3_PROTOCOL,
+        "auth_state": "v3_active",
+        "state": "active",
+        "revoked": False,
+        "last_seen_epoch": 1,
+        "provider_status_json": "{}",
+    }]))
+
+    result = handler.identity_me_v3({}, verified_session=session)
+
+    assert result["statusCode"] == 200
+    assert json.loads(result["body"])["profile_access"][0]["provider_deletion_status"] == "unavailable"
 
 
 def test_owner_updates_exact_watching_targets_without_changing_switch_authority(monkeypatch):
@@ -2104,6 +2365,93 @@ def test_profile_avatar_read_allows_exact_switch_or_watching_target(monkeypatch,
 
     assert result["statusCode"] == 200
     assert json.loads(result["body"])["profile_id"] == "profile-target"
+
+
+@pytest.mark.parametrize("manager_role", ["owner", "admin"])
+def test_profile_avatar_read_allows_exact_household_manager_target(monkeypatch, manager_role):
+    source = {
+        "profile_id": "profile-manager",
+        "household_id": "household-1",
+        "profile_type": "adult",
+        "display_name": "Manager",
+        "state": "active",
+    }
+    target = {
+        "profile_id": "profile-target",
+        "household_id": "household-1",
+        "profile_type": "adult",
+        "display_name": "Target",
+        "state": "active",
+    }
+    canonical_role = "owner" if manager_role == "owner" else "adult"
+    session = {
+        "record_type": "access",
+        "principal_id": "subject-manager",
+        "account_id": "account-manager",
+        "profile_id": "profile-manager",
+        "household_id": "household-1",
+        "role": canonical_role,
+    }
+    principal = {
+        "principal_id": "subject-manager",
+        "account_id": "account-manager",
+        "household_id": "household-1",
+        "role": canonical_role,
+        "household_access_role": manager_role,
+        "state": "active",
+    }
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: session)
+    monkeypatch.setattr(handler, "identity_profiles_table", Table("profile_id", [source, target]))
+    monkeypatch.setattr(handler, "principals_table", Table("principal_id", [principal]))
+    monkeypatch.setattr(handler, "PROFILE_AVATARS_BUCKET", "private-profile-avatars")
+    monkeypatch.setattr(handler, "s3_client", ProfileAvatarStorage())
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _profile_id: ({"cloud_enabled": True}, None))
+
+    result = handler.get_profile_avatar({}, "/v1/profiles/profile-target/avatar")
+
+    assert result["statusCode"] == 200
+    assert json.loads(result["body"])["profile_id"] == "profile-target"
+
+
+def test_profile_avatar_read_denies_cross_household_manager_target(monkeypatch):
+    source = {
+        "profile_id": "profile-manager",
+        "household_id": "household-1",
+        "profile_type": "adult",
+        "display_name": "Manager",
+        "state": "active",
+    }
+    target = {
+        "profile_id": "profile-target",
+        "household_id": "household-2",
+        "profile_type": "adult",
+        "display_name": "Target",
+        "state": "active",
+    }
+    session = {
+        "record_type": "access",
+        "principal_id": "subject-manager",
+        "account_id": "account-manager",
+        "profile_id": "profile-manager",
+        "household_id": "household-1",
+        "role": "owner",
+    }
+    principal = {
+        "principal_id": "subject-manager",
+        "account_id": "account-manager",
+        "household_id": "household-1",
+        "role": "owner",
+        "household_access_role": "owner",
+        "state": "active",
+    }
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: session)
+    monkeypatch.setattr(handler, "identity_profiles_table", Table("profile_id", [source, target]))
+    monkeypatch.setattr(handler, "principals_table", Table("principal_id", [principal]))
+
+    result = handler.get_profile_avatar({}, "/v1/profiles/profile-target/avatar")
+
+    assert result["statusCode"] == 401
+    assert json.loads(result["body"])["state"] == "unauthorized"
 
 
 def test_profile_avatar_write_allows_exact_household_manager_target(monkeypatch):

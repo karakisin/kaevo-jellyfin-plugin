@@ -47,3 +47,17 @@ def test_profile_bootstrap_has_only_required_transactional_put_item_permissions(
         {"Fn::GetAtt": ["KaevoProfileBindingsTable", "Arn"]},
         {"Fn::GetAtt": ["KaevoProfileMappingsTable", "Arn"]},
     ]
+
+
+def test_identity_context_reads_only_the_exact_bound_connector_capability():
+    policy = _template_generator().identity_v3_data_policy()
+    statements = policy["Properties"]["PolicyDocument"]["Statement"]
+    statement = next(
+        item for item in statements
+        if item["Sid"] == "ReadExactBoundConnectorCapability"
+    )
+
+    assert statement["Action"] == ["dynamodb:GetItem"]
+    assert statement["Resource"] == {
+        "Fn::GetAtt": ["KaevoHomeConnectorsTable", "Arn"],
+    }

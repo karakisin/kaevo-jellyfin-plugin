@@ -149,6 +149,7 @@ def test_completion_boundary_rule_is_expired_at_exact_epoch(monkeypatch):
     monkeypatch.setattr(join, "accounts", object())
     monkeypatch.setattr(join, "auth_identities", object())
     monkeypatch.setattr(join, "household_memberships", object())
+    monkeypatch.setattr(join, "memberships", object())
     monkeypatch.setattr(join, "USER_POOL_ID", "pool")
     monkeypatch.setattr(join, "PUBLIC_API_BASE_URL", "https://api.example")
     monkeypatch.setattr(join, "_jwt_subject", lambda _event: "subject")

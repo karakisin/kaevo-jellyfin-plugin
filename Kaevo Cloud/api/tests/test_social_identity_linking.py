@@ -162,6 +162,32 @@ def test_external_signup_collision_is_blocked_but_never_linked_by_email(monkeypa
     assert social_identity_guard.guard_external_provider_signup(external_event(), cognito=GuardCognito([]))["userName"].startswith("Google_")
 
 
+def test_external_signup_excludes_only_the_exact_provisional_provider_subject(monkeypatch):
+    monkeypatch.setenv("EXPECTED_USER_POOL_ID", "pool-1")
+    event = external_event(provider="SignInWithApple")
+
+    accepted = social_identity_guard.guard_external_provider_signup(
+        event,
+        cognito=GuardCognito([{"Username": event["userName"]}]),
+    )
+
+    assert accepted is event
+
+
+def test_external_signup_still_denies_another_user_beside_the_provisional_subject(monkeypatch):
+    monkeypatch.setenv("EXPECTED_USER_POOL_ID", "pool-1")
+    event = external_event(provider="SignInWithApple")
+
+    with pytest.raises(ValueError, match="existing_account_link_required"):
+        social_identity_guard.guard_external_provider_signup(
+            event,
+            cognito=GuardCognito([
+                {"Username": event["userName"]},
+                {"Username": "another-immutable-cognito-user"},
+            ]),
+        )
+
+
 def test_google_external_signup_accepts_a_trusted_provider_email_without_mapped_verified_flag(monkeypatch):
     monkeypatch.setenv("EXPECTED_USER_POOL_ID", "pool-1")
     event = external_event(verified="")

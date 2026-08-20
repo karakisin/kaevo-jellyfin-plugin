@@ -315,10 +315,11 @@ def profile_avatar_read_authorized(event, profile_id):
     """Authorize one exact avatar through the protected profile-access graph.
 
     Reads may target an active profile that the authenticated canonical
-    profile may explicitly switch to or select for Who's Watching. This is the
-    same immutable-ID, same-household boundary used to materialize profile
-    presentation shells; a display name, local roster, or broad household scan
-    never grants access.
+    profile may explicitly switch to or select for Who's Watching. An active
+    household Owner or Admin may also read one exact active same-household
+    profile that the manager is authorized to edit. This is the same
+    immutable-ID boundary used by profile management; a display name, local
+    roster, or cross-household lookup never grants access.
     """
     if require_dev_key(event):
         return True
@@ -348,6 +349,26 @@ def profile_avatar_read_authorized(event, profile_id):
         )
     ):
         return False
+
+    manager, manager_error = household_manager_bound_session(
+        event,
+        verified_session=session,
+    )
+    if not manager_error and manager:
+        target_profile = identity_profiles_table.get_item(
+            Key={"profile_id": target_profile_id}, ConsistentRead=True,
+        ).get("Item")
+        if (
+            isinstance(target_profile, dict)
+            and target_profile.get("state") == "active"
+            and hmac.compare_digest(
+                str(target_profile.get("profile_id") or ""), target_profile_id,
+            )
+            and hmac.compare_digest(
+                str(target_profile.get("household_id") or ""), household_id,
+            )
+        ):
+            return True
 
     access = _authorized_switch_target_access(
         source_profile=source_profile,
@@ -1222,6 +1243,21 @@ def _normalized_self_profile_access(*, claims, resolved_role, normalized_members
         # Self is always a valid viewer. Explicit household audience grants
         # are added later after exact, same-household records are read back.
         "allowed_viewing_profile_ids": [profile_id],
+        # Provider identifiers stay server-private.  The authenticated user
+        # still needs an authoritative answer about whether their own Kaevo
+        # profile has complete immutable provider edges before choosing an
+        # account-deletion scope on a different device.
+        "jellyfin_binding_status": _public_provider_binding_status(
+            profile, provider="jellyfin",
+        ),
+        "seerr_binding_status": _public_provider_binding_status(
+            profile, provider="seerr",
+        ),
+        # This is a fail-closed projection of the authenticated connector's
+        # most recent signed heartbeat. It deliberately reveals no connector
+        # or provider identifier and never grants deletion authority; the
+        # destructive operation re-checks the plugin policy at execution.
+        "provider_deletion_status": _public_profile_deletion_status(profile),
     }
     # Return the exact Seerr provider edge only for the authenticated self
     # profile. Other accessible household profiles never expose their Seerr
@@ -1232,6 +1268,86 @@ def _normalized_self_profile_access(*, claims, resolved_role, normalized_members
         if seerr_user_id:
             self_access["seerr_user_id"] = seerr_user_id
     return [self_access]
+
+
+def _public_provider_binding_status(profile, *, provider):
+    """Project binding completeness without exposing an immutable provider ID."""
+    profile = profile if isinstance(profile, dict) else {}
+    jellyfin_user_id = _normalized_jellyfin_user_id(profile.get("jellyfin_user_id"))
+    jellyfin_connector_id = str(profile.get("jellyfin_connector_id") or "").strip()
+    if provider == "jellyfin":
+        state = str(profile.get("jellyfin_binding_state") or "").strip().lower()
+        evidence = any((state, jellyfin_user_id, jellyfin_connector_id))
+        if not evidence:
+            return "not_linked"
+        return (
+            "linked"
+            if state == "active" and jellyfin_user_id and jellyfin_connector_id
+            else "needs_review"
+        )
+
+    if provider != "seerr":
+        raise AccountFoundationError("provider_binding_projection_invalid")
+    state = str(profile.get("seerr_binding_state") or "").strip().lower()
+    seerr_user_id = _normalized_seerr_user_id(profile.get("seerr_user_id"))
+    seerr_jellyfin_user_id = _normalized_jellyfin_user_id(
+        profile.get("seerr_jellyfin_user_id")
+    )
+    seerr_connector_id = str(profile.get("seerr_connector_id") or "").strip()
+    evidence = any((state, seerr_user_id, seerr_jellyfin_user_id, seerr_connector_id))
+    if not evidence:
+        return "not_linked"
+    complete = (
+        state == "active"
+        and seerr_user_id
+        and jellyfin_user_id
+        and seerr_jellyfin_user_id
+        and hmac.compare_digest(seerr_jellyfin_user_id, jellyfin_user_id)
+        and seerr_connector_id
+        and jellyfin_connector_id
+        and hmac.compare_digest(seerr_connector_id, jellyfin_connector_id)
+    )
+    return "linked" if complete else "needs_review"
+
+
+def _public_profile_deletion_status(profile):
+    """Return enabled, disabled, or unavailable for the exact bound connector.
+
+    Missing, stale, malformed, retired, or pre-capability heartbeats are all
+    unavailable. This prevents a client from offering provider deletion based
+    on a local cache, mutable display name, or an older plugin version.
+    """
+    profile = profile if isinstance(profile, dict) else {}
+    connector_id = str(profile.get("jellyfin_connector_id") or "").strip()
+    if not connector_id or home_connectors_table is None:
+        return "unavailable"
+    try:
+        connector = home_connectors_table.get_item(
+            Key={"connector_id": connector_id}, ConsistentRead=True,
+        ).get("Item")
+    except ClientError:
+        return "unavailable"
+    if not isinstance(connector, dict):
+        return "unavailable"
+    if not hmac.compare_digest(str(connector.get("connector_id") or ""), connector_id):
+        return "unavailable"
+    if not (
+        connector.get("protocol_version") == PAIRING_V3_PROTOCOL
+        and connector.get("auth_state") == "v3_active"
+        and connector.get("state") == "active"
+        and not bool_value(connector.get("revoked"), False)
+        and connector_online_from_item(connector)
+    ):
+        return "unavailable"
+    provider_status = parse_json_field(connector.get("provider_status_json"), {})
+    deletion = provider_status.get("profile_deletion") if isinstance(provider_status, dict) else None
+    if not isinstance(deletion, dict) or deletion.get("configured") is not True:
+        return "unavailable"
+    if deletion.get("ok") is True and deletion.get("reason") in {None, ""}:
+        return "enabled"
+    if deletion.get("ok") is False and deletion.get("reason") == "disabled":
+        return "disabled"
+    return "unavailable"
 
 
 def _profile_switch_pin_configured(profile):
@@ -5318,6 +5434,65 @@ def _household_installation_records(household_id):
         query["ExclusiveStartKey"] = last_key
 
 
+def _account_deletion_pending_lookup_key(subject, installation_id):
+    """Derive the exact Household Join recovery pointer used by the join API."""
+    normalized_installation_id = str(installation_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{8,256}", normalized_installation_id):
+        return ""
+    installation_hash = hashlib.sha256(
+        normalized_installation_id.encode("utf-8")
+    ).hexdigest()
+    pointer_material = f"{subject}:{installation_hash}"
+    return "pending_" + hashlib.sha256(pointer_material.encode("utf-8")).hexdigest()
+
+
+def _account_deletion_pending_lookup_keys(
+    *, subject, account_id, household_id, profile_ids, installations,
+):
+    """Resolve and authorize exact pending join pointers before mutation."""
+    keys = []
+    allowed_profile_ids = set(profile_ids)
+    for installation in installations:
+        installation_id = str((installation or {}).get("installation_id") or "")
+        lookup_key = _account_deletion_pending_lookup_key(subject, installation_id)
+        if not lookup_key:
+            continue
+        exact = household_join_transactions_table.get_item(
+            Key={"join_resume_hash": lookup_key}, ConsistentRead=True,
+        ).get("Item")
+        if exact is None:
+            continue
+        if not isinstance(exact, dict):
+            raise AccountFoundationError("account_deletion_authority_conflict")
+        expected_installation_hash = hashlib.sha256(
+            installation_id.strip().encode("utf-8")
+        ).hexdigest()
+        pointer_profile_id = str(exact.get("profile_id") or "")
+        if (
+            exact.get("entity_type") != "HouseholdJoinPendingLookup"
+            or not hmac.compare_digest(
+                str(exact.get("join_resume_hash") or ""), lookup_key,
+            )
+            or not hmac.compare_digest(
+                str(exact.get("member_principal_id") or ""), subject,
+            )
+            or not hmac.compare_digest(
+                str(exact.get("account_id") or ""), account_id,
+            )
+            or not hmac.compare_digest(
+                str(exact.get("household_id") or ""), household_id,
+            )
+            or not hmac.compare_digest(
+                str(exact.get("device_binding_hash") or ""),
+                expected_installation_hash,
+            )
+            or (pointer_profile_id and pointer_profile_id not in allowed_profile_ids)
+        ):
+            raise AccountFoundationError("account_deletion_authority_conflict")
+        keys.append(lookup_key)
+    return keys
+
+
 def _profile_mapping_records_for_installations(installations, profile_id, household_id):
     records = []
     for installation in installations:
@@ -6082,6 +6257,14 @@ def _account_deletion_plan(session, context):
     }
     ordered_profile_ids = sorted(target for target in profile_ids if target != profile_id)
     ordered_profile_ids.append(profile_id)
+    installations = [
+        item for item in (
+            _household_installation_records(household_id)
+            if installations_table is not None else []
+        )
+        if str(item.get("principal_id") or "") == subject
+        and str(item.get("installation_id") or "")
+    ]
     return {
         "subject": subject,
         "account_id": account_id,
@@ -6091,6 +6274,16 @@ def _account_deletion_plan(session, context):
         "graphs": graphs,
         "profile_ids": ordered_profile_ids,
         "auth_identities": _account_auth_identity_records(account_id),
+        "installation_ids": [
+            str(item.get("installation_id") or "") for item in installations
+        ],
+        "pending_lookup_keys": _account_deletion_pending_lookup_keys(
+            subject=subject,
+            account_id=account_id,
+            household_id=household_id,
+            profile_ids=ordered_profile_ids,
+            installations=installations,
+        ) if household_join_transactions_table is not None else [],
     }
 
 
@@ -6210,13 +6403,109 @@ def _delete_cognito_account(subject):
             cognito_client, user_pool_id=COGNITO_USER_POOL_ID, subject=subject,
         )
         cognito_client.admin_delete_user(UserPoolId=COGNITO_USER_POOL_ID, Username=username)
+        try:
+            cognito_client.admin_get_user(
+                UserPoolId=COGNITO_USER_POOL_ID, Username=username,
+            )
+        except ClientError as readback_error:
+            readback_code = str(
+                (readback_error.response or {}).get("Error", {}).get("Code") or ""
+            )
+            if readback_code in {"UserNotFoundException", "ResourceNotFoundException"}:
+                return
+            raise
+        raise AccountFoundationError("account_deletion_cognito_absence_unconfirmed")
     except ClientError as error:
         code = str((error.response or {}).get("Error", {}).get("Code") or "")
         if code not in {"UserNotFoundException", "ResourceNotFoundException"}:
             raise
     except SocialIdentityError as error:
-        if error.reason not in {"identity_not_found", "identity_provider_user_not_found"}:
+        if error.reason not in {
+            "existing_account_not_found",
+            "identity_not_found",
+            "identity_provider_user_not_found",
+        }:
             raise
+
+
+def _account_deletion_attempt_id(value):
+    attempt_id = str(value or "").strip()
+    return attempt_id if re.fullmatch(r"del_[A-Za-z0-9_-]{32,128}", attempt_id) else ""
+
+
+def _account_deletion_receipt_key(attempt_id):
+    return f"account_deletion#{hashlib.sha256(attempt_id.encode('utf-8')).hexdigest()}"
+
+
+def _account_deletion_receipt_payload(receipt):
+    if not isinstance(receipt, dict) or receipt.get("state") != "completed":
+        return None
+    return {
+        "state": "account_deleted",
+        "deletion_scope": str(receipt.get("deletion_scope") or ""),
+        "session_revoked": receipt.get("session_revoked") is True,
+        "provider_accounts_preserved": receipt.get("provider_accounts_preserved") is True,
+        "provider_deletion_requested": receipt.get("provider_deletion_requested") is True,
+        "seerr_identity_absence_confirmed": receipt.get("seerr_identity_absence_confirmed") is True,
+        "jellyfin_identity_absence_confirmed": receipt.get("jellyfin_identity_absence_confirmed") is True,
+        "subscription_cancellation_required": receipt.get("subscription_cancellation_required") is True,
+        "deletion_attempt_id": str(receipt.get("deletion_attempt_id") or ""),
+    }
+
+
+def _account_deletion_receipt_for_plan(attempt_id, plan, *, state, payload=None, reason=""):
+    now = epoch_now()
+    item = {
+        "token_hash": _account_deletion_receipt_key(attempt_id),
+        "record_type": "account_deletion_receipt",
+        "deletion_attempt_id": attempt_id,
+        "account_id": plan["account_id"],
+        "principal_id": plan["subject"],
+        "household_id": plan["household_id"],
+        "profile_ids": list(plan["profile_ids"]),
+        "auth_identity_keys": [
+            str(identity.get("auth_identity_key") or "")
+            for identity in plan["auth_identities"]
+            if str(identity.get("auth_identity_key") or "")
+        ],
+        "state": state,
+        "updated_at": utc_now_iso(),
+        "updated_at_epoch": now,
+        "expires_at": now + (30 * 24 * 60 * 60),
+    }
+    if reason:
+        item["retry_reason"] = reason
+    if isinstance(payload, dict):
+        for key in (
+            "deletion_scope", "session_revoked", "provider_accounts_preserved",
+            "provider_deletion_requested", "seerr_identity_absence_confirmed",
+            "jellyfin_identity_absence_confirmed", "subscription_cancellation_required",
+        ):
+            if key in payload:
+                item[key] = payload[key]
+    return item
+
+
+def account_deletion_status_v3(event, path):
+    """Read a bearer-safe terminal receipt after the exact session is gone."""
+    attempt_id = _account_deletion_attempt_id(
+        path.removeprefix("/v3/identity/account-deletions/")
+    )
+    if not attempt_id or app_sessions_table is None:
+        return response(404, {"state": "account_deletion_receipt_not_found"})
+    receipt = app_sessions_table.get_item(
+        Key={"token_hash": _account_deletion_receipt_key(attempt_id)}, ConsistentRead=True,
+    ).get("Item")
+    if not isinstance(receipt, dict) or not hmac.compare_digest(
+        str(receipt.get("deletion_attempt_id") or ""), attempt_id,
+    ):
+        return response(404, {"state": "account_deletion_receipt_not_found"})
+    terminal = _account_deletion_receipt_payload(receipt)
+    if terminal is not None:
+        return response(200, terminal)
+    if receipt.get("state") == "retry_required":
+        return response(409, {"state": "account_deletion_retry_required", "retryable": True})
+    return response(202, {"state": "account_deletion_pending", "retryable": True})
 
 
 def _delete_household_account_artifacts(plan):
@@ -6269,19 +6558,76 @@ def _execute_account_deletion(event, session, context, plan):
 
     for identity in plan["auth_identities"]:
         auth_identities_table.delete_item(Key={"auth_identity_key": str(identity.get("auth_identity_key") or "")})
+    for lookup_key in plan.get("pending_lookup_keys") or []:
+        household_join_transactions_table.delete_item(
+            Key={"join_resume_hash": lookup_key},
+        )
     identity_memberships_table.delete_item(Key={"principal_id": plan["subject"]})
     principals_table.delete_item(Key={"principal_id": plan["subject"]})
     accounts_table.delete_item(Key={"account_id": plan["account_id"]})
 
-    if any((
-        accounts_table.get_item(Key={"account_id": plan["account_id"]}, ConsistentRead=True).get("Item") is not None,
-        principals_table.get_item(Key={"principal_id": plan["subject"]}, ConsistentRead=True).get("Item") is not None,
-        identity_profiles_table.get_item(Key={"profile_id": current_profile_id}, ConsistentRead=True).get("Item") is not None,
-        plan["is_owner"] and identity_households_table.get_item(
+    retained = [
+        accounts_table.get_item(
+            Key={"account_id": plan["account_id"]}, ConsistentRead=True,
+        ).get("Item"),
+        principals_table.get_item(
+            Key={"principal_id": plan["subject"]}, ConsistentRead=True,
+        ).get("Item"),
+        identity_memberships_table.get_item(
+            Key={"principal_id": plan["subject"]}, ConsistentRead=True,
+        ).get("Item"),
+    ]
+    retained.extend(
+        identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+        for profile_id in plan["profile_ids"]
+    )
+    retained.extend(
+        auth_identities_table.get_item(
+            Key={"auth_identity_key": str(identity.get("auth_identity_key") or "")},
+            ConsistentRead=True,
+        ).get("Item")
+        for identity in plan["auth_identities"]
+        if str(identity.get("auth_identity_key") or "")
+    )
+    retained.extend(
+        household_join_transactions_table.get_item(
+            Key={"join_resume_hash": lookup_key}, ConsistentRead=True,
+        ).get("Item")
+        for lookup_key in plan.get("pending_lookup_keys") or []
+    )
+    if plan["is_owner"]:
+        retained.append(identity_households_table.get_item(
             Key={"household_id": plan["household_id"]}, ConsistentRead=True,
-        ).get("Item") is not None,
-    )):
+        ).get("Item"))
+    if any(item is not None for item in retained):
         raise AccountFoundationError("account_deletion_absence_unconfirmed")
+
+    for installation_id in plan.get("installation_ids") or []:
+        installation = installations_table.get_item(
+            Key={"installation_id": installation_id}, ConsistentRead=True,
+        ).get("Item")
+        if not (
+            isinstance(installation, dict)
+            and installation.get("state") == "revoked"
+            and bool_value(installation.get("revoked"), False)
+            and hmac.compare_digest(
+                str(installation.get("principal_id") or ""), plan["subject"],
+            )
+        ):
+            raise AccountFoundationError("account_deletion_absence_unconfirmed")
+        sessions = app_sessions_table.query(
+            IndexName="installation_id-created_at_epoch-index",
+            KeyConditionExpression=Key("installation_id").eq(installation_id),
+        ).get("Items", [])
+        if any(
+            item.get("record_type") in {"access", "refresh"}
+            and item.get("state") == "active"
+            and not bool_value(item.get("revoked"), False)
+            for item in sessions
+        ):
+            raise AccountFoundationError("account_deletion_absence_unconfirmed")
 
     commit_security_audit(_profile_binding_audit(
         event, session, "account_deletion_completed", "success",
@@ -6322,18 +6668,82 @@ def delete_account_v3(event):
         not isinstance(body, dict)
         or not set(body).issubset({
             "explicit_confirmation", "delete_linked_provider_accounts",
+            "deletion_attempt_id",
         })
         or body.get("explicit_confirmation") is not True
         or not isinstance(body.get("delete_linked_provider_accounts", False), bool)
+        or not _account_deletion_attempt_id(body.get("deletion_attempt_id"))
     ):
         return _account_deletion_failure(
             event, session, "account_deletion_confirmation_required", status_code=400,
         )
+    attempt_id = _account_deletion_attempt_id(body.get("deletion_attempt_id"))
+    receipt_key = _account_deletion_receipt_key(attempt_id)
+    existing_receipt = app_sessions_table.get_item(
+        Key={"token_hash": receipt_key}, ConsistentRead=True,
+    ).get("Item")
+    if isinstance(existing_receipt, dict):
+        receipt_matches_session = (
+            existing_receipt.get("record_type") == "account_deletion_receipt"
+            and hmac.compare_digest(
+                str(existing_receipt.get("deletion_attempt_id") or ""), attempt_id,
+            )
+            and hmac.compare_digest(
+                str(existing_receipt.get("account_id") or ""),
+                str(session.get("account_id") or ""),
+            )
+            and hmac.compare_digest(
+                str(existing_receipt.get("principal_id") or ""),
+                str(session.get("principal_id") or ""),
+            )
+        )
+        if not receipt_matches_session:
+            return _account_deletion_failure(
+                event, session, "account_deletion_attempt_conflict", status_code=409,
+            )
+        terminal = _account_deletion_receipt_payload(existing_receipt)
+        if terminal is not None:
+            return response(200, terminal)
+        if (
+            existing_receipt.get("state") == "in_progress"
+            and int(existing_receipt.get("updated_at_epoch") or 0) > epoch_now() - 60
+        ):
+            return response(202, {
+                "state": "account_deletion_pending",
+                "deletion_attempt_id": attempt_id,
+                "retryable": True,
+            })
     context, failure = _normalized_profile_context(event, session)
     if failure:
         return failure
+    plan = None
     try:
         plan = _account_deletion_plan(session, context)
+        in_progress_receipt = _account_deletion_receipt_for_plan(
+            attempt_id, plan, state="in_progress",
+        )
+        if existing_receipt is None:
+            try:
+                app_sessions_table.put_item(
+                    Item=in_progress_receipt,
+                    ConditionExpression="attribute_not_exists(token_hash)",
+                )
+            except ClientError:
+                winner = app_sessions_table.get_item(
+                    Key={"token_hash": receipt_key}, ConsistentRead=True,
+                ).get("Item")
+                if not isinstance(winner, dict) or not all((
+                    hmac.compare_digest(str(winner.get("account_id") or ""), plan["account_id"]),
+                    hmac.compare_digest(str(winner.get("principal_id") or ""), plan["subject"]),
+                    hmac.compare_digest(str(winner.get("deletion_attempt_id") or ""), attempt_id),
+                )):
+                    raise AccountFoundationError("account_deletion_attempt_conflict")
+                terminal = _account_deletion_receipt_payload(winner)
+                if terminal is not None:
+                    return response(200, terminal)
+                app_sessions_table.put_item(Item=in_progress_receipt)
+        else:
+            app_sessions_table.put_item(Item=in_progress_receipt)
         delete_linked_providers = body.get("delete_linked_provider_accounts", False) is True
         if delete_linked_providers:
             provider_result = _execute_account_deletion_provider_cleanup(plan)
@@ -6344,10 +6754,25 @@ def delete_account_v3(event):
             plan["jellyfin_identity_absence_confirmed"] = bool(
                 provider_result.get("jellyfin_absence_confirmed")
             )
-        return _execute_account_deletion(event, session, context, plan)
+        deletion_response = _execute_account_deletion(event, session, context, plan)
+        deletion_payload = json.loads(deletion_response["body"])
+        deletion_payload["deletion_attempt_id"] = attempt_id
+        app_sessions_table.put_item(Item=_account_deletion_receipt_for_plan(
+            attempt_id, plan, state="completed", payload=deletion_payload,
+        ))
+        return response(200, deletion_payload)
     except AccountFoundationError as error:
+        if isinstance(plan, dict):
+            app_sessions_table.put_item(Item=_account_deletion_receipt_for_plan(
+                attempt_id, plan, state="retry_required", reason=error.reason,
+            ))
         return _account_deletion_failure(event, session, error.reason, status_code=409)
     except SocialIdentityError:
+        if isinstance(plan, dict):
+            app_sessions_table.put_item(Item=_account_deletion_receipt_for_plan(
+                attempt_id, plan, state="retry_required",
+                reason="account_deletion_retry_required",
+            ))
         return _account_deletion_failure(
             event, session, "account_deletion_retry_required", status_code=503,
         )
@@ -6356,6 +6781,10 @@ def delete_account_v3(event):
         state = "account_deletion_conflict" if code in {
             "ConditionalCheckFailedException", "TransactionCanceledException",
         } else "account_deletion_retry_required"
+        if isinstance(plan, dict):
+            app_sessions_table.put_item(Item=_account_deletion_receipt_for_plan(
+                attempt_id, plan, state="retry_required", reason=state,
+            ))
         return _account_deletion_failure(
             event, session, state, status_code=409 if state == "account_deletion_conflict" else 503,
         )
@@ -15471,6 +15900,7 @@ def lambda_handler(event, context):
                 "/v3/identity/jellyfin-binding-operations/{operationId}",
                 "/v3/identity/profiles/{profileId}/deletion",
                 "/v3/identity/account-deletion",
+                "/v3/identity/account-deletions/{deletionAttemptId}",
                 "/v3/identity/profile-mappings",
                 "/v3/identity/profile-mappings/preview",
                 "/v3/identity/profile-mappings/confirm",
@@ -15669,6 +16099,9 @@ def lambda_handler(event, context):
 
     if method == "POST" and path == "/v3/identity/account-deletion":
         return delete_account_v3(event)
+
+    if method == "GET" and path.startswith("/v3/identity/account-deletions/"):
+        return account_deletion_status_v3(event, path)
 
     if method == "GET" and path == "/v3/identity/profile-mappings":
         return list_profile_mappings_v3(event)

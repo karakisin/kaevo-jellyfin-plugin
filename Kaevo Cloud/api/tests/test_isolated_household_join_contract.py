@@ -600,6 +600,36 @@ def test_profile_setup_iam_allows_only_its_transactional_record_writes():
     assert "Resource: '*'" not in statement
 
 
+def test_profile_setup_deployment_binds_household_seat_storage_and_least_privilege_reads():
+    """Profile Setup must not deploy without its household seat authority."""
+    template = (Path(__file__).parents[2] / "infra" / "template.yaml").read_text()
+    role_start = template.index("KaevoHouseholdJoinFunctionRole:")
+    function_start = template.index("KaevoHouseholdJoinFunction:", role_start)
+    role = template[role_start:function_start]
+    function = template[function_start:template.index("KaevoHouseholdJoinIntegration:", function_start)]
+
+    assert "IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable" in function
+
+    read_start = role.index("Sid: ReadInvitationAndOnboardingAuthority")
+    read_end = role.index("Sid: ReadActiveHouseholdCloudSeats", read_start)
+    assert "KaevoIdentityHouseholdsTable.Arn" in role[read_start:read_end]
+
+    query_start = role.index("Sid: ReadActiveHouseholdCloudSeats")
+    query_end = role.index("Sid: AtomicallyAdvanceHouseholdJoinOnboarding", query_start)
+    query_statement = role[query_start:query_end]
+    assert "dynamodb:Query" in query_statement
+    assert "KaevoHouseholdMembershipsTable.Arn" in query_statement
+    assert "Resource: '*'" not in query_statement
+
+    reserve_start = role.index("Sid: ReserveHouseholdCloudSeatTransactionally")
+    reserve_end = role.index("Sid: ResolveAuthenticatedSubjectOnly", reserve_start)
+    reserve_statement = role[reserve_start:reserve_end]
+    assert "dynamodb:UpdateItem" in reserve_statement
+    assert "KaevoIdentityHouseholdsTable.Arn" in reserve_statement
+    assert "dynamodb:EnclosingOperation: TransactWriteItems" in reserve_statement
+    assert "Resource: '*'" not in reserve_statement
+
+
 def test_intent_first_client_targets_only_v3_completion_contracts():
     client = (Path(__file__).parents[4] / "iOS" / "iOS Kaevo v2" / "Cloud" / "KaevoCloudClient.swift").read_text()
     start = client.index("func completeHouseholdJoin(")

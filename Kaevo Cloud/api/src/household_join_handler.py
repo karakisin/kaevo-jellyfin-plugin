@@ -181,27 +181,34 @@ def _family_seat_limit(entitlement_item):
     return limit
 
 
-def _stored_household_cloud_seat_profile_ids(household_id, account_id):
-    """Read the exact seat ledger, if this household already has one."""
-    if households is None or not household_id or not account_id:
+def _household_cloud_seat_authority(household_id):
+    """Return the household owner's account and exact seat ledger, if present.
+
+    A joining member owns the new profile but never owns the household seat
+    ledger. The canonical household record is the sole authority for the
+    account ID used by the guarded ledger update.
+    """
+    if households is None or not household_id:
         raise AccountFoundationError("household_seat_storage_unavailable")
     household = households.get_item(
         Key={"household_id": household_id}, ConsistentRead=True,
     ).get("Item")
-    if not isinstance(household, dict) or not (
-        hmac.compare_digest(str(household.get("account_id") or ""), account_id)
-        and household.get("state") == "active"
+    owner_account_id = str((household or {}).get("account_id") or "")
+    if (
+        not isinstance(household, dict)
+        or household.get("state") != "active"
+        or not owner_account_id
     ):
         raise AccountFoundationError("household_seat_household_invalid")
     stored = household.get("cloud_seat_profile_ids")
     if stored is None:
-        return None
+        return owner_account_id, None
     if not isinstance(stored, (set, list, tuple)):
         raise AccountFoundationError("household_seat_ledger_invalid")
     profile_ids = {str(profile_id or "") for profile_id in stored}
     if not profile_ids or "" in profile_ids:
         raise AccountFoundationError("household_seat_ledger_invalid")
-    return profile_ids
+    return owner_account_id, profile_ids
 
 
 def _household_seat_reservation_operation(
@@ -2209,15 +2216,16 @@ def profile_setup(event):
         entitlement = {"profile_id": profile_id, "entitlements_json": str(owner_entitlement.get("entitlements_json") or "{}"), "created_at": created, "updated_at": created}
         if cloud_access_enabled:
             try:
+                household_owner_account_id, stored_seat_profile_ids = (
+                    _household_cloud_seat_authority(household_id)
+                )
                 seat_reservation = _household_seat_reservation_operation(
                     household_id=household_id,
-                    account_id=account_id,
+                    account_id=household_owner_account_id,
                     profile_id=profile_id,
                     seat_limit=_family_seat_limit(owner_entitlement),
                     existing_profile_ids=_active_cloud_seat_profile_ids(household_id),
-                    stored_profile_ids=_stored_household_cloud_seat_profile_ids(
-                        household_id, account_id,
-                    ),
+                    stored_profile_ids=stored_seat_profile_ids,
                     now_iso=created,
                 )
             except AccountFoundationError as error:

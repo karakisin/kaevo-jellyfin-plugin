@@ -220,6 +220,7 @@ def identity_v3_data_policy() -> dict:
                     {"Sid": "RecordDpopReplay", "Effect": "Allow", "Action": ["dynamodb:PutItem"], "Resource": get_att("KaevoAppSessionsTable")},
                     {"Sid": "ReadExistingIdentityGraph", "Effect": "Allow", "Action": ["dynamodb:GetItem"], "Resource": read_identity_graph},
                     {"Sid": "ReadNormalizedIdentity", "Effect": "Allow", "Action": ["dynamodb:GetItem"], "Resource": read_normalized},
+                    {"Sid": "ReadExactBoundConnectorCapability", "Effect": "Allow", "Action": ["dynamodb:GetItem"], "Resource": get_att("KaevoHomeConnectorsTable")},
                     {"Sid": "QueryAuthorizedIdentityIndexes", "Effect": "Allow", "Action": ["dynamodb:Query"], "Resource": query_resources},
                     {"Sid": "WriteExistingAccountMigrationRecords", "Effect": "Allow", "Action": ["dynamodb:PutItem"], "Resource": existing_account_migration_records},
                     {"Sid": "WriteHouseholdMembershipMigrationRecords", "Effect": "Allow", "Action": ["dynamodb:PutItem"], "Resource": household_membership_migration_records},
