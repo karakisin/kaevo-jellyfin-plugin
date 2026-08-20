@@ -54,6 +54,9 @@ def test_production_receives_an_isolated_api_stage_and_native_oidc_contract():
     assert data["Outputs"]["ApiUrl"]["Value"] == {
         "Fn::Sub": "https://${KaevoCloudHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${EnvironmentName}"
     }
+    assert data["Parameters"]["PublicApiBaseUrl"]["AllowedPattern"] == (
+        "^https://[^/?#]+(?:/[^?#]*)?$"
+    )
 
     native_client = data["Resources"]["KaevoSecurityStageNativeOidcClient"]
     assert native_client["Condition"] == "HasNativeOidc"
@@ -95,3 +98,17 @@ def test_custom_api_domain_may_target_dev_or_production_only_when_explicitly_sup
     assert {"Condition": "IsDevelopment"} in environment_gate
     assert {"Condition": "IsProduction"} in environment_gate
     assert {"Condition": "IsSecurityStage"} not in environment_gate
+
+
+def test_lambda_public_origins_are_explicit_inputs_not_self_references():
+    resources = template()["Resources"]
+    api_environment = resources["KaevoCloudApiFunction"]["Properties"]["Environment"]["Variables"]
+    join_environment = resources["KaevoHouseholdJoinFunction"]["Properties"]["Environment"]["Variables"]
+
+    assert api_environment["PUBLIC_API_BASE_URL"] == {"Ref": "PublicApiBaseUrl"}
+    assert join_environment["PUBLIC_API_BASE_URL"] == {"Ref": "PublicApiBaseUrl"}
+    assert join_environment["HOUSEHOLD_JOIN_AUTHORIZE_BASE_URL"] == {
+        "Fn::Sub": "${PublicApiBaseUrl}/v3/identity/household-joins/authorize"
+    }
+    assert "KaevoCloudHttpApi" not in str(api_environment)
+    assert "KaevoCloudHttpApi" not in str(join_environment)

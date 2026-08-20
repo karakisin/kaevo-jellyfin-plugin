@@ -25,6 +25,11 @@ Parameters:
     Default: ""
     Description: Public HTTPS origin of the separate long-lived Kaevo playback relay
 
+  PublicApiBaseUrl:
+    Type: String
+    AllowedPattern: '^https://[^/?#]+(?:/[^?#]*)?$'
+    Description: Exact public HTTPS origin for this environment; it must not contain a query or fragment
+
   EnableInstallationSessionIndex:
     Type: String
     Default: "false"
@@ -1411,10 +1416,10 @@ Resources:
           GOOGLE_IDENTITY_PROVIDER_SECRET_ARN: !If [HasGoogleIdentityProvider, !Ref GoogleIdentityProviderSecretArn, ""]
           APPLE_IDENTITY_PROVIDER_SECRET_ARN: !If [HasAppleIdentityProvider, !Ref AppleIdentityProviderSecretArn, ""]
           SOCIAL_IDENTITY_LINK_CALLBACK_URL: !Ref SocialIdentityLinkCallbackUrl
-          PUBLIC_API_BASE_URL: !If
-            - HasApiCustomDomain
-            - !Sub https://${ApiCustomDomainName}
-            - !Sub https://${KaevoCloudHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${EnvironmentName}
+          # This is an explicit deployment input rather than a reference to
+          # KaevoCloudHttpApi. Referencing the API from a function that the API
+          # integrates creates a circular dependency for a brand-new stack.
+          PUBLIC_API_BASE_URL: !Ref PublicApiBaseUrl
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref KaevoProfileEventsTable
@@ -2351,14 +2356,8 @@ Resources:
                 - IsProduction
                 - !Sub https://kaevo-cloud-production-${AWS::AccountId}-${AWS::Region}.auth.${AWS::Region}.amazoncognito.com/oauth2/authorize
                 - !If [IsDevelopment, https://kaevo-cloud-dev-295055514343-us-west-2.auth.us-west-2.amazoncognito.com/oauth2/authorize, ""]
-          PUBLIC_API_BASE_URL: !If
-            - HasApiCustomDomain
-            - !Sub https://${ApiCustomDomainName}
-            - !Sub https://${KaevoCloudHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${EnvironmentName}
-          HOUSEHOLD_JOIN_AUTHORIZE_BASE_URL: !If
-            - HasApiCustomDomain
-            - !Sub https://${ApiCustomDomainName}/v3/identity/household-joins/authorize
-            - !Sub https://${KaevoCloudHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${EnvironmentName}/v3/identity/household-joins/authorize
+          PUBLIC_API_BASE_URL: !Ref PublicApiBaseUrl
+          HOUSEHOLD_JOIN_AUTHORIZE_BASE_URL: !Sub ${PublicApiBaseUrl}/v3/identity/household-joins/authorize
   KaevoHouseholdJoinIntegration:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
