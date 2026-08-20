@@ -52,4 +52,25 @@ public sealed class TwoWayProfileDeletionPolicyTests
         Assert.True(status.Configured);
         Assert.Equal(expectedReason, status.Reason);
     }
+
+    [Fact]
+    public void SavedConfigurationReplacesTheConnectorStartupSnapshot()
+    {
+        var startup = new PluginConfiguration
+        {
+            TwoWayProfileDeletionEnabled = false
+        };
+        var saved = new PluginConfiguration
+        {
+            TwoWayProfileDeletionEnabled = true
+        };
+
+        var runtime = KaevoCloudConnectorService.SelectRuntimeConfiguration(startup, saved);
+
+        Assert.Same(saved, runtime);
+        Assert.True(KaevoTwoWayProfileDeletionPolicy.Allows(runtime));
+        Assert.Same(
+            startup,
+            KaevoCloudConnectorService.SelectRuntimeConfiguration(startup, null));
+    }
 }

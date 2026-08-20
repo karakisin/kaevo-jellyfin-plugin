@@ -317,19 +317,26 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         KaevoConnectorSecrets secrets,
         CancellationToken cancellationToken)
     {
+        // Jellyfin's generic plugin-configuration endpoint replaces the
+        // Configuration instance when an administrator saves this page. The
+        // long-running connector still owns the instance captured when it
+        // connected, so always project capabilities from the current saved
+        // instance. This keeps the signed heartbeat and destructive-command
+        // policy aligned without requiring a Jellyfin restart.
+        var runtimeConfiguration = RuntimeConfiguration(configuration);
         var response = await SendCloudAsync<ConnectorRegistrationResponse>(
-            configuration,
+            runtimeConfiguration,
             secrets,
             HttpMethod.Post,
-            $"/v1/home-connectors/{Uri.EscapeDataString(configuration.ConnectorId)}/heartbeat",
+            $"/v1/home-connectors/{Uri.EscapeDataString(runtimeConfiguration.ConnectorId)}/heartbeat",
             new
             {
-                connector_id = configuration.ConnectorId,
-                profile_id = ProfileIdForCloud(configuration.ProfileId, _pairingV3Active),
-                provider_status = BuildProviderStatus(secrets, configuration, includeOptimizer: true)
+                connector_id = runtimeConfiguration.ConnectorId,
+                profile_id = ProfileIdForCloud(runtimeConfiguration.ProfileId, _pairingV3Active),
+                provider_status = BuildProviderStatus(secrets, runtimeConfiguration, includeOptimizer: true)
             },
             cancellationToken).ConfigureAwait(false);
-        ApplyPlaybackConfiguration(configuration, response.Playback);
+        ApplyPlaybackConfiguration(runtimeConfiguration, response.Playback);
         _state.Set("online", heartbeat: true);
     }
 
@@ -360,21 +367,26 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         try
         {
-            ApplyAuthoritativeProfileProviderBinding(configuration, request);
+            // Re-read the saved configuration for every command as well as
+            // every heartbeat. In particular, account deletion must enforce
+            // the same live TwoWayProfileDeletionEnabled value that Cloud
+            // showed to the user during preflight.
+            var runtimeConfiguration = RuntimeConfiguration(configuration);
+            ApplyAuthoritativeProfileProviderBinding(runtimeConfiguration, request);
             // Provider settings can be saved while the long-running connector is
             // already online. Re-read the owner-only secret file for every claim
             // so health checks, searches, and mutations all use the same current
             // provider configuration without requiring a Jellyfin restart.
             var currentSecrets = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false) ?? secrets;
             var result = request.Method == "GET"
-                ? await ExecuteReadAsync(configuration, currentSecrets, request, cancellationToken).ConfigureAwait(false)
-                : await ExecuteCommandAsync(configuration, currentSecrets, request, cancellationToken).ConfigureAwait(false);
+                ? await ExecuteReadAsync(runtimeConfiguration, currentSecrets, request, cancellationToken).ConfigureAwait(false)
+                : await ExecuteCommandAsync(runtimeConfiguration, currentSecrets, request, cancellationToken).ConfigureAwait(false);
             await SendCloudAsync<JsonElement>(
-                configuration,
+                runtimeConfiguration,
                 secrets,
                 HttpMethod.Post,
                 $"/v1/remote-requests/{Uri.EscapeDataString(request.RequestId)}/complete",
-                new { connector_id = configuration.ConnectorId, http_status = result.Status, response = result.Payload, truncated = result.Truncated },
+                new { connector_id = runtimeConfiguration.ConnectorId, http_status = result.Status, response = result.Payload, truncated = result.Truncated },
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception)
@@ -3336,6 +3348,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
     private static PluginConfiguration CurrentConfiguration()
         => KaevoPlugin.Instance?.Configuration ?? throw new InvalidOperationException("pluginConfigurationUnavailable");
+
+    private static PluginConfiguration RuntimeConfiguration(PluginConfiguration connectedConfiguration)
+        => SelectRuntimeConfiguration(connectedConfiguration, KaevoPlugin.Instance?.Configuration);
+
+    internal static PluginConfiguration SelectRuntimeConfiguration(
+        PluginConfiguration connectedConfiguration,
+        PluginConfiguration? savedConfiguration)
+        => savedConfiguration ?? connectedConfiguration;
 
     internal static string PairingV3CloudPath(string path)
         => path.StartsWith("/v1/", StringComparison.Ordinal) ? "/v3/" + path[4..] : path;
