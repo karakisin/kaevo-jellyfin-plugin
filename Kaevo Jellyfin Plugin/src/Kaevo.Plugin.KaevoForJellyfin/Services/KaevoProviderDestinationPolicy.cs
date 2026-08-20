@@ -25,8 +25,7 @@ public sealed class KaevoProviderDestinationPolicy
 {
     private static readonly HashSet<string> SupportedProviders = new(StringComparer.OrdinalIgnoreCase)
     {
-        "sonarr", "radarr", "seerr", "sabnzbd", "qbittorrent",
-        "lidarr", "readarr", "prowlarr", "bazarr", "tdarr"
+        "sonarr", "radarr", "seerr", "sabnzbd", "qbittorrent"
     };
 
     private readonly IKaevoDnsResolver _dns;

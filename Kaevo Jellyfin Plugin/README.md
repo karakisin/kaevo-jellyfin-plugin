@@ -10,7 +10,7 @@ installation.
 - Jellyfin: `10.11.x`
 - .NET target: `net8.0`
 - Foundation baseline: `0.1.0`
-- Current repository build: `0.3.5`
+- Current repository build: `0.3.6`
 - Supported phase: local metadata, app-guided Cloud activation, guarded remote playback, and owner-authorized download controls
 
 Current endpoints:
@@ -36,8 +36,8 @@ transcoded to AAC before secure delivery. Unbounded remote mutations and remote
 optimizer execution remain disabled.
 
 The plugin settings page can privately store and independently enable local
-connections for Sonarr, Radarr, Seerr, Lidarr, Readarr, Prowlarr, Bazarr,
-Tdarr, SABnzbd, and qBittorrent. API keys, download-client credentials, and
+connections for Sonarr, Radarr, Seerr, SABnzbd, and qBittorrent. API keys,
+download-client credentials, and
 local addresses remain on the Jellyfin server. SABnzbd and qBittorrent expose
 bounded health and queue reads. An authorized household owner can start or pause
 only an exact queue job after the plugin verifies its immutable Arr client ID,

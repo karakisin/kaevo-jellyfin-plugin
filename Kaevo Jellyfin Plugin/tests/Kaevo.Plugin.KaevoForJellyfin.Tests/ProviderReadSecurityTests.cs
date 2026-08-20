@@ -10,11 +10,6 @@ public sealed class ProviderReadSecurityTests
     [InlineData("seerr", "/api/v1/search")]
     [InlineData("sonarr", "/api/v3/series")]
     [InlineData("radarr", "/api/v3/movie")]
-    [InlineData("lidarr", "/api/v1/artist")]
-    [InlineData("readarr", "/api/v1/author")]
-    [InlineData("prowlarr", "/api/v1/indexerstatus")]
-    [InlineData("bazarr", "/api/system/status")]
-    [InlineData("tdarr", "/api/v2/status")]
     [InlineData("sabnzbd", "/api")]
     [InlineData("qbittorrent", "/api/v2/app/version")]
     [InlineData("qbittorrent", "/api/v2/transfer/info")]
@@ -30,6 +25,17 @@ public sealed class ProviderReadSecurityTests
     [InlineData("sonarr", "/api/v3/command")]
     [InlineData("unknown", "/api/v1/status")]
     public void RejectsAbsoluteTraversalMutationAndUnknownRoutes(string provider, string path)
+    {
+        Assert.False(KaevoCloudConnectorService.IsAllowedProviderReadPath(provider, path));
+    }
+
+    [Theory]
+    [InlineData("lidarr", "/api/v1/artist")]
+    [InlineData("readarr", "/api/v1/author")]
+    [InlineData("prowlarr", "/api/v1/indexerstatus")]
+    [InlineData("bazarr", "/api/system/status")]
+    [InlineData("tdarr", "/api/v2/status")]
+    public void RemovedProviderRoutesAreRejected(string provider, string path)
     {
         Assert.False(KaevoCloudConnectorService.IsAllowedProviderReadPath(provider, path));
     }

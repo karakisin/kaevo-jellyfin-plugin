@@ -35,7 +35,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private static readonly object ProfileBindingSync = new();
     private static readonly HashSet<string> SupportedLocalProviders = new(StringComparer.OrdinalIgnoreCase)
     {
-        "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr", "sabnzbd", "qbittorrent"
+        "sonarr", "radarr", "seerr", "sabnzbd", "qbittorrent"
     };
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly HashSet<string> SafeMetadataQuery = new(StringComparer.OrdinalIgnoreCase)
@@ -2193,9 +2193,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
         else if (!string.IsNullOrWhiteSpace(provider.ApiKey) && providerName != "sabnzbd")
         {
-            message.Headers.TryAddWithoutValidation(
-                providerName == "bazarr" ? "X-API-KEY" : "X-Api-Key",
-                provider.ApiKey);
+            message.Headers.TryAddWithoutValidation("X-Api-Key", provider.ApiKey);
         }
 
         using var response = await _providerTransport.SendAsync(
@@ -2313,7 +2311,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     }
 
     private static bool RequiresProviderApiKey(string providerName)
-        => providerName is not ("tdarr" or "qbittorrent");
+        => providerName != "qbittorrent";
 
     private static bool RequiresProviderUsernamePassword(string providerName)
         => string.Equals(providerName, "qbittorrent", StringComparison.Ordinal);
@@ -2338,11 +2336,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var path = providerName switch
         {
             "seerr" => "/api/v1/status",
-            "bazarr" => "/api/system/status",
-            "tdarr" => "/api/v2/status",
             "sabnzbd" => "/api",
             "qbittorrent" => "/api/v2/app/version",
-            "lidarr" or "readarr" or "prowlarr" => "/api/v1/system/status",
             _ => "/api/v3/system/status"
         };
         var uri = new Uri(provider.BaseUrl.TrimEnd('/') + path, UriKind.Absolute);
@@ -2366,7 +2361,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
         else if (!string.IsNullOrWhiteSpace(provider.ApiKey) && providerName != "sabnzbd")
         {
-            message.Headers.TryAddWithoutValidation(providerName == "bazarr" ? "X-API-KEY" : "X-Api-Key", provider.ApiKey);
+            message.Headers.TryAddWithoutValidation("X-Api-Key", provider.ApiKey);
         }
 
         HttpResponseMessage response;
@@ -3438,11 +3433,6 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             "sonarr" => new[] { "/api/v3/system/status", "/api/v3/series", "/api/v3/queue", "/api/v3/history", "/api/v3/wanted/missing" },
             "radarr" => new[] { "/api/v3/system/status", "/api/v3/movie", "/api/v3/queue", "/api/v3/history", "/api/v3/wanted/missing" },
             "seerr" => new[] { "/api/v1/status", "/api/v1/search", "/api/v1/discover/trending", "/api/v1/discover/movies", "/api/v1/discover/tv", "/api/v1/request", "/api/v1/media/", "/api/v1/movie/", "/api/v1/tv/" },
-            "lidarr" => new[] { "/api/v1/system/status", "/api/v1/artist", "/api/v1/queue", "/api/v1/history", "/api/v1/wanted/missing" },
-            "readarr" => new[] { "/api/v1/system/status", "/api/v1/author", "/api/v1/book", "/api/v1/queue", "/api/v1/history", "/api/v1/wanted/missing" },
-            "prowlarr" => new[] { "/api/v1/system/status", "/api/v1/indexer", "/api/v1/indexerstatus" },
-            "bazarr" => new[] { "/api/system/status" },
-            "tdarr" => new[] { "/api/v2/status" },
             "sabnzbd" => new[] { "/api" },
             "qbittorrent" => new[] { "/api/v2/app/version", "/api/v2/transfer/info", "/api/v2/torrents/info" },
             _ => Array.Empty<string>()
@@ -3774,13 +3764,12 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             ["jellyfin"] = ProviderStatus(true, true, PluginVersion, null)
         };
-        foreach (var providerName in new[] { "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr" })
+        foreach (var providerName in new[] { "sonarr", "radarr", "seerr" })
         {
             var provider = secrets.GetProvider(providerName);
-            var requiresApiKey = providerName != "tdarr";
             var configured = provider is not null
                 && Uri.TryCreate(provider.BaseUrl, UriKind.Absolute, out _)
-                && (!requiresApiKey || !string.IsNullOrWhiteSpace(provider.ApiKey));
+                && !string.IsNullOrWhiteSpace(provider.ApiKey);
             var enabled = provider?.Enabled == true;
             result[providerName] = ProviderStatus(
                 enabled && configured,

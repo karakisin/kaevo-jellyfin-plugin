@@ -55,6 +55,20 @@ public sealed class ProviderDestinationPolicyTests
         Assert.Equal(new[] { "192.168.40.10" }, approved.Addresses);
     }
 
+    [Theory]
+    [InlineData("lidarr")]
+    [InlineData("readarr")]
+    [InlineData("prowlarr")]
+    [InlineData("bazarr")]
+    [InlineData("tdarr")]
+    public async Task RemovedProvidersCannotBeApproved(string provider)
+    {
+        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+            Policy("192.168.40.10").ApproveAsync(provider, "http://provider.test:8989", default));
+
+        Assert.Equal("providerPortNotApproved", error.Message);
+    }
+
     [Fact]
     public async Task LegacyProviderWithoutPinnedAddressesRequiresReapproval()
     {

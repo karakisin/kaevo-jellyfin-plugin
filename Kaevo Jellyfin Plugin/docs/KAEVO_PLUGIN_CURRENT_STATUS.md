@@ -76,7 +76,7 @@ copied or installed there.
 ## Local media services
 
 - Administrators can independently connect or disable Sonarr, Radarr, Seerr,
-  Lidarr, Readarr, Prowlarr, Bazarr, and Tdarr from the plugin settings page.
+  SABnzbd, and qBittorrent from the plugin settings page.
 - Local addresses and API keys stay in the plugin's owner-only secret file.
 - Sonarr missing-episode search, live queue progress, cancellation, and guarded
   removal are active. The remaining connections are ready for later workflows.

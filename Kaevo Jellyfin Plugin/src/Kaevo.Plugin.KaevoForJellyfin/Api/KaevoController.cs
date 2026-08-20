@@ -26,11 +26,6 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             ["sonarr"] = ("Sonarr", true, false, "Media Automation"),
             ["radarr"] = ("Radarr", true, false, "Media Automation"),
             ["seerr"] = ("Seerr", true, false, "Media Automation"),
-            ["lidarr"] = ("Lidarr", true, false, "Media Automation"),
-            ["readarr"] = ("Readarr", true, false, "Media Automation"),
-            ["prowlarr"] = ("Prowlarr", true, false, "Media Automation"),
-            ["bazarr"] = ("Bazarr", true, false, "Media Automation"),
-            ["tdarr"] = ("Tdarr", false, false, "Media Automation"),
             ["sabnzbd"] = ("SABnzbd", true, false, "Download Clients"),
             ["qbittorrent"] = ("qBittorrent", false, true, "Download Clients")
         };

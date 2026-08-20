@@ -27,6 +27,8 @@
             border-radius: 22px; background: linear-gradient(145deg, rgba(32,36,43,.96), rgba(21,24,29,.98));
             box-shadow: 0 18px 42px rgba(0,0,0,.2);
         }
+        #KaevoConfigPage #KaevoConfigForm > .kaevo-card + .kaevo-card { margin-top: 1.5rem !important; }
+        #KaevoConfigPage #KaevoConfigForm > .kaevo-warning + .kaevo-card { margin-top: 1.5rem !important; }
         #KaevoConfigPage .kaevo-card h3 { margin: 0 0 .55rem; color: var(--kaevo-text); font-size: 1.25rem; }
         #KaevoConfigPage .kaevo-card-intro { margin: 0 0 1.15rem; color: var(--kaevo-muted); line-height: 1.5; }
         #KaevoConfigPage .fieldDescription { color: var(--kaevo-muted); }
@@ -110,15 +112,15 @@
             border-radius: 16px; background: rgba(9,11,14,.35);
         }
         #KaevoConfigPage .kaevo-toggle-row {
-            display: grid !important; grid-template-columns: auto minmax(0, 1fr);
-            gap: .65rem; align-items: start !important; position: static !important;
+            display: flex !important; flex-wrap: nowrap; gap: .65rem;
+            align-items: flex-start !important; position: static !important;
             height: auto !important; min-height: 0 !important; margin: 1rem 0 1.25rem;
             color: var(--kaevo-text); line-height: 1.35;
         }
         #KaevoConfigPage .kaevo-toggle-row input[type="checkbox"] {
             width: auto; flex: 0 0 auto; box-sizing: initial;
         }
-        #KaevoConfigPage .kaevo-toggle-row > span { display: block !important; min-width: 0; }
+        #KaevoConfigPage .kaevo-toggle-row > span { display: block !important; flex: 1 1 auto; min-width: 0; }
         #KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help {
             position: static !important; display: block !important;
             width: auto !important; max-width: none !important;
@@ -166,6 +168,8 @@
                 border-radius:22px; background:linear-gradient(145deg,rgba(32,36,43,.96),rgba(21,24,29,.98));
                 box-shadow:0 18px 42px rgba(0,0,0,.2); box-sizing:border-box; width:100%;
             }
+            #KaevoConfigPage #KaevoConfigForm > .kaevo-card + .kaevo-card { margin-top:1.5rem !important; }
+            #KaevoConfigPage #KaevoConfigForm > .kaevo-warning + .kaevo-card { margin-top:1.5rem !important; }
             #KaevoConfigPage .kaevo-card h3 { margin:0 0 .55rem; color:var(--kaevo-text); font-size:1.25rem; }
             #KaevoConfigPage .kaevo-card-intro, #KaevoConfigPage .fieldDescription { color:var(--kaevo-muted); }
             #KaevoConfigPage .kaevo-card-intro { margin:0 0 1.15rem; line-height:1.5; }
@@ -257,15 +261,15 @@
             #KaevoConfigPage .kaevo-provider-card .inputContainer,
             #KaevoConfigPage .kaevo-provider-card input:not([type="checkbox"]) { width:100%; box-sizing:border-box; }
             #KaevoConfigPage .kaevo-toggle-row {
-                display:grid !important; grid-template-columns:auto minmax(0,1fr);
-                gap:.65rem; align-items:start !important; position:static !important;
+                display:flex !important; flex-wrap:nowrap; gap:.65rem;
+                align-items:flex-start !important; position:static !important;
                 height:auto !important; min-height:0 !important; margin:1rem 0 1.25rem;
                 color:var(--kaevo-text); line-height:1.35;
             }
             #KaevoConfigPage .kaevo-toggle-row input[type="checkbox"] {
                 width:auto; flex:0 0 auto; box-sizing:initial;
             }
-            #KaevoConfigPage .kaevo-toggle-row > span { display:block !important; min-width:0; }
+            #KaevoConfigPage .kaevo-toggle-row > span { display:block !important; flex:1 1 auto; min-width:0; }
             #KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help {
                 position:static !important; display:block !important;
                 width:auto !important; max-width:none !important;

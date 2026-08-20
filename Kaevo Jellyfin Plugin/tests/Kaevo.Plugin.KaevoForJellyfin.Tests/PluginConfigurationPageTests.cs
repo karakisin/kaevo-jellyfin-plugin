@@ -1,4 +1,6 @@
 using System.Reflection;
+using System.Collections;
+using Kaevo.Plugin.KaevoForJellyfin.Api;
 using Kaevo.Plugin.KaevoForJellyfin.Services;
 using Xunit;
 
@@ -53,8 +55,11 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("Nothing extra.", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoConfigForm { width:100%; max-width:none; margin:0; }", page, StringComparison.Ordinal);
         Assert.Contains("class=\"kaevo-toggle-row\"", page, StringComparison.Ordinal);
-        Assert.Contains("grid-template-columns:auto minmax(0,1fr)", page, StringComparison.Ordinal);
+        Assert.Contains("display:flex !important; flex-wrap:nowrap", page, StringComparison.Ordinal);
+        Assert.Contains("flex:1 1 auto; min-width:0", page, StringComparison.Ordinal);
         Assert.Contains("height:auto !important; min-height:0 !important", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoConfigPage #KaevoConfigForm > .kaevo-card + .kaevo-card { margin-top:1.5rem !important; }", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoConfigPage #KaevoConfigForm > .kaevo-warning + .kaevo-card { margin-top:1.5rem !important; }", page, StringComparison.Ordinal);
         Assert.Contains("class=\"fieldDescription kaevo-inline-help\"", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help", page, StringComparison.Ordinal);
         Assert.Contains("white-space:normal !important; overflow-wrap:anywhere", page, StringComparison.Ordinal);
@@ -94,5 +99,19 @@ public sealed class PluginConfigurationPageTests
 
         Assert.Contains(assembly.GetManifestResourceNames(), name => name.EndsWith("Branding.Kaevo_LogoMark_Transparent.png", StringComparison.Ordinal));
         Assert.Contains(assembly.GetManifestResourceNames(), name => name.EndsWith("Branding.Kaevo_Wordmark_Transparent.png", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("lidarr")]
+    [InlineData("readarr")]
+    [InlineData("prowlarr")]
+    [InlineData("bazarr")]
+    [InlineData("tdarr")]
+    public void RemovedProvidersAreNotAdvertisedByTheConfigurationApi(string provider)
+    {
+        var field = typeof(KaevoController).GetField("SupportedProviders", BindingFlags.NonPublic | BindingFlags.Static);
+        var providers = Assert.IsAssignableFrom<IDictionary>(field?.GetValue(null));
+
+        Assert.False(providers.Contains(provider));
     }
 }
