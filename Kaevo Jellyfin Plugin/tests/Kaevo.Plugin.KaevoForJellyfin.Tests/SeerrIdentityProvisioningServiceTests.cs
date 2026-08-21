@@ -9,6 +9,39 @@ public sealed class SeerrIdentityProvisioningServiceTests
     private const string JellyfinUserId = "0123456789abcdef0123456789abcdef";
 
     [Fact]
+    public async Task LifecycleV2SeparatesDeleteDispatchFromAbsenceProof()
+    {
+        var present = true;
+        var calls = new List<(string Method, string Path)>();
+        var service = new KaevoSeerrIdentityProvisioningService((_, method, path, _, _) =>
+        {
+            calls.Add((method.Method, path));
+            if (method == HttpMethod.Delete && path == "/api/v1/user/42")
+            {
+                present = false;
+                return Task.FromResult(Response("{}"));
+            }
+            return Task.FromResult(Response(present
+                ? $"{{\"results\":[{{\"id\":42,\"jellyfinUserId\":\"{JellyfinUserId}\",\"permissions\":32}}]}}"
+                : "{\"results\":[]}"));
+        });
+
+        var deletion = await service.DispatchDeleteExactJellyfinUserAsync(
+            Secrets(), JellyfinUserId, 42, CancellationToken.None);
+
+        Assert.Equal("delete_dispatched", deletion.State);
+        Assert.Equal(2, calls.Count);
+        Assert.Equal(("GET", "/api/v1/user"), calls[0]);
+        Assert.Equal(("DELETE", "/api/v1/user/42"), calls[1]);
+
+        var verification = await service.VerifyExactJellyfinUserAbsentAsync(
+            Secrets(), JellyfinUserId, 42, CancellationToken.None);
+
+        Assert.Equal("absence_confirmed", verification.State);
+        Assert.Equal(("GET", "/api/v1/user"), calls[2]);
+    }
+
+    [Fact]
     public async Task ImportsExactJellyfinUserAndAppliesOnlyRequestPermissions()
     {
         var calls = new List<(string Method, string Path, string Body)>();
