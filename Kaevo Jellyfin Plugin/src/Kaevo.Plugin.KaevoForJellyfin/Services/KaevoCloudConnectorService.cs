@@ -568,6 +568,17 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         var operation = request.Operation ?? request.Path.Replace("/commands/", string.Empty, StringComparison.Ordinal);
         var parameters = request.Parameters ?? new Dictionary<string, JsonElement>();
+        if (IsAccountLifecycleV2Operation(operation))
+        {
+            return await ExecuteAccountLifecycleV2CommandAsync(
+                configuration,
+                secrets,
+                request,
+                operation,
+                parameters,
+                cancellationToken).ConfigureAwait(false);
+        }
+
         if (operation == "jellyfin.inspect_profile_binding_owner")
         {
             var jellyfinUserId = RequireString(

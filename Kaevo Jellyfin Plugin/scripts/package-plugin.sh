@@ -41,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Reloads Jellyfin's saved plugin configuration before signed heartbeats and remote commands so two-way profile deletion status and enforcement update without a server restart.",
+  "changelog": "Adds exact-ID Account Lifecycle V2 delete and absence-verification commands for Kaevo, Jellyfin, and Seerr accounts while always preserving libraries and media.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
