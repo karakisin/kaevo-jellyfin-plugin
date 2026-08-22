@@ -2,19 +2,22 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public static class KaevoCloudEndpointPolicy
 {
-    private const string ProductionApiHost = "aneohx5ff6.execute-api.us-west-2.amazonaws.com";
-    private const string SecurityStageApiHost = "vsuh8a8v8i.execute-api.us-west-2.amazonaws.com";
+    private const string ProductionApi = "https://o25nzxe9bk.execute-api.us-west-2.amazonaws.com/production";
+    private const string DevelopmentApi = "https://aneohx5ff6.execute-api.us-west-2.amazonaws.com/dev";
+    private const string DevelopmentCustomApi = "https://api.kaevo.watch";
+    private const string SecurityStageApi = "https://vsuh8a8v8i.execute-api.us-west-2.amazonaws.com/security-stage";
 
     public static bool TryNormalize(string? value, out Uri uri)
     {
-        var environment = Environment.GetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT")?.Trim();
+        var environment = NormalizeEnvironment(
+            Environment.GetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT"));
         if (Uri.TryCreate(value?.Trim().TrimEnd('/'), UriKind.Absolute, out var parsed)
             && string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
             && string.IsNullOrEmpty(parsed.UserInfo)
             && string.IsNullOrEmpty(parsed.Query)
             && string.IsNullOrEmpty(parsed.Fragment)
             && (parsed.IsDefaultPort || parsed.Port == 443)
-            && IsApprovedHost(parsed.Host, environment))
+            && IsApprovedEndpoint(parsed, environment))
         {
             uri = parsed;
             return true;
@@ -25,9 +28,45 @@ public static class KaevoCloudEndpointPolicy
     }
 
     public static bool IsApprovedHost(string host, string? environment)
-        => string.Equals(host, ProductionApiHost, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(host, "kaevo.app", StringComparison.OrdinalIgnoreCase)
-            || host.EndsWith(".kaevo.app", StringComparison.OrdinalIgnoreCase)
-            || (string.Equals(environment, "security-stage", StringComparison.Ordinal)
-                && string.Equals(host, SecurityStageApiHost, StringComparison.OrdinalIgnoreCase));
+    {
+        var normalizedEnvironment = NormalizeEnvironment(environment);
+        return normalizedEnvironment switch
+        {
+            "production" => HostMatches(ProductionApi, host),
+            "development" => HostMatches(DevelopmentApi, host)
+                || HostMatches(DevelopmentCustomApi, host),
+            "security-stage" => HostMatches(SecurityStageApi, host),
+            _ => false
+        };
+    }
+
+    internal static bool IsApprovedEndpoint(Uri uri, string environment)
+    {
+        var expected = environment switch
+        {
+            "production" => new[] { ProductionApi },
+            "development" => new[] { DevelopmentApi, DevelopmentCustomApi },
+            "security-stage" => new[] { SecurityStageApi },
+            _ => Array.Empty<string>()
+        };
+        var candidate = uri.GetComponents(
+            UriComponents.SchemeAndServer | UriComponents.Path,
+            UriFormat.Unescaped).TrimEnd('/');
+        return expected.Any(value => string.Equals(candidate, value, StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static string NormalizeEnvironment(string? environment)
+    {
+        return environment?.Trim().ToLowerInvariant() switch
+        {
+            null or "" or "production" => "production",
+            "dev" or "development" or "internal-qa" => "development",
+            "security-stage" => "security-stage",
+            _ => "invalid"
+        };
+    }
+
+    private static bool HostMatches(string endpoint, string host)
+        => Uri.TryCreate(endpoint, UriKind.Absolute, out var expected)
+            && string.Equals(expected.Host, host, StringComparison.OrdinalIgnoreCase);
 }
