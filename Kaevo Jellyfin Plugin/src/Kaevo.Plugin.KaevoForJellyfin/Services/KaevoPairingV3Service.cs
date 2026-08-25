@@ -260,6 +260,37 @@ public sealed class KaevoPairingV3Service
         Observe(completion.CorrelationId, completion.PairingAttemptId, "/kaevo/v3/pairing/complete", "available_to_reserved", 202, "pairing_reserved");
         var request = CreateRedemption(prepared.ticket, prepared.identity, prepared.claims, completion);
         var result = await _cloud.RedeemAsync(cloudBase, request, cancellationToken).ConfigureAwait(false);
+        if (RequiresAmbiguousResolution(result))
+        {
+            // A timeout or unreadable response does not tell us whether Cloud
+            // committed the redemption. Check the immutable attempt before
+            // issuing any retry so a lost success response cannot create a
+            // second connector or replay the original signed nonce.
+            var status = await _cloud.StatusAsync(
+                cloudBase,
+                CreateStatus(prepared.ticket, prepared.identity, completion.CorrelationId),
+                cancellationToken).ConfigureAwait(false);
+            if (status.Code != "pairing_status_pending")
+            {
+                return await ApplyCloudResultAsync(prepared.ticket.TicketId, prepared.ticket.PairingAttemptId, completion.CorrelationId, status, cancellationToken).ConfigureAwait(false);
+            }
+
+            // Cloud has authoritatively confirmed that the first redemption
+            // did not commit. Retry once with a fresh timestamp, nonce, and
+            // signature while retaining the same ticket, authorization, and
+            // pairing-attempt identity.
+            result = await _cloud.RedeemAsync(
+                cloudBase,
+                CreateRedemption(prepared.ticket, prepared.identity, prepared.claims, completion),
+                cancellationToken).ConfigureAwait(false);
+            if (RequiresAmbiguousResolution(result))
+            {
+                result = await _cloud.StatusAsync(
+                    cloudBase,
+                    CreateStatus(prepared.ticket, prepared.identity, completion.CorrelationId),
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
         return await ApplyCloudResultAsync(prepared.ticket.TicketId, prepared.ticket.PairingAttemptId, completion.CorrelationId, result, cancellationToken).ConfigureAwait(false);
     }
 
@@ -397,6 +428,9 @@ public sealed class KaevoPairingV3Service
                 ReservationExpiresAtUtc = null, RedemptionState = reason, AuthorizationJti = "" };
             return 0;
         }, cancellationToken).ConfigureAwait(false);
+
+    private static bool RequiresAmbiguousResolution(KaevoPairingV3CloudResult result) =>
+        result.Code is "cloud_unavailable" or "ambiguous_enrollment";
 
     private KaevoPairingV3RedemptionRequest CreateRedemption(KaevoPairingV3Ticket ticket, KaevoPairingV3Identity identity, PairingAuthorization claims, KaevoPairingV3Completion completion)
     {
