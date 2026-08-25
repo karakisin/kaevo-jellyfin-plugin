@@ -164,6 +164,10 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     {
         try
         {
+            if (!TryEnsurePairingV3CloudUri(out _))
+            {
+                return V3Error(new KaevoPairingV3Exception("pairing_dependency_failure", true), 503);
+            }
             var localEndpoint = $"{Request.Scheme}://{Request.Host}{Request.PathBase}".TrimEnd('/');
             var start = await _pairingV3.StartAsync(request.JellyfinServerId, request.JellyfinServerName, localEndpoint, request.JellyfinSetupUserId, cancellationToken).ConfigureAwait(false);
             using var data = QRCodeGenerator.GenerateQrCode(start.PairingUri, QRCodeGenerator.ECCLevel.Q);
@@ -225,7 +229,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             {
                 return V3Error(new KaevoPairingV3Exception("malformed_request"), 400);
             }
-            if (!TryCloudUri(KaevoPlugin.Instance?.Configuration.CloudBaseUrl ?? string.Empty, out var cloud))
+            if (!TryEnsurePairingV3CloudUri(out var cloud))
             {
                 return V3Error(new KaevoPairingV3Exception("pairing_dependency_failure", true), 503);
             }
@@ -284,7 +288,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         var correlationId = KaevoPairingV3Service.NormalizeCorrelationId(request.CorrelationId);
         try
         {
-            if (!TryCloudUri(KaevoPlugin.Instance?.Configuration.CloudBaseUrl ?? string.Empty, out var cloud))
+            if (!TryEnsurePairingV3CloudUri(out var cloud))
                 return V3Error(new KaevoPairingV3Exception("pairing_dependency_failure", true), 503);
             var result = await _pairingV3.RecoverAsync(cloud, request.TicketId, correlationId, cancellationToken).ConfigureAwait(false);
             return StatusCode(StatusForV3(result.Code), new { protocol = KaevoPairingV3Crypto.Protocol, code = result.Code, retryable = result.Retryable, connectorId = result.ConnectorId, idempotent = result.Idempotent, correlationId });
@@ -492,6 +496,29 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     private static bool ValidAdminAction(string value) => string.Equals(value, "lifecycle", StringComparison.Ordinal);
     private static bool ValidOwnerToken(string value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 8192 && !value.Any(char.IsWhiteSpace);
     private static bool TryCloudUri(string value, out Uri uri) => KaevoCloudEndpointPolicy.TryNormalize(value, out uri);
+
+    private static bool TryEnsurePairingV3CloudUri(out Uri uri)
+    {
+        var plugin = KaevoPlugin.Instance;
+        var configuration = plugin?.Configuration;
+        if (configuration is null
+            || !configuration.PairingV3Enabled
+            || !KaevoCloudEndpointPolicy.TryResolvePairingEndpoint(
+                configuration.CloudBaseUrl,
+                out uri,
+                out var migrated))
+        {
+            uri = null!;
+            return false;
+        }
+
+        if (migrated)
+        {
+            configuration.CloudBaseUrl = uri.ToString().TrimEnd('/');
+            plugin!.SaveConfiguration();
+        }
+        return true;
+    }
 
     /// <summary>
     /// Refreshes the local connector credential after Jellyfin revokes an

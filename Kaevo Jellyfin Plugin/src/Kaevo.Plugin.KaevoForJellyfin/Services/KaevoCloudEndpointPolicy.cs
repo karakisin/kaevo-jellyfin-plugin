@@ -11,20 +11,20 @@ public static class KaevoCloudEndpointPolicy
     {
         var environment = NormalizeEnvironment(
             Environment.GetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT"));
-        if (Uri.TryCreate(value?.Trim().TrimEnd('/'), UriKind.Absolute, out var parsed)
-            && string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-            && string.IsNullOrEmpty(parsed.UserInfo)
-            && string.IsNullOrEmpty(parsed.Query)
-            && string.IsNullOrEmpty(parsed.Fragment)
-            && (parsed.IsDefaultPort || parsed.Port == 443)
-            && IsApprovedEndpoint(parsed, environment))
-        {
-            uri = parsed;
-            return true;
-        }
+        return TryNormalize(value, environment, out uri);
+    }
 
-        uri = null!;
-        return false;
+    /// <summary>
+    /// Resolves the Cloud endpoint used by an explicit Pairing V3 repair.
+    /// Existing approved configuration is preserved. Missing, stale, or
+    /// otherwise unapproved configuration is migrated only to the immutable
+    /// endpoint compiled for the current environment.
+    /// </summary>
+    public static bool TryResolvePairingEndpoint(string? configuredValue, out Uri uri, out bool migrated)
+    {
+        var environment = NormalizeEnvironment(
+            Environment.GetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT"));
+        return TryResolvePairingEndpoint(configuredValue, environment, out uri, out migrated);
     }
 
     public static bool IsApprovedHost(string host, string? environment)
@@ -55,6 +55,40 @@ public static class KaevoCloudEndpointPolicy
         return expected.Any(value => string.Equals(candidate, value, StringComparison.OrdinalIgnoreCase));
     }
 
+    internal static bool TryResolvePairingEndpoint(
+        string? configuredValue,
+        string? environment,
+        out Uri uri,
+        out bool migrated)
+    {
+        var normalizedEnvironment = NormalizeEnvironment(environment);
+        if (TryNormalize(configuredValue, normalizedEnvironment, out uri))
+        {
+            migrated = false;
+            return true;
+        }
+
+        var primaryEndpoint = normalizedEnvironment switch
+        {
+            "production" => ProductionApi,
+            "development" => DevelopmentApi,
+            "security-stage" => SecurityStageApi,
+            _ => null
+        };
+        if (primaryEndpoint is not null
+            && Uri.TryCreate(primaryEndpoint, UriKind.Absolute, out var primaryUri)
+            && primaryUri is not null)
+        {
+            uri = primaryUri;
+            migrated = true;
+            return true;
+        }
+
+        uri = null!;
+        migrated = false;
+        return false;
+    }
+
     internal static string NormalizeEnvironment(string? environment)
     {
         return environment?.Trim().ToLowerInvariant() switch
@@ -69,4 +103,22 @@ public static class KaevoCloudEndpointPolicy
     private static bool HostMatches(string endpoint, string host)
         => Uri.TryCreate(endpoint, UriKind.Absolute, out var expected)
             && string.Equals(expected.Host, host, StringComparison.OrdinalIgnoreCase);
+
+    private static bool TryNormalize(string? value, string environment, out Uri uri)
+    {
+        if (Uri.TryCreate(value?.Trim().TrimEnd('/'), UriKind.Absolute, out var parsed)
+            && string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrEmpty(parsed.UserInfo)
+            && string.IsNullOrEmpty(parsed.Query)
+            && string.IsNullOrEmpty(parsed.Fragment)
+            && (parsed.IsDefaultPort || parsed.Port == 443)
+            && IsApprovedEndpoint(parsed, environment))
+        {
+            uri = parsed;
+            return true;
+        }
+
+        uri = null!;
+        return false;
+    }
 }

@@ -91,6 +91,64 @@ public sealed class CloudActivationValidatorTests
         }
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("https://api.kaevo.watch")]
+    [InlineData("https://aneohx5ff6.execute-api.us-west-2.amazonaws.com/dev")]
+    [InlineData("https://attacker.example/production")]
+    public void PairingRepairMigratesInvalidOrStaleProductionEndpoint(string? configuredValue)
+    {
+        Assert.True(KaevoCloudEndpointPolicy.TryResolvePairingEndpoint(
+            configuredValue,
+            "production",
+            out var endpoint,
+            out var migrated));
+        Assert.True(migrated);
+        Assert.Equal(
+            "https://o25nzxe9bk.execute-api.us-west-2.amazonaws.com/production",
+            endpoint.ToString().TrimEnd('/'));
+    }
+
+    [Fact]
+    public void PairingRepairPreservesApprovedProductionEndpoint()
+    {
+        Assert.True(KaevoCloudEndpointPolicy.TryResolvePairingEndpoint(
+            ValidRequest.CloudBaseUrl,
+            "production",
+            out var endpoint,
+            out var migrated));
+        Assert.False(migrated);
+        Assert.Equal(ValidRequest.CloudBaseUrl, endpoint.ToString().TrimEnd('/'));
+    }
+
+    [Theory]
+    [InlineData("development", "https://aneohx5ff6.execute-api.us-west-2.amazonaws.com/dev")]
+    [InlineData("security-stage", "https://vsuh8a8v8i.execute-api.us-west-2.amazonaws.com/security-stage")]
+    public void PairingRepairUsesTheCompiledEndpointForEachEnvironment(
+        string environment,
+        string expectedEndpoint)
+    {
+        Assert.True(KaevoCloudEndpointPolicy.TryResolvePairingEndpoint(
+            string.Empty,
+            environment,
+            out var endpoint,
+            out var migrated));
+        Assert.True(migrated);
+        Assert.Equal(expectedEndpoint, endpoint.ToString().TrimEnd('/'));
+    }
+
+    [Fact]
+    public void PairingRepairFailsClosedForUnknownEnvironment()
+    {
+        Assert.False(KaevoCloudEndpointPolicy.TryResolvePairingEndpoint(
+            string.Empty,
+            "unexpected",
+            out _,
+            out var migrated));
+        Assert.False(migrated);
+    }
+
     [Fact]
     public void MalformedPairingMaterialIsRejected()
     {

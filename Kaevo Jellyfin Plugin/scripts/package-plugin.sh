@@ -41,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Hardens Pairing V3 completion by checking the immutable attempt after an uncertain Cloud response and retrying redemption once only when Cloud confirms the first request did not commit.",
+  "changelog": "Repairs Pairing V3 after Production endpoint hardening by migrating only invalid or empty saved endpoints to Kaevo's compiled Production endpoint while preserving approved configuration and fail-closed environment isolation.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",

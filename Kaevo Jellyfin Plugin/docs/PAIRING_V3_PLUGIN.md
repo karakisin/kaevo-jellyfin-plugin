@@ -29,6 +29,11 @@ release the reservation. Consumed tickets are never reopened.
 
 `POST /kaevo/v3/pairing/start` is elevated. It emits a QR URI whose signed
 canonical payload carries the ticket secret only to the QR recipient.
+Starting an explicit V3 repair also validates the saved Cloud endpoint. An
+existing approved endpoint is preserved; a missing, stale, or unapproved value
+is migrated only to the immutable endpoint compiled for the current
+environment. Unknown environments still fail closed, and no endpoint is ever
+accepted from the QR code or the iPhone.
 `POST /kaevo/v3/pairing/challenges` is anonymous and binds the challenge to a
 canonical pairing attempt and SHA-256 hash of the Pairing Authorization. The
 extra hash is required by the approved challenge transcript; the authorization
