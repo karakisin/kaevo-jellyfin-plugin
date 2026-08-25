@@ -32,6 +32,7 @@ public sealed class ControllerAuthorizationTests
     [InlineData(nameof(KaevoController.RevokeLifecycle))]
     [InlineData(nameof(KaevoController.UnpairLifecycle))]
     [InlineData(nameof(KaevoController.ReconnectPairingV3))]
+    [InlineData(nameof(KaevoController.GetPairingV3TicketStatus))]
     public void SensitiveConfigurationEndpointsRequireElevation(string methodName)
     {
         var method = typeof(KaevoController).GetMethod(methodName);

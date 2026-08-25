@@ -87,6 +87,7 @@ public sealed record KaevoPairingV3StartRequest(
 // who created the one-time ticket. It is never logged or persisted by the UI.
 public sealed record KaevoPairingV3StartResponse(
     string Protocol,
+    string TicketId,
     DateTimeOffset ExpiresAtUtc,
     string QrPngBase64);
 
@@ -99,6 +100,15 @@ public sealed record KaevoPairingV3StatusResponse(
     string State,
     string Protocol,
     bool RequiresReauthentication);
+
+/// <summary>
+/// Redacted state for one locally-created pairing ticket. The elevated
+/// configuration page uses this only to replace that ticket's QR after it is
+/// consumed; no connector or account binding is exposed.
+/// </summary>
+public sealed record KaevoPairingV3TicketStatusResponse(
+    string State,
+    string Protocol);
 
 /// <summary>
 /// A minimal acknowledgement for reactivating an already-paired V3 connector.

@@ -103,6 +103,17 @@
         }
         #KaevoConfigPage .kaevo-countdown { margin: .65rem 0 0; color: var(--kaevo-muted); }
         #KaevoConfigPage #KaevoPairingCountdown { color: var(--kaevo-text); font-variant-numeric: tabular-nums; }
+        #KaevoConfigPage #KaevoPairingSuccess {
+            display: grid; justify-items: center; gap: .65rem; padding: 1.35rem .5rem;
+        }
+        #KaevoConfigPage #KaevoPairingSuccess[hidden] { display: none; }
+        #KaevoConfigPage .kaevo-pairing-success-mark {
+            display: grid; place-items: center; width: 72px; height: 72px; border-radius: 50%;
+            color: #08130d; background: #72d99b; font-size: 2.5rem; font-weight: 850;
+            box-shadow: 0 0 0 8px rgba(114,217,155,.12), 0 12px 30px rgba(0,0,0,.28);
+        }
+        #KaevoConfigPage .kaevo-pairing-success-title { margin: .35rem 0 0; color: #9be7b7; font-size: 1.55rem; }
+        #KaevoConfigPage .kaevo-pairing-success-copy { margin: 0; color: var(--kaevo-muted); }
         #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingQr,
         #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingCode { opacity: .4; }
         #KaevoConfigPage .inputContainer { margin-top: 1.15rem; }
@@ -250,6 +261,17 @@
             }
             #KaevoConfigPage .kaevo-countdown { margin:.65rem 0 0; color:var(--kaevo-muted); text-align:center; }
             #KaevoConfigPage #KaevoPairingCountdown { color:var(--kaevo-text); font-variant-numeric:tabular-nums; }
+            #KaevoConfigPage #KaevoPairingSuccess {
+                display:grid; justify-items:center; gap:.65rem; padding:1.35rem .5rem;
+            }
+            #KaevoConfigPage #KaevoPairingSuccess[hidden] { display:none; }
+            #KaevoConfigPage .kaevo-pairing-success-mark {
+                display:grid; place-items:center; width:72px; height:72px; border-radius:50%;
+                color:#08130d; background:#72d99b; font-size:2.5rem; font-weight:850;
+                box-shadow:0 0 0 8px rgba(114,217,155,.12),0 12px 30px rgba(0,0,0,.28);
+            }
+            #KaevoConfigPage .kaevo-pairing-success-title { margin:.35rem 0 0; color:#9be7b7; font-size:1.55rem; }
+            #KaevoConfigPage .kaevo-pairing-success-copy { margin:0; color:var(--kaevo-muted); }
             #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingQr,
             #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingCode { opacity:.4; }
             #KaevoConfigPage .inputContainer { margin-top:1.15rem; }
@@ -317,10 +339,17 @@
                         <span>Repair Kaevo Connection</span>
                     </button>
                     <section id="KaevoPairingTicket" hidden aria-live="polite">
-                        <img id="KaevoPairingQr" alt="Kaevo one-time pairing QR code" width="240" height="240" />
-                        <p id="KaevoPairingCodeLabel" class="kaevo-code-label">Here’s your one-time code</p>
-                        <strong id="KaevoPairingCode"></strong>
-                        <p id="KaevoPairingExpiry" class="kaevo-countdown">It expires in <strong id="KaevoPairingCountdown">10:00</strong> and works once.</p>
+                        <div id="KaevoPairingPending">
+                            <img id="KaevoPairingQr" alt="Kaevo one-time pairing QR code" width="240" height="240" />
+                            <p id="KaevoPairingCodeLabel" class="kaevo-code-label">Here’s your one-time code</p>
+                            <strong id="KaevoPairingCode"></strong>
+                            <p id="KaevoPairingExpiry" class="kaevo-countdown">It expires in <strong id="KaevoPairingCountdown">10:00</strong> and works once.</p>
+                        </div>
+                        <div id="KaevoPairingSuccess" hidden>
+                            <span class="kaevo-pairing-success-mark" aria-hidden="true">✓</span>
+                            <strong class="kaevo-pairing-success-title">Kaevo App Connected</strong>
+                            <p class="kaevo-pairing-success-copy">Secure Pairing V3 completed successfully.</p>
+                        </div>
                     </section>
                     </section>
 
@@ -380,6 +409,8 @@
                 providers: [],
                 providerSavedSettings: {},
                 pairingCountdownTimer: null,
+                pairingStatusTimer: null,
+                pairingTicketId: null,
                 savedSettings: null,
                 pairingV3Enabled: false,
                 pairingV3Connected: false
@@ -390,6 +421,57 @@
                     clearInterval(KaevoConfig.pairingCountdownTimer);
                     KaevoConfig.pairingCountdownTimer = null;
                 }
+            }
+
+            function stopPairingStatusPolling() {
+                if (KaevoConfig.pairingStatusTimer) {
+                    clearInterval(KaevoConfig.pairingStatusTimer);
+                    KaevoConfig.pairingStatusTimer = null;
+                }
+            }
+
+            function renderPairingTicketPending() {
+                var ticket = document.querySelector('#KaevoPairingTicket');
+                ticket.dataset.completed = 'false';
+                document.querySelector('#KaevoPairingPending').hidden = false;
+                document.querySelector('#KaevoPairingSuccess').hidden = true;
+            }
+
+            function renderPairingTicketSuccess() {
+                stopPairingCountdown();
+                stopPairingStatusPolling();
+                var ticket = document.querySelector('#KaevoPairingTicket');
+                ticket.dataset.completed = 'true';
+                ticket.dataset.expired = 'false';
+                document.querySelector('#KaevoPairingPending').hidden = true;
+                document.querySelector('#KaevoPairingSuccess').hidden = false;
+                renderPairingV3Status({ state: 'paired' });
+            }
+
+            function refreshPairingTicketStatus() {
+                var ticketId = KaevoConfig.pairingTicketId;
+                if (!ticketId) return;
+                ApiClient.getJSON(ApiClient.getUrl('kaevo/v3/pairing/tickets/' + encodeURIComponent(ticketId) + '/status'))
+                    .then(function (status) {
+                        var state = String((status && (status.State || status.state)) || '').toLowerCase();
+                        if (state === 'consumed') {
+                            renderPairingTicketSuccess();
+                        } else if (state === 'expired' || state === 'not_found' || state === 'disabled') {
+                            stopPairingStatusPolling();
+                        }
+                    })
+                    .catch(function () {
+                        // A transient local read must not replace the QR with a
+                        // false failure. The next bounded poll may still prove
+                        // that this exact ticket was consumed.
+                    });
+            }
+
+            function startPairingStatusPolling(ticketId) {
+                stopPairingStatusPolling();
+                KaevoConfig.pairingTicketId = ticketId;
+                refreshPairingTicketStatus();
+                KaevoConfig.pairingStatusTimer = setInterval(refreshPairingTicketStatus, 1500);
             }
 
             function setSaveState(state) {
@@ -512,6 +594,7 @@
                     if (countdown) countdown.textContent = minutes + ':' + seconds;
                     if (remaining === 0) {
                         stopPairingCountdown();
+                        stopPairingStatusPolling();
                         ticket.dataset.expired = 'true';
                         expiry.textContent = 'This code has expired. Create a new code to continue.';
                     }
@@ -750,20 +833,23 @@
                 }).then(function (ticket) {
                     var protocol = ticket.Protocol || ticket.protocol || 'legacy';
                     var isV3 = protocol === 'kaevo-pairing-v3';
+                    var ticketId = ticket.TicketId || ticket.ticketId;
                     var code = isV3 ? 'Secure Pairing V3' : (ticket.Code || ticket.code);
                     var qr = ticket.QrPngBase64 || ticket.qrPngBase64;
                     var expiresAt = ticket.ExpiresAtUtc || ticket.expiresAtUtc;
-                    if (!code || !qr) throw new Error('Incomplete Kaevo pairing response.');
+                    if (!code || !qr || (isV3 && !ticketId)) throw new Error('Incomplete Kaevo pairing response.');
                     document.querySelector('#KaevoPairingCode').textContent = code;
                     document.querySelector('#KaevoPairingCodeLabel').textContent = isV3
                         ? 'Scan this signed Pairing V3 QR in Kaevo.'
                         : 'Here’s your one-time code';
                     document.querySelector('#KaevoPairingQr').src = 'data:image/png;base64,' + qr;
                     document.querySelector('#KaevoPairingTicket').hidden = false;
+                    renderPairingTicketPending();
                     document.querySelector('#KaevoCreatePairing span').textContent = isV3
                         ? 'Create New Pairing V3 QR'
                         : 'Create New Pairing Code';
                     startPairingCountdown(expiresAt);
+                    if (isV3) startPairingStatusPolling(ticketId);
                 }).catch(function () {
                     Dashboard.alert('Kaevo could not create a pairing code. Sign in as a Jellyfin administrator and try again.');
                 }).finally(function () {
@@ -780,7 +866,10 @@
                 createPairingTicket(true);
             });
 
-            document.querySelector('#KaevoConfigPage').addEventListener('pagehide', stopPairingCountdown);
+            document.querySelector('#KaevoConfigPage').addEventListener('pagehide', function () {
+                stopPairingCountdown();
+                stopPairingStatusPolling();
+            });
 
             document.querySelector('#KaevoConfigForm').addEventListener('input', refreshConfigurationSaveState);
             document.querySelector('#KaevoConfigForm').addEventListener('change', refreshConfigurationSaveState);

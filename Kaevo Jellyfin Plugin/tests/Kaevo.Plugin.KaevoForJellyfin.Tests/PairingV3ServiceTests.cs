@@ -113,6 +113,36 @@ public sealed class PairingV3ServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ExactTicketStatusTransitionsToConsumedWithoutExposingBindings()
+    {
+        var cloud = new FakeCloud { Result = new("pairing_redeemed", "connector-not-exposed") };
+        var service = Service(cloud);
+        var start = await service.StartAsync("server-not-exposed", "Jellyfin", "https://local", "user-not-exposed");
+
+        var available = await service.GetTicketStatusAsync(start.TicketId);
+        Assert.Equal("available", available.State);
+        Assert.Equal(KaevoPairingV3Crypto.Protocol, available.Protocol);
+        Assert.Equal("not_found", (await service.GetTicketStatusAsync("missing-ticket")).State);
+
+        var token = Authorization(start, "user-not-exposed");
+        var challenge = await service.ChallengeAsync(
+            start.TicketId,
+            Attempt,
+            KaevoPairingV3Crypto.HashText(token),
+            Correlation);
+        await service.CompleteAsync(
+            new Uri("https://cloud.example"),
+            ValidCompletion(start, challenge, token, "user-not-exposed"));
+
+        var consumed = await service.GetTicketStatusAsync(start.TicketId);
+        Assert.Equal("consumed", consumed.State);
+        var json = JsonSerializer.Serialize(consumed);
+        Assert.DoesNotContain("connector-not-exposed", json);
+        Assert.DoesNotContain("server-not-exposed", json);
+        Assert.DoesNotContain("user-not-exposed", json);
+    }
+
+    [Fact]
     public async Task WrongCloudKeyAudienceFingerprintServerAttemptAndUserAreRejected()
     {
         var start = await Service(new FakeCloud()).StartAsync("server-v3-01", "Jellyfin", "http://127.0.0.1:8096", "user-1");
@@ -437,13 +467,17 @@ public sealed class PairingV3ServiceTests : IDisposable
         return header + "." + payload + "." + KaevoPairingV3Crypto.Sign(CloudSeed, Encoding.ASCII.GetBytes(header + "." + payload));
     }
 
-    private static KaevoPairingV3Completion ValidCompletion(KaevoPairingV3Start start, KaevoPairingV3ChallengeResponse challenge, string token)
+    private static KaevoPairingV3Completion ValidCompletion(
+        KaevoPairingV3Start start,
+        KaevoPairingV3ChallengeResponse challenge,
+        string token,
+        string jellyfinUserId = "user-1")
     {
         var ticketSecret = KaevoPairingV3Crypto.Base64UrlDecode(TicketSecret(start.PairingUri));
-        var ticket = new KaevoPairingV3Ticket(start.TicketId, KaevoPairingV3Crypto.Base64Url(KaevoPairingV3Crypto.PublicKeyFromSeed(KaevoPairingV3Crypto.DeriveChallengeSeed(ticketSecret, start.TicketId))), start.ExpiresAtUtc, start.PluginInstanceId, start.PluginPublicKey, start.PluginFingerprint, start.JellyfinServerId, start.JellyfinServerName, start.LocalEndpoint, "user-1");
+        var ticket = new KaevoPairingV3Ticket(start.TicketId, KaevoPairingV3Crypto.Base64Url(KaevoPairingV3Crypto.PublicKeyFromSeed(KaevoPairingV3Crypto.DeriveChallengeSeed(ticketSecret, start.TicketId))), start.ExpiresAtUtc, start.PluginInstanceId, start.PluginPublicKey, start.PluginFingerprint, start.JellyfinServerId, start.JellyfinServerName, start.LocalEndpoint, jellyfinUserId);
         var storedChallenge = new KaevoPairingV3Challenge(challenge.ChallengeId, start.TicketId, Attempt, KaevoPairingV3Crypto.HashText(token), KaevoPairingV3Crypto.HashText(challenge.ChallengeNonce), challenge.IssuedAtUtc, challenge.ExpiresAtUtc);
         var proof = KaevoPairingV3Crypto.Sign(KaevoPairingV3Crypto.DeriveChallengeSeed(ticketSecret, start.TicketId), KaevoPairingV3Crypto.ChallengeTranscript(ticket, storedChallenge, challenge.ChallengeNonce, KaevoPairingV3Crypto.HashText(token)));
-        return new(KaevoPairingV3Crypto.Protocol, start.TicketId, Attempt, challenge.ChallengeId, challenge.ChallengeNonce, proof, token, "user-1", Correlation);
+        return new(KaevoPairingV3Crypto.Protocol, start.TicketId, Attempt, challenge.ChallengeId, challenge.ChallengeNonce, proof, token, jellyfinUserId, Correlation);
     }
 
     private static KaevoPairingV3Completion InvalidCompletion(KaevoPairingV3Start start, string token) => new(KaevoPairingV3Crypto.Protocol, start.TicketId, Attempt, "missing", "nonce", "signature", token, "user-1", Correlation);

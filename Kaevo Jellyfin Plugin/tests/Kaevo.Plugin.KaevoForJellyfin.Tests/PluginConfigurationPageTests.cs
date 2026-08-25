@@ -26,6 +26,14 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("config.PairingV3Enabled === true || config.pairingV3Enabled === true", page, StringComparison.Ordinal);
         Assert.Contains("Create New Pairing V3 QR", page, StringComparison.Ordinal);
         Assert.Contains("Kaevo App Connected", page, StringComparison.Ordinal);
+        Assert.Contains("kaevo/v3/pairing/tickets/", page, StringComparison.Ordinal);
+        Assert.Contains("startPairingStatusPolling(ticketId)", page, StringComparison.Ordinal);
+        Assert.Contains("state === 'consumed'", page, StringComparison.Ordinal);
+        Assert.Contains("renderPairingTicketSuccess()", page, StringComparison.Ordinal);
+        Assert.Contains("id=\"KaevoPairingSuccess\" hidden", page, StringComparison.Ordinal);
+        Assert.Contains("class=\"kaevo-pairing-success-mark\"", page, StringComparison.Ordinal);
+        Assert.Contains("Secure Pairing V3 completed successfully.", page, StringComparison.Ordinal);
+        Assert.Contains("stopPairingStatusPolling();", page, StringComparison.Ordinal);
         Assert.Contains("button.disabled = paired", page, StringComparison.Ordinal);
         Assert.Contains("KaevoConfig.pairingV3Connected", page, StringComparison.Ordinal);
         Assert.Contains("KaevoRepairPairing", page, StringComparison.Ordinal);

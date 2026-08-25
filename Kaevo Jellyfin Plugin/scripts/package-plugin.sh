@@ -41,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Migrates stale or empty Pairing V3 Production verification settings to Kaevo's pinned public trust so valid iPhone authorizations complete without changing Requests or Download Details behavior.",
+  "changelog": "Replaces an exact consumed Pairing V3 QR with a visible Kaevo App Connected success state without changing Requests or Download Details behavior.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",

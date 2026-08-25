@@ -172,7 +172,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             var start = await _pairingV3.StartAsync(request.JellyfinServerId, request.JellyfinServerName, localEndpoint, request.JellyfinSetupUserId, cancellationToken).ConfigureAwait(false);
             using var data = QRCodeGenerator.GenerateQrCode(start.PairingUri, QRCodeGenerator.ECCLevel.Q);
             var png = new PngByteQRCode(data).GetGraphic(8);
-            return Ok(new KaevoPairingV3StartResponse(start.Protocol, start.ExpiresAtUtc, Convert.ToBase64String(png)));
+            return Ok(new KaevoPairingV3StartResponse(start.Protocol, start.TicketId, start.ExpiresAtUtc, Convert.ToBase64String(png)));
         }
         catch (KaevoPairingV3Exception exception) { return V3Error(exception, StatusForV3(exception.Code)); }
         catch (Exception) { return V3Error(new KaevoPairingV3Exception("unexpected_internal_error"), 500); }
@@ -192,6 +192,22 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             // state store. The configuration page may keep pairing available
             // when local status cannot be determined.
             return StatusCode(503, new KaevoPairingV3StatusResponse("unavailable", KaevoPairingV3Crypto.Protocol, false));
+        }
+    }
+
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpGet("v3/pairing/tickets/{ticketId}/status")]
+    public async Task<ActionResult<KaevoPairingV3TicketStatusResponse>> GetPairingV3TicketStatus(
+        string ticketId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return Ok(await _pairingV3.GetTicketStatusAsync(ticketId, cancellationToken).ConfigureAwait(false));
+        }
+        catch (Exception)
+        {
+            return StatusCode(503, new KaevoPairingV3TicketStatusResponse("unavailable", KaevoPairingV3Crypto.Protocol));
         }
     }
 

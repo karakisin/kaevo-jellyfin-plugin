@@ -159,6 +159,39 @@ public sealed class KaevoPairingV3Service
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Returns only the lifecycle state for the exact locally-created ticket.
+    /// This lets the elevated configuration page distinguish a completed
+    /// repair from the already-active connector that preceded it.
+    /// </summary>
+    internal async Task<KaevoPairingV3TicketStatusResponse> GetTicketStatusAsync(
+        string ticketId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_enabled())
+        {
+            return new KaevoPairingV3TicketStatusResponse("disabled", KaevoPairingV3Crypto.Protocol);
+        }
+
+        if (string.IsNullOrWhiteSpace(ticketId) || ticketId.Length > 256)
+        {
+            return new KaevoPairingV3TicketStatusResponse("not_found", KaevoPairingV3Crypto.Protocol);
+        }
+
+        return await _store.ReadAsync(state =>
+        {
+            if (!state.Tickets.TryGetValue(ticketId, out var ticket))
+            {
+                return new KaevoPairingV3TicketStatusResponse("not_found", KaevoPairingV3Crypto.Protocol);
+            }
+
+            var ticketState = ticket.State == "available" && ticket.ExpiresAtUtc <= DateTimeOffset.UtcNow
+                ? "expired"
+                : ticket.State;
+            return new KaevoPairingV3TicketStatusResponse(ticketState, KaevoPairingV3Crypto.Protocol);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     internal async Task<KaevoPairingV3Start> StartAsync(string serverId, string serverName, string localEndpoint, string setupUserId, CancellationToken cancellationToken = default)
     {
         RequireEnabled(); RequireBinding(serverId); RequireBinding(localEndpoint);
