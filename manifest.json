@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.13.0",
+        "changelog": "Migrates stale or empty Pairing V3 Production verification settings to Kaevo's pinned public trust so valid iPhone authorizations complete without changing Requests or Download Details behavior.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.13/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "e50a05d3342b43ae9c2f62acd7d8b869",
+        "timestamp": "2026-08-25T03:54:06Z"
+      },
+      {
         "version": "0.3.12.0",
         "changelog": "Repairs Pairing V3 after Production endpoint hardening by migrating only invalid or empty saved endpoints to Kaevo's compiled Production endpoint while preserving approved configuration and fail-closed environment isolation.",
         "targetAbi": "10.11.0.0",
