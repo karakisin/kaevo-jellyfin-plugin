@@ -53,6 +53,11 @@ attempt. The deployed Phase B Cloud contract defines attempt status as **POST**
 `/v3/home-connectors/pairing/attempts/{pairingAttemptId}`; Phase C deliberately
 uses that contract rather than changing Cloud.
 
+Production verification trust is product-owned public material. When Pairing
+V3 starts, the plugin replaces missing or stale saved Production verification
+keys and issuer with the values pinned by the installed release; development
+and security-stage builds remain explicit and fail closed.
+
 The plugin verifies only a configured bounded `kid -> Ed25519 public key` set
 and configured issuer. Its configuration holds no signing private key. The
 production Cloud authorization signing seed must be supplied through an

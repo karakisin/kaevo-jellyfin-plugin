@@ -505,16 +505,25 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             || !configuration.PairingV3Enabled
             || !KaevoCloudEndpointPolicy.TryResolvePairingEndpoint(
                 configuration.CloudBaseUrl,
-                out uri,
-                out var migrated))
+                out var resolvedUri,
+                out var endpointMigrated)
+            || !KaevoPairingV3TrustPolicy.TryResolve(
+                configuration.PairingV3CloudAuthorizationVerificationKeysJson,
+                configuration.PairingV3CloudAuthorizationIssuer,
+                out var verificationKeysJson,
+                out var authorizationIssuer,
+                out var trustMigrated))
         {
             uri = null!;
             return false;
         }
 
-        if (migrated)
+        uri = resolvedUri;
+        if (endpointMigrated || trustMigrated)
         {
             configuration.CloudBaseUrl = uri.ToString().TrimEnd('/');
+            configuration.PairingV3CloudAuthorizationVerificationKeysJson = verificationKeysJson;
+            configuration.PairingV3CloudAuthorizationIssuer = authorizationIssuer;
             plugin!.SaveConfiguration();
         }
         return true;
