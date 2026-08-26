@@ -25,6 +25,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
     private const int ControlRequestConcurrency = 4;
+    internal static readonly TimeSpan ConnectorHeartbeatInterval = TimeSpan.FromSeconds(30);
     // Main snapshots render compact Home/Library cards. Full people and
     // playback media descriptors belong to the exact-item detail and
     // playback-preparation reads; requesting them for every shelf item made
@@ -118,6 +119,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 _state.Set("connecting");
                 await RegisterAsync(configuration, secrets, stoppingToken).ConfigureAwait(false);
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, configurationChanged);
+                var heartbeat = RunHeartbeatSupervisorAsync(configuration, secrets, linked.Token);
                 var control = RunControlSupervisorAsync(configuration, secrets, linked.Token);
                 var relay = configuration.RemotePlaybackEnabled
                     ? RunRelayPoolAsync(configuration, secrets, linked.Token)
@@ -126,7 +128,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 {
                     _state.SetRelay("disabled");
                 }
-                await Task.WhenAll(IgnoreCancellation(control), IgnoreCancellation(relay)).ConfigureAwait(false);
+                await Task.WhenAll(
+                    IgnoreCancellation(heartbeat),
+                    IgnoreCancellation(control),
+                    IgnoreCancellation(relay)).ConfigureAwait(false);
                 delay = TimeSpan.FromSeconds(1);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -141,6 +146,63 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 await Task.Delay(delay, stoppingToken).ConfigureAwait(false);
                 delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
             }
+        }
+    }
+
+    private async Task RunHeartbeatSupervisorAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        CancellationToken cancellationToken)
+    {
+        var delay = TimeSpan.FromSeconds(1);
+        var registered = true;
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                if (!registered)
+                {
+                    await RegisterAsync(configuration, secrets, cancellationToken).ConfigureAwait(false);
+                    registered = true;
+                }
+
+                await RunHeartbeatScheduleAsync(
+                    token => HeartbeatAsync(configuration, secrets, token),
+                    ConnectorHeartbeatInterval,
+                    cancellationToken).ConfigureAwait(false);
+                delay = TimeSpan.FromSeconds(1);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                var category = SanitizeError(exception);
+                registered = false;
+                _state.Set("connecting", category);
+                _logger.LogWarning("Kaevo Cloud heartbeat reconnecting: {Category}", category);
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
+            }
+        }
+    }
+
+    internal static async Task RunHeartbeatScheduleAsync(
+        Func<CancellationToken, Task> heartbeat,
+        TimeSpan interval,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(heartbeat);
+        if (interval <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(interval));
+        }
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            await heartbeat(cancellationToken).ConfigureAwait(false);
+            await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -261,7 +323,6 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         KaevoConnectorSecrets secrets,
         CancellationToken cancellationToken)
     {
-        var heartbeatAt = DateTimeOffset.MinValue;
         var inFlight = new List<Task>(ControlRequestConcurrency);
         try
         {
@@ -276,12 +337,6 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
                     await inFlight[index].ConfigureAwait(false);
                     inFlight.RemoveAt(index);
-                }
-
-                if (DateTimeOffset.UtcNow >= heartbeatAt)
-                {
-                    await HeartbeatAsync(configuration, secrets, cancellationToken).ConfigureAwait(false);
-                    heartbeatAt = DateTimeOffset.UtcNow.AddSeconds(60);
                 }
 
                 if (inFlight.Count >= ControlRequestConcurrency)
