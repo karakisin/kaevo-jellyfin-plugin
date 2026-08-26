@@ -164,7 +164,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     {
         try
         {
-            if (!TryEnsurePairingV3CloudUri(out _))
+            if (!TryEnsurePairingV3CloudUri(null, out _))
             {
                 return V3Error(new KaevoPairingV3Exception("pairing_dependency_failure", true), 503);
             }
@@ -245,7 +245,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             {
                 return V3Error(new KaevoPairingV3Exception("malformed_request"), 400);
             }
-            if (!TryEnsurePairingV3CloudUri(out var cloud))
+            if (!TryEnsurePairingV3CloudUri(request.Authorization, out var cloud))
             {
                 return V3Error(new KaevoPairingV3Exception("pairing_dependency_failure", true), 503);
             }
@@ -304,7 +304,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         var correlationId = KaevoPairingV3Service.NormalizeCorrelationId(request.CorrelationId);
         try
         {
-            if (!TryEnsurePairingV3CloudUri(out var cloud))
+            if (!TryEnsurePairingV3CloudUri(null, out var cloud))
                 return V3Error(new KaevoPairingV3Exception("pairing_dependency_failure", true), 503);
             var result = await _pairingV3.RecoverAsync(cloud, request.TicketId, correlationId, cancellationToken).ConfigureAwait(false);
             return StatusCode(StatusForV3(result.Code), new { protocol = KaevoPairingV3Crypto.Protocol, code = result.Code, retryable = result.Retryable, connectorId = result.ConnectorId, idempotent = result.Idempotent, correlationId });
@@ -345,7 +345,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         var configuration = KaevoPlugin.Instance?.Configuration;
         if (configuration is null
             || !configuration.PairingV3Enabled
-            || !TryCloudUri(configuration.CloudBaseUrl, out _)
+            || !TryEnsurePairingV3CloudUri(null, out _)
             || string.IsNullOrWhiteSpace(connectorId))
         {
             return false;
@@ -513,22 +513,57 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     private static bool ValidOwnerToken(string value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 8192 && !value.Any(char.IsWhiteSpace);
     private static bool TryCloudUri(string value, out Uri uri) => KaevoCloudEndpointPolicy.TryNormalize(value, out uri);
 
-    private static bool TryEnsurePairingV3CloudUri(out Uri uri)
+    private static bool TryEnsurePairingV3CloudUri(string? authorization, out Uri uri)
     {
         var plugin = KaevoPlugin.Instance;
         var configuration = plugin?.Configuration;
-        if (configuration is null
-            || !configuration.PairingV3Enabled
-            || !KaevoCloudEndpointPolicy.TryResolvePairingEndpoint(
+        if (configuration is null || !configuration.PairingV3Enabled)
+        {
+            uri = null!;
+            return false;
+        }
+
+        string verificationKeysJson;
+        string authorizationIssuer;
+        string environment;
+        bool trustMigrated;
+        if (!string.IsNullOrWhiteSpace(authorization))
+        {
+            if (!KaevoPairingV3TrustPolicy.TryResolveForAuthorization(
+                    authorization,
+                    out verificationKeysJson,
+                    out authorizationIssuer,
+                    out environment))
+            {
+                uri = null!;
+                return false;
+            }
+            trustMigrated = !string.Equals(
+                    configuration.PairingV3CloudAuthorizationVerificationKeysJson,
+                    verificationKeysJson,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    configuration.PairingV3CloudAuthorizationIssuer,
+                    authorizationIssuer,
+                    StringComparison.Ordinal);
+        }
+        else if (!KaevoPairingV3TrustPolicy.TryResolve(
+                     configuration.PairingV3CloudAuthorizationVerificationKeysJson,
+                     configuration.PairingV3CloudAuthorizationIssuer,
+                     out verificationKeysJson,
+                     out authorizationIssuer,
+                     out trustMigrated)
+                 || !KaevoPairingV3TrustPolicy.TryEnvironmentForIssuer(authorizationIssuer, out environment))
+        {
+            uri = null!;
+            return false;
+        }
+
+        if (!KaevoCloudEndpointPolicy.TryResolvePairingEndpoint(
                 configuration.CloudBaseUrl,
+                environment,
                 out var resolvedUri,
-                out var endpointMigrated)
-            || !KaevoPairingV3TrustPolicy.TryResolve(
-                configuration.PairingV3CloudAuthorizationVerificationKeysJson,
-                configuration.PairingV3CloudAuthorizationIssuer,
-                out var verificationKeysJson,
-                out var authorizationIssuer,
-                out var trustMigrated))
+                out var endpointMigrated))
         {
             uri = null!;
             return false;
