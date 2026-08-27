@@ -241,6 +241,29 @@ def test_legacy_owner_keeps_exact_profile_connector(monkeypatch):
     assert table.household_queries == 0
 
 
+def test_direct_owner_connector_read_ignores_legacy_rows(monkeypatch):
+    legacy = {
+        "connector_id": "connector-legacy",
+        "profile_id": "profile-owner",
+        "state": "active",
+    }
+    table = ConnectorTable(direct=[legacy, connector()])
+    monkeypatch.setattr(handler, "home_connectors_table", table)
+    monkeypatch.setattr(
+        handler,
+        "_authorized_household_connector_context",
+        lambda _profile_id: ("legacy", None),
+    )
+
+    resolved = handler._home_connectors_for_profile_access("profile-owner")
+
+    assert [item["connector_id"] for item in resolved] == ["connector-owner"]
+    assert all(
+        item["protocol_version"] == handler.PAIRING_V3_PROTOCOL
+        for item in resolved
+    )
+
+
 def test_household_connector_index_belongs_only_to_home_connectors_resource():
     template = TEMPLATE_PATH.read_text()
     devices = template.split("  KaevoDevicesTable:", 1)[1].split(

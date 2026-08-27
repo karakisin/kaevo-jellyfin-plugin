@@ -236,13 +236,29 @@ def test_privileged_installation_mutation_fails_closed_before_write(monkeypatch)
     assert table.writes == []
 
 
-def test_iac_grants_exact_secret_read_to_only_three_audit_runtimes():
+def test_iac_grants_exact_secret_read_to_only_named_audit_runtimes():
     template = (pathlib.Path(__file__).resolve().parents[2] / "infra" / "template.yaml").read_text()
     # The primary and bounded remote APIs run the same handler under one role;
-    # Household Join is the third runtime and second role. V3 has its own
-    # exact-secret reader and must not widen this named audit boundary.
-    assert template.count("AUDIT_REFERENCE_SECRET_ARN: !Ref KaevoAuditReferenceSecret") == 3
-    assert template.count("Resource: !Ref KaevoAuditReferenceSecret") == 2
+    # Household Join, legacy Owner enrollment, and isolated Lifecycle V2
+    # enrollment and protected exact-graph migration are the other named runtimes.
+    # Each independent role gets only
+    # GetSecretValue for this exact secret.
+    assert template.count("AUDIT_REFERENCE_SECRET_ARN: !Ref KaevoAuditReferenceSecret") == 5
+    assert template.count("Resource: !Ref KaevoAuditReferenceSecret") == 4
+    lifecycle_enrollment = template.split(
+        "  KaevoAccountLifecycleV2EnrollmentFunction:", 1,
+    )[1].split("  KaevoAccountLifecycleV2EnrollmentLogGroup:", 1)[0]
+    assert "Handler: account_lifecycle_v2_enrollment.lambda_handler" in lifecycle_enrollment
+    assert "Sid: ReadAccountLifecycleV2AuditReferenceKey" in lifecycle_enrollment
+    assert "- secretsmanager:GetSecretValue" in lifecycle_enrollment
+    assert "Resource: !Ref KaevoAuditReferenceSecret" in lifecycle_enrollment
+    lifecycle_migration = template.split(
+        "  KaevoAccountLifecycleV2MigrationFunction:", 1,
+    )[1].split("  KaevoAccountLifecycleV2MigrationLogGroup:", 1)[0]
+    assert "Handler: account_lifecycle_v2_migration.lambda_handler" in lifecycle_migration
+    assert "Sid: ReadAccountLifecycleV2MigrationAuditReferenceKey" in lifecycle_migration
+    assert "- secretsmanager:GetSecretValue" in lifecycle_migration
+    assert "Resource: !Ref KaevoAuditReferenceSecret" in lifecycle_migration
     assert "DynamoDBCrudPolicy:\n            TableName: !Ref KaevoSecurityAuditTable" not in template
     assert "secretsmanager:PutSecretValue" not in template
     assert "secretsmanager:DeleteSecret" not in template

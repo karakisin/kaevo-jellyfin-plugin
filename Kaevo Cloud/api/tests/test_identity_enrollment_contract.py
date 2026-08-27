@@ -22,13 +22,17 @@ from identity_enrollment import enroll_owner
 
 
 class FakeTable:
-    def __init__(self, key):
-        self.key = key
+    def __init__(self, *keys):
+        self.keys = keys
         self.items = {}
+
+    def item_key(self, item):
+        values = tuple(item[key] for key in self.keys)
+        return values[0] if len(values) == 1 else values
 
     def get_item(self, *, Key, ConsistentRead=False):
         assert ConsistentRead is True
-        item = self.items.get(Key[self.key])
+        item = self.items.get(self.item_key(Key))
         return {"Item": dict(item)} if item else {}
 
 
@@ -47,14 +51,32 @@ class FakeTransactionClient:
             raise ClientError({"Error": {"Code": "TransactionCanceledException"}}, "TransactWriteItems")
         pending = []
         for operation in TransactItems:
-            put = operation["Put"]
-            item = put["Item"]
-            table = self.owner.tables[put["TableName"]]
-            if item[table.key] in table.items:
+            if "Put" in operation:
+                put = operation["Put"]
+                item = put["Item"]
+                table = self.owner.tables[put["TableName"]]
+                item_key = table.item_key(item)
+                if item_key in table.items:
+                    raise ClientError({"Error": {"Code": "TransactionCanceledException"}}, "TransactWriteItems")
+                pending.append(("put", table, item_key, item))
+                continue
+            update = operation["Update"]
+            table = self.owner.tables[update["TableName"]]
+            item_key = table.item_key(update["Key"])
+            item = table.items.get(item_key)
+            if not item or str(item.get("profile_id") or "").strip():
                 raise ClientError({"Error": {"Code": "TransactionCanceledException"}}, "TransactWriteItems")
-            pending.append((table, item))
-        for table, item in pending:
-            table.items[item[table.key]] = item
+            values = update["ExpressionAttributeValues"]
+            repaired = {
+                **item,
+                "profile_id": values[":profile_id"],
+                "updated_at": values[":updated_at"],
+                "updated_at_epoch": values[":updated_at_epoch"],
+                "migration_provenance": values[":provenance"],
+            }
+            pending.append(("update", table, item_key, repaired))
+        for _kind, table, item_key, item in pending:
+            table.items[item_key] = item
 
 
 class FakeDynamo:
@@ -62,6 +84,7 @@ class FakeDynamo:
         self.tables = {
             "accounts": FakeTable("account_id"), "auth-identities": FakeTable("auth_identity_key"),
             "principals": FakeTable("principal_id"), "memberships": FakeTable("principal_id"),
+            "household-memberships": FakeTable("household_id", "membership_id"),
             "households": FakeTable("household_id"), "profiles": FakeTable("profile_id"),
             "audit": FakeTable("event_id"),
         }
@@ -77,6 +100,7 @@ def enrollment_environment(monkeypatch):
     for key, value in {
         "ACCOUNTS_TABLE": "accounts", "AUTH_IDENTITIES_TABLE": "auth-identities",
         "PRINCIPALS_TABLE": "principals", "IDENTITY_MEMBERSHIPS_TABLE": "memberships",
+        "HOUSEHOLD_MEMBERSHIPS_TABLE": "household-memberships",
         "IDENTITY_HOUSEHOLDS_TABLE": "households", "IDENTITY_PROFILES_TABLE": "profiles",
         "SECURITY_AUDIT_TABLE": "audit", "EXPECTED_COGNITO_ISSUER": "https://issuer.example/pool",
         "EXPECTED_ENROLLMENT_CLIENT_ID": "enrollment-client", "KAEVO_ENV": "test",
@@ -88,12 +112,20 @@ def enrollment_environment(monkeypatch):
     security_audit._secret_cache["test-audit-secret"] = b"T" * 64
 
 
-def event(subject="user-1", *, client_id="enrollment-client", token_use="access", now=1_000, body=None):
+def event(
+    subject="user-1", *, client_id="enrollment-client", token_use="access",
+    now=1_000, body=None, email=None, email_verified=False,
+):
+    claims = {
+        "sub": subject, "iss": "https://issuer.example/pool", "client_id": client_id,
+        "token_use": token_use, "iat": str(now), "exp": str(now + 300),
+        "auth_time": str(now),
+    }
+    if email is not None:
+        claims["email"] = email
+        claims["email_verified"] = "true" if email_verified else "false"
     return {
-        "requestContext": {"authorizer": {"jwt": {"claims": {
-            "sub": subject, "iss": "https://issuer.example/pool", "client_id": client_id,
-            "token_use": token_use, "iat": str(now), "exp": str(now + 300), "auth_time": str(now),
-        }}}},
+        "requestContext": {"authorizer": {"jwt": {"claims": claims}}},
         "body": json.dumps(body or {}),
     }
 
@@ -108,11 +140,26 @@ def test_owner_enrollment_generates_authority_server_side_and_is_idempotent():
     principal = dynamo.tables["principals"].items["user-1"]
     assert principal["account_id"].startswith("acct_") and principal["account_id"] != "attacker-account"
     assert principal["role"] == "owner" and principal["authz_version"] == 1
+    profile = next(iter(dynamo.tables["profiles"].items.values()))
+    assert profile["display_name"] == "My Profile"
+    assert profile["profile_type"] == "adult"
     account = dynamo.tables["accounts"].items[principal["account_id"]]
     assert account["entity_type"] == "Account" and account["status"] == "active"
     auth_identity = next(iter(dynamo.tables["auth-identities"].items.values()))
     assert auth_identity["account_id"] == principal["account_id"]
     assert auth_identity["provider"] == "cognito"
+    normalized = list(dynamo.tables["household-memberships"].items.values())
+    assert len(normalized) == 3
+    assert {item["entity_type"] for item in normalized} == {
+        "HouseholdMembership",
+        "HouseholdMembershipAccountGuard",
+        "HouseholdMembershipOwnerGuard",
+    }
+    membership_record = next(
+        item for item in normalized if item["entity_type"] == "HouseholdMembership"
+    )
+    assert membership_record["profile_id"] == next(iter(dynamo.tables["profiles"].items))
+    assert membership_record["migration_provenance"] == "owner-enrollment-v1"
     assert len(dynamo.tables["audit"].items) == 1
 
     second = enroll_owner(event(), dynamodb=dynamo, now=1_001)
@@ -121,6 +168,87 @@ def test_owner_enrollment_generates_authority_server_side_and_is_idempotent():
     assert len(dynamo.tables["households"].items) == 1
     assert len(dynamo.tables["accounts"].items) == 1
     assert len(dynamo.tables["auth-identities"].items) == 1
+    assert len(dynamo.tables["household-memberships"].items) == 3
+
+
+def test_owner_enrollment_persists_only_a_verified_cognito_email():
+    dynamo = FakeDynamo()
+
+    result = enroll_owner(
+        event(email="Owner@Example.com", email_verified=True),
+        dynamodb=dynamo,
+        now=1_000,
+    )
+
+    assert result["statusCode"] == 201
+    auth_identity = next(iter(dynamo.tables["auth-identities"].items.values()))
+    assert auth_identity["normalized_email"] == "owner@example.com"
+    assert auth_identity["email_verified"] is True
+
+
+def test_owner_enrollment_does_not_persist_an_unverified_email():
+    dynamo = FakeDynamo()
+
+    result = enroll_owner(
+        event(email="unverified@example.com", email_verified=False),
+        dynamodb=dynamo,
+        now=1_000,
+    )
+
+    assert result["statusCode"] == 201
+    auth_identity = next(iter(dynamo.tables["auth-identities"].items.values()))
+    assert "normalized_email" not in auth_identity
+    assert auth_identity["email_verified"] is False
+
+
+def test_existing_legacy_owner_replay_repairs_only_missing_foundation_records():
+    dynamo = FakeDynamo()
+    first = enroll_owner(event(), dynamodb=dynamo, now=1_000)
+    assert first["statusCode"] == 201
+    principal_before = dict(dynamo.tables["principals"].items["user-1"])
+    membership_before = dict(dynamo.tables["memberships"].items["user-1"])
+    household_before = next(iter(dynamo.tables["households"].items.values())).copy()
+    profile_before = next(iter(dynamo.tables["profiles"].items.values())).copy()
+
+    dynamo.tables["accounts"].items.clear()
+    dynamo.tables["auth-identities"].items.clear()
+    dynamo.tables["household-memberships"].items.clear()
+
+    replay = enroll_owner(event(), dynamodb=dynamo, now=1_001)
+    assert replay["statusCode"] == 200
+    assert json.loads(replay["body"])["state"] == "already_enrolled"
+    assert len(dynamo.tables["accounts"].items) == 1
+    assert len(dynamo.tables["auth-identities"].items) == 1
+    assert len(dynamo.tables["household-memberships"].items) == 3
+    assert dynamo.tables["principals"].items["user-1"] == principal_before
+    assert dynamo.tables["memberships"].items["user-1"] == membership_before
+    assert next(iter(dynamo.tables["households"].items.values())) == household_before
+    assert next(iter(dynamo.tables["profiles"].items.values())) == profile_before
+
+
+def test_existing_normalized_owner_replay_repairs_missing_exact_profile_pointer():
+    dynamo = FakeDynamo()
+    first = enroll_owner(event(), dynamodb=dynamo, now=1_000)
+    assert first["statusCode"] == 201
+
+    membership = next(
+        item for item in dynamo.tables["household-memberships"].items.values()
+        if item["entity_type"] == "HouseholdMembership"
+    )
+    expected_profile_id = membership.pop("profile_id")
+    membership["migration_provenance"] = "legacy-authority-graph-v1"
+
+    replay = enroll_owner(event(), dynamodb=dynamo, now=1_001)
+
+    assert replay["statusCode"] == 200
+    assert json.loads(replay["body"])["state"] == "already_enrolled"
+    repaired = next(
+        item for item in dynamo.tables["household-memberships"].items.values()
+        if item["entity_type"] == "HouseholdMembership"
+    )
+    assert repaired["profile_id"] == expected_profile_id
+    assert repaired["migration_provenance"] == "owner-enrollment-repair-v1"
+    assert len(dynamo.tables["household-memberships"].items) == 3
 
 
 @pytest.mark.parametrize("client_id,token_use", [("main-client", "access"), ("enrollment-client", "id")])
@@ -194,7 +322,7 @@ def test_owner_enrollment_uses_one_resource_client_serialization_layer():
         enroll_owner(event(), dynamodb=dynamo, now=1_000)
 
     operations = captured["TransactItems"]
-    assert len(operations) == 7
+    assert len(operations) == 10
     account = operations[0]["Put"]["Item"]
     auth_identity = operations[1]["Put"]["Item"]
     principal = operations[2]["Put"]["Item"]

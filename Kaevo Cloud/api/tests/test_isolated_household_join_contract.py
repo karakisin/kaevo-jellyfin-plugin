@@ -63,8 +63,92 @@ class BeginTable:
         self.items.append(dict(Item))
 
 
+class ProfileEntitlementTable:
+    name = "test-entitlements"
+
+    def __init__(self, item=None):
+        self.item = dict(item) if item else None
+        self.keys = []
+
+    def get_item(self, *, Key, **_kwargs):
+        self.keys.append(dict(Key))
+        return {"Item": dict(self.item)} if self.item else {}
+
+
 def body(result):
     return json.loads(result["body"])
+
+
+def test_deleted_profile_recovery_reuses_only_the_exact_preserved_entitlement(monkeypatch):
+    profile_id = "profile_" + "r" * 24
+    entitlements_json = '{"plan":"cloud_family","family_enabled":true}'
+    preserved = {
+        "profile_id": profile_id,
+        "entitlements_json": entitlements_json,
+        "created_at": "preserved-created-at",
+        "updated_at": "preserved-updated-at",
+    }
+    table = ProfileEntitlementTable(preserved)
+    monkeypatch.setattr(join, "entitlements", table)
+
+    operation = join._profile_setup_entitlement_operation(
+        profile_id=profile_id,
+        owner_entitlement={"entitlements_json": entitlements_json},
+        consumed_invitation={"deleted_profile_recovery": True},
+        created="new-created-at",
+    )
+
+    assert table.keys == [{"profile_id": profile_id}]
+    assert operation["label"] == "preserved_entitlement"
+    write = operation["transaction"]["Put"]
+    assert write["Item"] == preserved
+    assert write["ConditionExpression"] == (
+        "profile_id = :profile_id AND entitlements_json = :entitlements_json"
+    )
+    assert write["ExpressionAttributeValues"] == {
+        ":profile_id": profile_id,
+        ":entitlements_json": entitlements_json,
+    }
+
+
+def test_deleted_profile_recovery_rejects_a_different_preserved_entitlement(monkeypatch):
+    profile_id = "profile_" + "r" * 24
+    monkeypatch.setattr(join, "entitlements", ProfileEntitlementTable({
+        "profile_id": profile_id,
+        "entitlements_json": '{"plan":"different"}',
+    }))
+
+    with pytest.raises(
+        join.AccountFoundationError,
+        match="deleted_profile_recovery_entitlement_conflict",
+    ):
+        join._profile_setup_entitlement_operation(
+            profile_id=profile_id,
+            owner_entitlement={"entitlements_json": '{"plan":"cloud_family"}'},
+            consumed_invitation={"deleted_profile_recovery": True},
+            created="new-created-at",
+        )
+
+
+def test_normal_invitation_still_requires_a_new_entitlement_row(monkeypatch):
+    table = ProfileEntitlementTable({
+        "profile_id": "profile_" + "n" * 24,
+        "entitlements_json": '{"plan":"unexpected"}',
+    })
+    monkeypatch.setattr(join, "entitlements", table)
+
+    operation = join._profile_setup_entitlement_operation(
+        profile_id="profile_" + "n" * 24,
+        owner_entitlement={"entitlements_json": '{"plan":"cloud_family"}'},
+        consumed_invitation={"deleted_profile_recovery": False},
+        created="new-created-at",
+    )
+
+    assert table.keys == []
+    assert operation["label"] == "copied_entitlement"
+    assert operation["transaction"]["Put"]["ConditionExpression"] == (
+        "attribute_not_exists(profile_id)"
+    )
 
 
 def test_rate_limits_are_isolated_by_join_phase(monkeypatch):
@@ -571,11 +655,10 @@ def test_completion_iam_allows_only_the_four_missing_transactional_puts():
 def test_profile_setup_iam_allows_only_its_transactional_record_writes():
     template = (Path(__file__).parents[2] / "infra" / "template.yaml").read_text()
     start = template.index("Sid: PutProfileSetupRecordsTransactionally")
-    end = template.index("Sid: ResolveAuthenticatedSubjectOnly", start)
+    end = template.index("Sid: DeleteConsumedInvitationTransactionally", start)
     statement = template[start:end]
 
     assert "dynamodb:PutItem" in statement
-    assert "dynamodb:UpdateItem" in statement
     assert "dynamodb:EnclosingOperation: TransactWriteItems" in statement
     allowed = {
         "KaevoIdentityProfilesTable",
@@ -585,8 +668,7 @@ def test_profile_setup_iam_allows_only_its_transactional_record_writes():
         "KaevoEntitlementsTable",
         "KaevoPrincipalsTable",
         "KaevoIdentityMembershipsTable",
-        "KaevoHouseholdMembershipsTable",
-        "KaevoIdentityHouseholdsTable",
+        "KaevoAccountLifecycleV2Table",
     }
     referenced = {
         line.strip().removeprefix("- !GetAtt ").removeprefix("Resource: !GetAtt ").removesuffix(".Arn")
@@ -594,9 +676,27 @@ def test_profile_setup_iam_allows_only_its_transactional_record_writes():
         if "!GetAtt" in line
     }
     assert referenced == allowed
+    assert "dynamodb:UpdateItem" not in statement
     assert "dynamodb:DeleteItem" not in statement
     assert "dynamodb:Scan" not in statement
     assert "dynamodb:Query" not in statement
+    assert "Resource: '*'" not in statement
+
+
+def test_profile_setup_iam_deletes_only_its_consumed_invitation_transactionally():
+    template = (Path(__file__).parents[2] / "infra" / "template.yaml").read_text()
+    start = template.index("Sid: DeleteConsumedInvitationTransactionally")
+    end = template.index("Sid: ActivatePendingProfileMembershipTransactionally", start)
+    statement = template[start:end]
+
+    assert "dynamodb:DeleteItem" in statement
+    assert "dynamodb:EnclosingOperation: TransactWriteItems" in statement
+    assert "Resource: !GetAtt KaevoHouseholdInvitationsTable.Arn" in statement
+    for forbidden_action in (
+        "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Scan", "dynamodb:Query"
+    ):
+        assert forbidden_action not in statement
+    assert statement.count("!GetAtt") == 1
     assert "Resource: '*'" not in statement
 
 
@@ -650,6 +750,18 @@ def test_complete_creates_only_normalized_pending_membership_and_defers_profile_
     assert 'TableName": ENTITLEMENTS_TABLE' not in complete_source
     assert "transact_write_items(TransactItems=transaction)" in complete_source
     assert "_serialize_transact_items" not in complete_source
+
+
+def test_consumed_invitation_is_retained_for_the_profile_setup_window():
+    source = (Path(__file__).parents[2] / "api" / "src" / "household_join_handler.py").read_text()
+    complete_source = source[
+        source.index("def complete(event, *, native_password=False):"):
+        source.index("def onboarding_status(event):")
+    ]
+    assert '"state": "consumed"' in complete_source
+    assert '"expires_at": now + RETENTION_SECONDS' in complete_source
+    assert '"cleanup_at": now + RETENTION_SECONDS' in complete_source
+    assert '"code_expires_at"' not in complete_source
 
 
 def test_join_policy_normalizers_keep_watching_separate_and_fail_closed_for_kids():

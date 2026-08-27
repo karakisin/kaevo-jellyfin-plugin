@@ -69,6 +69,10 @@ def local_tables(monkeypatch):
         "AUTH_IDENTITIES_TABLE": (f"ksec011a-auth-identities-{suffix}", "auth_identity_key"),
         "PRINCIPALS_TABLE": (f"ksec011a-principals-{suffix}", "principal_id"),
         "IDENTITY_MEMBERSHIPS_TABLE": (f"ksec011a-memberships-{suffix}", "principal_id"),
+        "HOUSEHOLD_MEMBERSHIPS_TABLE": (
+            f"ksec011a-household-memberships-{suffix}",
+            ("household_id", "membership_id"),
+        ),
         "IDENTITY_HOUSEHOLDS_TABLE": (f"ksec011a-households-{suffix}", "household_id"),
         "IDENTITY_PROFILES_TABLE": (f"ksec011a-profiles-{suffix}", "profile_id"),
         "SECURITY_AUDIT_TABLE": (f"ksec011a-audit-{suffix}", "event_id"),
@@ -76,11 +80,18 @@ def local_tables(monkeypatch):
     dynamo = resource()
     for environment_name, (table_name, key_name) in table_names.items():
         monkeypatch.setenv(environment_name, table_name)
+        key_names = key_name if isinstance(key_name, tuple) else (key_name,)
         dynamo.create_table(
             TableName=table_name,
             BillingMode="PAY_PER_REQUEST",
-            KeySchema=[{"AttributeName": key_name, "KeyType": "HASH"}],
-            AttributeDefinitions=[{"AttributeName": key_name, "AttributeType": "S"}],
+            KeySchema=[
+                {"AttributeName": name, "KeyType": "HASH" if index == 0 else "RANGE"}
+                for index, name in enumerate(key_names)
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": name, "AttributeType": "S"}
+                for name in key_names
+            ],
         ).wait_until_exists()
     monkeypatch.setenv("EXPECTED_COGNITO_ISSUER", "https://issuer.example/pool")
     monkeypatch.setenv("EXPECTED_ENROLLMENT_CLIENT_ID", "enrollment-client")
@@ -103,7 +114,10 @@ def native_items(dynamo, table_names):
 
 
 def assert_complete_graph(items, subject):
-    assert all(len(records) == 1 for records in items.values())
+    assert all(
+        len(records) == (3 if name == "HOUSEHOLD_MEMBERSHIPS_TABLE" else 1)
+        for name, records in items.items()
+    )
     principal = items["PRINCIPALS_TABLE"][0]
     account = items["ACCOUNTS_TABLE"][0]
     auth_identity = items["AUTH_IDENTITIES_TABLE"][0]
@@ -111,6 +125,7 @@ def assert_complete_graph(items, subject):
     household = items["IDENTITY_HOUSEHOLDS_TABLE"][0]
     profile = items["IDENTITY_PROFILES_TABLE"][0]
     audit = items["SECURITY_AUDIT_TABLE"][0]
+    normalized_memberships = items["HOUSEHOLD_MEMBERSHIPS_TABLE"]
     assert principal["principal_id"] == membership["principal_id"] == subject
     assert account["account_id"] == auth_identity["account_id"] == principal["account_id"]
     assert auth_identity["provider"] == "cognito"
@@ -123,9 +138,20 @@ def assert_complete_graph(items, subject):
     assert audit["household_id"] != household["household_id"]
     assert audit["actor_ref"].startswith("apr1_")
     assert subject not in json.dumps(audit)
+    assert {item["entity_type"] for item in normalized_memberships} == {
+        "HouseholdMembership",
+        "HouseholdMembershipAccountGuard",
+        "HouseholdMembershipOwnerGuard",
+    }
+    normalized_membership = next(
+        item for item in normalized_memberships
+        if item["entity_type"] == "HouseholdMembership"
+    )
+    assert normalized_membership["profile_id"] == profile["profile_id"]
+    assert normalized_membership["migration_provenance"] == "owner-enrollment-v1"
 
 
-def test_real_transaction_commits_five_typed_records_and_replays(local_tables):
+def test_real_transaction_commits_complete_typed_graph_and_replays(local_tables):
     dynamo, table_names = local_tables
     first = enroll_owner(event(), dynamodb=dynamo, now=1_000)
     assert first["statusCode"] == 201
@@ -136,13 +162,16 @@ def test_real_transaction_commits_five_typed_records_and_replays(local_tables):
 
     raw = client()
     key_names = {
-        environment_name: key_name
+        environment_name: (key_name if isinstance(key_name, tuple) else (key_name,))
         for environment_name, (_table_name, key_name) in table_names.items()
     }
     for environment_name, (table_name, _key_name) in table_names.items():
         wire_items = raw.scan(TableName=table_name, ConsistentRead=True)["Items"]
-        assert len(wire_items) == 1
-        assert set(wire_items[0][key_names[environment_name]]) == {"S"}
+        expected_count = 3 if environment_name == "HOUSEHOLD_MEMBERSHIPS_TABLE" else 1
+        assert len(wire_items) == expected_count
+        for wire_item in wire_items:
+            for key_name in key_names[environment_name]:
+                assert set(wire_item[key_name]) == {"S"}
     principal = raw.scan(TableName=table_names["PRINCIPALS_TABLE"][0])["Items"][0]
     assert principal["authz_version"] == {"N": "1"}
     assert principal["profile_ids"]["L"][0].keys() == {"S"}

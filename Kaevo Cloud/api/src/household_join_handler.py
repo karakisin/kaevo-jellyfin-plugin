@@ -43,6 +43,10 @@ from handler import (  # Pure protocol helpers; this module never invokes handle
 )
 from identity_authority import AuthorityError, validate_access_token_claims
 from security_identity import IdentityError, verify_dpop
+from account_lifecycle_v2_membership import (
+    member_registry_transaction_actions,
+    owner_shared_guard_transaction_action,
+)
 
 
 JOIN_TABLE = os.environ.get("HOUSEHOLD_JOIN_TRANSACTIONS_TABLE", "")
@@ -58,6 +62,7 @@ PROFILE_BINDINGS_TABLE = os.environ.get("PROFILE_BINDINGS_TABLE", "")
 PROFILE_MAPPINGS_TABLE = os.environ.get("PROFILE_MAPPINGS_TABLE", "")
 CLOUD_PROFILES_TABLE = os.environ.get("CLOUD_PROFILES_TABLE", "")
 HOUSEHOLDS_TABLE = os.environ.get("IDENTITY_HOUSEHOLDS_TABLE", "")
+ACCOUNT_LIFECYCLE_V2_TABLE = os.environ.get("ACCOUNT_LIFECYCLE_V2_TABLE", "")
 USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 EXPECTED_ISSUER = os.environ.get("EXPECTED_COGNITO_ISSUER", "")
 EXPECTED_CLIENT_ID = os.environ.get("EXPECTED_NATIVE_CLIENT_ID", "")
@@ -94,6 +99,10 @@ profile_bindings = dynamodb.Table(PROFILE_BINDINGS_TABLE) if PROFILE_BINDINGS_TA
 profile_mappings = dynamodb.Table(PROFILE_MAPPINGS_TABLE) if PROFILE_MAPPINGS_TABLE else None
 cloud_profiles = dynamodb.Table(CLOUD_PROFILES_TABLE) if CLOUD_PROFILES_TABLE else None
 households = dynamodb.Table(HOUSEHOLDS_TABLE) if HOUSEHOLDS_TABLE else None
+account_lifecycle_v2 = (
+    dynamodb.Table(ACCOUNT_LIFECYCLE_V2_TABLE)
+    if ACCOUNT_LIFECYCLE_V2_TABLE else None
+)
 cognito = boto3.client("cognito-idp")
 LOGGER = logging.getLogger(__name__)
 
@@ -174,11 +183,77 @@ def _family_seat_limit(entitlement_item):
         raise AccountFoundationError("household_seat_entitlement_invalid")
     if (
         entitlement.get("family_enabled") is not True
-        or entitlement.get("cloud_enabled") is not True
         or not 1 <= limit <= 100
     ):
         raise AccountFoundationError("household_seat_entitlement_invalid")
     return limit
+
+
+def _profile_setup_entitlement_operation(
+    *, profile_id, owner_entitlement, consumed_invitation, created,
+):
+    """Build the one guarded entitlement write owned by Profile Setup.
+
+    A normal invitation creates a fresh profile ID, so its entitlement row
+    must not already exist. Deleted-profile recovery deliberately reuses the
+    tombstoned profile ID. If that exact row was preserved, accept it only
+    when its entitlement payload exactly matches the household owner's current
+    payload, then protect the no-op rewrite with the same equality condition.
+    """
+    owner_entitlements_json = str(
+        (owner_entitlement or {}).get("entitlements_json") or "{}"
+    )
+    copied = {
+        "profile_id": profile_id,
+        "entitlements_json": owner_entitlements_json,
+        "created_at": created,
+        "updated_at": created,
+    }
+    copied_operation = {
+        "label": "copied_entitlement",
+        "transaction": {"Put": {
+            "TableName": ENTITLEMENTS_TABLE,
+            "Item": copied,
+            "ConditionExpression": "attribute_not_exists(profile_id)",
+        }},
+    }
+    if not (
+        isinstance(consumed_invitation, dict)
+        and consumed_invitation.get("deleted_profile_recovery") is True
+    ):
+        return copied_operation
+
+    existing = entitlements.get_item(
+        Key={"profile_id": profile_id}, ConsistentRead=True,
+    ).get("Item")
+    if existing is None:
+        return copied_operation
+    if not (
+        isinstance(existing, dict)
+        and hmac.compare_digest(str(existing.get("profile_id") or ""), profile_id)
+        and hmac.compare_digest(
+            str(existing.get("entitlements_json") or ""),
+            owner_entitlements_json,
+        )
+    ):
+        raise AccountFoundationError(
+            "deleted_profile_recovery_entitlement_conflict"
+        )
+    return {
+        "label": "preserved_entitlement",
+        "transaction": {"Put": {
+            "TableName": ENTITLEMENTS_TABLE,
+            "Item": dict(existing),
+            "ConditionExpression": (
+                "profile_id = :profile_id "
+                "AND entitlements_json = :entitlements_json"
+            ),
+            "ExpressionAttributeValues": {
+                ":profile_id": profile_id,
+                ":entitlements_json": owner_entitlements_json,
+            },
+        }},
+    }
 
 
 def _household_cloud_seat_authority(household_id):
@@ -755,7 +830,7 @@ def _profile_setup_transaction_failure(error, operations):
                 and isinstance(operations[failed[0]], dict)
                 and str(operations[failed[0]].get("label") or "") in {
                     "legacy_profile", "cloud_profile", "profile_binding", "profile_mapping",
-                    "copied_entitlement", "principal", "identity_membership",
+                    "copied_entitlement", "preserved_entitlement", "principal", "identity_membership",
                     "normalized_membership", "join_transaction", "pending_lookup",
                 }
             ):
@@ -1811,7 +1886,18 @@ def complete(event, *, native_password=False):
         "expires_at": now + RETENTION_SECONDS,
         "cleanup_at": now + RETENTION_SECONDS,
     }
-    consumed = {**invitation, "state": "consumed", "consumed_at": created, "member_principal_id": subject}
+    # A consumed invitation remains the immutable source for the reserved
+    # provider tuple until Profile Setup commits and deletes it atomically.
+    # The original join code still expires at ``code_expires_at``; extending
+    # only the record retention cannot make that code reusable.
+    consumed = {
+        **invitation,
+        "state": "consumed",
+        "consumed_at": created,
+        "member_principal_id": subject,
+        "expires_at": now + RETENTION_SECONDS,
+        "cleanup_at": now + RETENTION_SECONDS,
+    }
     transaction_operations = [
         {
             "label": "account", "table": accounts, "key": {"account_id": account_id},
@@ -2119,6 +2205,7 @@ def profile_setup(event):
         return _error("manual_review_required", 409)
     role = age_role.value
     household_access = access_role.value
+    registry_profile_binding_id = ""
     try:
         if action == "create_profile":
             reserved_profile_id = str(membership.get("reserved_profile_id") or "").strip()
@@ -2182,6 +2269,7 @@ def profile_setup(event):
             }
             normal_profile = {**creation.profile, **authority}
             binding = creation.binding
+            registry_profile_binding_id = str(binding.get("binding_id") or "")
             outcome = "profile_created"
         elif action == "map_existing_profile":
             profile_id = str(body.get("cloud_profile_id") or "")
@@ -2199,6 +2287,7 @@ def profile_setup(event):
                     raise AccountFoundationError("profile_classification_conflict")
                 existing_binding = profile_bindings.get_item(Key={"account_id": account_id, "profile_id": profile_id}, ConsistentRead=True).get("Item")
                 validate_binding(existing_binding, account_id=account_id, profile=normal_profile, household_id=household_id)
+                registry_profile_binding_id = str(existing_binding.get("binding_id") or "")
             except AccountFoundationError:
                 return _error("manual_review_required", 409)
             outcome = "profile_mapped"
@@ -2207,13 +2296,23 @@ def profile_setup(event):
         mapping = build_confirmed_mapping(installation_id=installation_id, local_source_id=source_id, account_id=account_id, household_id=household_id, cloud_profile_id=profile_id, now_iso=created, now_epoch=now)
     except AccountFoundationError:
         return _error("transaction_invalid")
-    entitlement = None
+    if not registry_profile_binding_id:
+        return _error("manual_review_required", 409)
+    entitlement_operation = None
     seat_reservation = None
     if action == "create_profile":
         owner_entitlement = entitlements.get_item(Key={"profile_id": str(item.get("owner_profile_id") or "")}, ConsistentRead=True).get("Item")
         if not owner_entitlement:
             return _error("manual_review_required", 409)
-        entitlement = {"profile_id": profile_id, "entitlements_json": str(owner_entitlement.get("entitlements_json") or "{}"), "created_at": created, "updated_at": created}
+        try:
+            entitlement_operation = _profile_setup_entitlement_operation(
+                profile_id=profile_id,
+                owner_entitlement=owner_entitlement,
+                consumed_invitation=consumed_invitation,
+                created=created,
+            )
+        except AccountFoundationError:
+            return _error("manual_review_required", 409)
         if cloud_access_enabled:
             try:
                 household_owner_account_id, stored_seat_profile_ids = (
@@ -2230,6 +2329,62 @@ def profile_setup(event):
                 )
             except AccountFoundationError as error:
                 return _error(error.reason, 409)
+    lifecycle_transaction_operations = []
+    if account_lifecycle_v2 is not None:
+        existing_member_root = account_lifecycle_v2.get_item(
+            Key={"account_id": account_id, "record_key": "root"},
+            ConsistentRead=True,
+        ).get("Item")
+        if existing_member_root is not None:
+            return _error("manual_review_required", 409)
+        household_record = households.get_item(
+            Key={"household_id": household_id}, ConsistentRead=True,
+        ).get("Item")
+        owner_account_id = str((household_record or {}).get("account_id") or "")
+        if not owner_account_id or hmac.compare_digest(owner_account_id, account_id):
+            return _error("manual_review_required", 409)
+        owner_root = account_lifecycle_v2.get_item(
+            Key={"account_id": owner_account_id, "record_key": "root"},
+            ConsistentRead=True,
+        ).get("Item")
+        owner_lifecycle_account_id = None
+        if owner_root is not None:
+            if not (
+                isinstance(owner_root, dict)
+                and owner_root.get("record_type") == "account_lifecycle_root"
+                and owner_root.get("state") == "active"
+                and owner_root.get("account_role") == "owner"
+                and int(owner_root.get("revision") or 0) >= 1
+            ):
+                return _error("manual_review_required", 409)
+            owner_lifecycle_account_id = owner_account_id
+            lifecycle_transaction_operations.append({
+                "label": "account_lifecycle_v2_owner_guard",
+                "transaction": owner_shared_guard_transaction_action(
+                    table_name=ACCOUNT_LIFECYCLE_V2_TABLE,
+                    owner_account_id=owner_account_id,
+                    expected_revision=int(owner_root["revision"]),
+                    now=now,
+                ),
+            })
+        try:
+            lifecycle_transaction_operations.extend({
+                "label": "account_lifecycle_v2_member_registry",
+                "transaction": operation,
+            } for operation in member_registry_transaction_actions(
+                table_name=ACCOUNT_LIFECYCLE_V2_TABLE,
+                account_id=account_id,
+                subject=subject,
+                auth_identity_key=provider_subject_key("cognito", subject),
+                household_id=household_id,
+                membership_id=household_membership_id(account_id, household_id),
+                profile_id=profile_id,
+                profile_binding_id=registry_profile_binding_id,
+                owner_account_id=owner_lifecycle_account_id,
+                now=now,
+            ))
+        except (TypeError, ValueError):
+            return _error("manual_review_required", 409)
     normalized_key = {"household_id": household_id, "membership_id": household_membership_id(account_id, household_id)}
     active_authority = {
         "role": role,
@@ -2267,8 +2422,23 @@ def profile_setup(event):
         {"label": "cloud_profile", "transaction": {"Put": {"TableName": CLOUD_PROFILES_TABLE, "Item": normal_profile, "ConditionExpression": "attribute_not_exists(profile_id)"}}} if action == "create_profile" else None,
         {"label": "profile_binding", "transaction": {"Put": {"TableName": PROFILE_BINDINGS_TABLE, "Item": binding, "ConditionExpression": "attribute_not_exists(account_id) AND attribute_not_exists(profile_id)"}}} if binding else None,
         {"label": "profile_mapping", "transaction": {"Put": {"TableName": PROFILE_MAPPINGS_TABLE, "Item": mapping, "ConditionExpression": "attribute_not_exists(installation_id) AND attribute_not_exists(local_profile_source_id)"}}},
-        {"label": "copied_entitlement", "transaction": {"Put": {"TableName": ENTITLEMENTS_TABLE, "Item": entitlement, "ConditionExpression": "attribute_not_exists(profile_id)"}}} if entitlement else None,
+        entitlement_operation,
         seat_reservation,
+        {"label": "consumed_invitation_cleanup", "transaction": {"Delete": {
+            "TableName": INVITATIONS_TABLE,
+            "Key": {"code_hash": str(item.get("invitation_code_hash") or "")},
+            "ConditionExpression": (
+                "#state = :consumed AND household_id = :household_id "
+                "AND profile_id = :profile_id AND member_principal_id = :principal_id"
+            ),
+            "ExpressionAttributeNames": {"#state": "state"},
+            "ExpressionAttributeValues": {
+                ":consumed": "consumed",
+                ":household_id": household_id,
+                ":profile_id": profile_id,
+                ":principal_id": subject,
+            },
+        }}},
         {"label": "principal", "transaction": {"Put": {
             "TableName": PRINCIPALS_TABLE,
             "Item": active_principal,
@@ -2320,6 +2490,7 @@ def profile_setup(event):
         }}},
         {"label": "join_transaction", "transaction": {"Update": {"TableName": JOIN_TABLE, "Key": {"join_resume_hash": str(item["join_resume_hash"])}, "UpdateExpression": "SET #state = :completed, profile_id = :profile, updated_at = :updated", "ConditionExpression": "#state = :accepted", "ExpressionAttributeNames": {"#state": "state"}, "ExpressionAttributeValues": {":completed": "completed", ":accepted": "membership_accepted", ":profile": profile_id, ":updated": created}}}},
         {"label": "pending_lookup", "transaction": {"Update": {"TableName": JOIN_TABLE, "Key": {"join_resume_hash": _pending_lookup_key(subject, str(item.get("device_binding_hash") or ""))}, "UpdateExpression": "SET #state = :completed, profile_id = :profile, updated_at = :updated", "ConditionExpression": "#state = :pending", "ExpressionAttributeNames": {"#state": "state"}, "ExpressionAttributeValues": {":completed": "completed", ":pending": "profile_setup_required", ":profile": profile_id, ":updated": created}}}},
+        *lifecycle_transaction_operations,
     ]
     transaction_operations = [entry for entry in transaction_operations if entry is not None]
     transaction = [entry["transaction"] for entry in transaction_operations]

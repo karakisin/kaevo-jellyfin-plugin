@@ -482,6 +482,8 @@ def test_iac_scopes_the_v3_authorization_signing_secret_to_only_the_api_lambda()
     assert "PAIRING_V3_AUTHORIZATION_KEY_ID: !If [IsProduction, v3-production-20260820-1, v3-dev-20260722-1]" in api
     assert "ReadPairingV3AuthorizationSigningKey" in api
     assert "Resource: !Ref KaevoPairingV3AuthorizationSigningSecret" in api
+    assert "HOUSEHOLD_MEMBERSHIPS_TABLE: !Ref KaevoHouseholdMembershipsTable" in owner
+    assert "- !GetAtt KaevoHouseholdMembershipsTable.Arn" in owner
 
 
 def test_redemption_rejects_jellyfin_user_binding_mismatch(v3_tables):

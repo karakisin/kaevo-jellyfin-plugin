@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Scoped Production deployment for protected Account Lifecycle V2 migration
+
+Parameters:
+  CodeBucket:
+    Type: String
+  CodeKey:
+    Type: String
+  HttpApiId:
+    Type: String
+    Default: o25nzxe9bk
+  PublicApiBaseUrl:
+    Type: String
+    Default: https://o25nzxe9bk.execute-api.us-west-2.amazonaws.com/production
+  AuditReferenceSecretArn:
+    Type: String
+    NoEcho: true
+  ExpectedCognitoIssuer:
+    Type: String
+    Default: https://cognito-idp.us-west-2.amazonaws.com/us-west-2_alttn6ama
+    AllowedPattern: ^https://cognito-idp\.us-west-2\.amazonaws\.com/us-west-2_[A-Za-z0-9]+$
+
+Resources:
+  MigrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ExactLifecycleV2Migration
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadExactLegacyGraphAndProtectedSession
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-accounts
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-auth-identities
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-principals
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-identity-memberships
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-household-memberships
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-household-memberships/index/*
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-identity-households
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-identity-profiles
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-profiles
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-profile-bindings
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-account-lifecycle-v2
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-app-sessions
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-installations
+              - Sid: GuardDPoPReplay
+                Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-app-sessions
+              - Sid: CreateExactLifecycleRegistryAtomically
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:TransactWriteItems
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-account-lifecycle-v2
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-security-audit
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-accounts
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-auth-identities
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-principals
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-identity-memberships
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-household-memberships
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-identity-households
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-identity-profiles
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-profiles
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-profile-bindings
+              - Sid: ConditionExactLifecycleMigrationSnapshots
+                Effect: Allow
+                Action:
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-accounts
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-auth-identities
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-principals
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-identity-memberships
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-household-memberships
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-identity-households
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-identity-profiles
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-profiles
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-production-profile-bindings
+                Condition:
+                  ForAnyValue:StringEquals:
+                    dynamodb:EnclosingOperation:
+                      - TransactWriteItems
+              - Sid: ReadAuditReferenceKey
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref AuditReferenceSecretArn
+
+  MigrationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: kaevo-cloud-production-account-lifecycle-v2-migration
+      Architectures: [arm64]
+      Runtime: python3.12
+      Handler: account_lifecycle_v2_migration.lambda_handler
+      Role: !GetAtt MigrationRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Environment:
+        Variables:
+          KAEVO_ENV: production
+          ACCOUNT_LIFECYCLE_V2_TABLE: kaevo-cloud-production-account-lifecycle-v2
+          ACCOUNTS_TABLE: kaevo-cloud-production-accounts
+          AUTH_IDENTITIES_TABLE: kaevo-cloud-production-auth-identities
+          PRINCIPALS_TABLE: kaevo-cloud-production-principals
+          IDENTITY_MEMBERSHIPS_TABLE: kaevo-cloud-production-identity-memberships
+          HOUSEHOLD_MEMBERSHIPS_TABLE: kaevo-cloud-production-household-memberships
+          IDENTITY_HOUSEHOLDS_TABLE: kaevo-cloud-production-identity-households
+          IDENTITY_PROFILES_TABLE: kaevo-cloud-production-identity-profiles
+          PROFILES_TABLE: kaevo-cloud-production-profiles
+          PROFILE_BINDINGS_TABLE: kaevo-cloud-production-profile-bindings
+          APP_SESSIONS_TABLE: kaevo-cloud-production-app-sessions
+          INSTALLATIONS_TABLE: kaevo-cloud-production-installations
+          SECURITY_AUDIT_TABLE: kaevo-cloud-production-security-audit
+          AUDIT_REFERENCE_SECRET_ARN: !Ref AuditReferenceSecretArn
+          EXPECTED_COGNITO_ISSUER: !Ref ExpectedCognitoIssuer
+          PUBLIC_API_BASE_URL: !Ref PublicApiBaseUrl
+
+  MigrationIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApiId
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt MigrationFunction.Arn
+      PayloadFormatVersion: "2.0"
+      TimeoutInMillis: 15000
+
+  MigrationRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApiId
+      RouteKey: POST /v4/account-lifecycle/migrate-existing
+      Target: !Sub integrations/${MigrationIntegration}
+
+  MigrationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref MigrationFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApiId}/*/POST/v4/account-lifecycle/migrate-existing
+
+Outputs:
+  MigrationFunctionName:
+    Value: !Ref MigrationFunction
+  MigrationRouteKey:
+    Value: POST /v4/account-lifecycle/migrate-existing

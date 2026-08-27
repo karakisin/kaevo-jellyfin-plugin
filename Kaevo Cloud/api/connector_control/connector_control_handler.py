@@ -55,6 +55,12 @@ REMOTE_RESPONSE_COMPRESS_THRESHOLD_BYTES = 180_000
 REMOTE_RESPONSE_MAX_STORED_BYTES = 330_000
 SAFE_FINGERPRINT = re.compile(r"^sha256:[A-Za-z0-9_-]{43}$")
 SAFE_NONCE = re.compile(r"^[A-Za-z0-9_-]{22,128}$")
+ACCOUNT_LIFECYCLE_V2_PROVIDER_OPERATIONS = frozenset({
+    "account_lifecycle_v2.seerr.delete_exact_identity",
+    "account_lifecycle_v2.seerr.verify_exact_identity_absence",
+    "account_lifecycle_v2.jellyfin.delete_exact_identity",
+    "account_lifecycle_v2.jellyfin.verify_exact_identity_absence",
+})
 BINDING_OPERATION_PHASE_RANK = {
     "created": 0, "authorized": 1, "dispatch_pending": 2, "dispatched": 3,
     "connector_claimed": 4, "inspection_completed": 5, "mutation_authorized": 6,
@@ -603,6 +609,49 @@ def _status_sort_key(status, timestamp, request_id):
     return f"{status}#{timestamp}#{request_id}"
 
 
+def frozen_profile_provider_binding(item, request_payload):
+    """Project only the immutable binding frozen by Account Lifecycle V2.
+
+    The connector must never derive deletion authority from display data or
+    from the command parameters supplied to the plugin. Malformed lifecycle
+    requests fail closed instead of silently dropping this authority edge.
+    """
+    operation = str((request_payload or {}).get("path") or "").removeprefix("/commands/")
+    if operation not in ACCOUNT_LIFECYCLE_V2_PROVIDER_OPERATIONS:
+        return None
+    try:
+        frozen = json.loads(str((item or {}).get("profile_provider_binding_json") or ""))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("frozen_provider_binding_invalid") from error
+    if not isinstance(frozen, dict):
+        raise ValueError("frozen_provider_binding_invalid")
+
+    provider = str(frozen.get("provider") or "")
+    connector_id = str(frozen.get("connector_id") or "")
+    provider_user_id = str(frozen.get("provider_user_id") or "")
+    request_body = (request_payload or {}).get("body")
+    request_profile_id = str(
+        request_body.get("profile_id") if isinstance(request_body, dict) else ""
+    )
+    item_profile_id = str((item or {}).get("profile_id") or "")
+    if (
+        provider != "jellyfin"
+        or not connector_id
+        or connector_id != str((item or {}).get("connector_id") or "")
+        or not provider_user_id
+        or len(provider_user_id) > 64
+        or not item_profile_id
+        or request_profile_id != item_profile_id
+        or any(ord(character) < 32 for character in provider_user_id)
+    ):
+        raise ValueError("frozen_provider_binding_invalid")
+    return {
+        "provider": provider,
+        "connector_id": connector_id,
+        "provider_user_id": provider_user_id,
+    }
+
+
 def public_remote_request(item):
     request_payload = _parse_json_field(item.get("request_json"), {})
     result = {
@@ -621,6 +670,9 @@ def public_remote_request(item):
         # but unusable providerParameterInvalid failure.
         result["operation"] = str(request_payload.get("path") or "").removeprefix("/commands/")
         result["parameters"] = request_payload.get("body", {})
+        lifecycle_binding = frozen_profile_provider_binding(item, request_payload)
+        if lifecycle_binding is not None:
+            result["profile_provider_binding"] = lifecycle_binding
     return result
 
 

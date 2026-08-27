@@ -134,6 +134,94 @@ def install_manager(monkeypatch):
     monkeypatch.setattr(handler, "_repair_legacy_active_membership_profile_pointer", lambda value: value)
 
 
+def test_deleted_profile_recovery_binding_requires_exact_plugin_and_tombstone_owner(monkeypatch):
+    profile_id = "profile_RdirdBJ1OIm3ezAyDcFvJCZexEwFa-5H"
+    jellyfin_user_id = "dbb85e8dd0844ee097a4c9fd8d358215"
+    invitation = {
+        "code_hash": "a" * 64,
+        "state": "pending",
+        "household_id": "household-1",
+        "profile_id": profile_id,
+        "code_expires_at": handler.epoch_now() + 900,
+        "deleted_profile_recovery": True,
+    }
+    install_manager(monkeypatch)
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable())
+    invitations = ExactInvitationTable(invitation)
+    monkeypatch.setattr(handler, "household_invitations_table", invitations)
+    monkeypatch.setattr(handler, "profile_binding_tombstones_table", ExactTombstoneTable([{
+        "profile_id": profile_id,
+        "household_id": "household-1",
+        "state": "deleted",
+        "expires_at": handler.epoch_now() + 3600,
+        "connector_id": "connector-1",
+        "provider_user_fingerprint": handler._binding_operation_fingerprint(jellyfin_user_id),
+    }]))
+    monkeypatch.setattr(handler, "_household_invitation_records", lambda _household_id: [invitation])
+    monkeypatch.setattr(handler, "_household_identity_profile_records", lambda _household_id: [])
+    monkeypatch.setattr(handler, "_execute_profile_binding_connector_command", lambda *_args, **_kwargs: {
+        "state": "completed",
+        "connector_id": "connector-1",
+        "result": {
+            "owner_state": "found",
+            "source_profile_id": profile_id,
+        },
+    })
+
+    result = handler.save_profile_jellyfin_binding_v3({"body": json.dumps({
+        "jellyfin_user_id": jellyfin_user_id,
+        "explicit_confirmation": True,
+        "invitation_binding_handle": invitation["code_hash"],
+    })}, f"/v3/identity/profiles/{profile_id}/jellyfin-binding")
+
+    assert result["statusCode"] == 200, result
+    assert body(result) == {"state": "profile_jellyfin_binding_saved"}
+    assert invitations.invitation["jellyfin_user_id"] == jellyfin_user_id
+
+
+def test_deleted_profile_recovery_binding_rejects_different_plugin_owner(monkeypatch):
+    profile_id = "profile_RdirdBJ1OIm3ezAyDcFvJCZexEwFa-5H"
+    jellyfin_user_id = "dbb85e8dd0844ee097a4c9fd8d358215"
+    invitation = {
+        "code_hash": "a" * 64,
+        "state": "pending",
+        "household_id": "household-1",
+        "profile_id": profile_id,
+        "code_expires_at": handler.epoch_now() + 900,
+        "deleted_profile_recovery": True,
+    }
+    install_manager(monkeypatch)
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable())
+    monkeypatch.setattr(handler, "household_invitations_table", ExactInvitationTable(invitation))
+    monkeypatch.setattr(handler, "profile_binding_tombstones_table", ExactTombstoneTable([{
+        "profile_id": profile_id,
+        "household_id": "household-1",
+        "state": "deleted",
+        "expires_at": handler.epoch_now() + 3600,
+        "connector_id": "connector-1",
+        "provider_user_fingerprint": handler._binding_operation_fingerprint(jellyfin_user_id),
+    }]))
+    monkeypatch.setattr(handler, "_household_invitation_records", lambda _household_id: [invitation])
+    monkeypatch.setattr(handler, "_household_identity_profile_records", lambda _household_id: [])
+    monkeypatch.setattr(handler, "_execute_profile_binding_connector_command", lambda *_args, **_kwargs: {
+        "state": "completed",
+        "connector_id": "connector-1",
+        "result": {
+            "owner_state": "found",
+            "source_profile_id": "profile_other_1234567890",
+        },
+    })
+
+    result = handler.save_profile_jellyfin_binding_v3({"body": json.dumps({
+        "jellyfin_user_id": jellyfin_user_id,
+        "explicit_confirmation": True,
+        "invitation_binding_handle": invitation["code_hash"],
+    })}, f"/v3/identity/profiles/{profile_id}/jellyfin-binding")
+
+    assert result["statusCode"] == 409
+    assert body(result)["state"] == "profile_jellyfin_binding_recovery_owner_mismatch"
+
+
 def install_seerr_owner(monkeypatch):
     session = {
         "record_type": "access",

@@ -392,6 +392,101 @@ def test_command_claim_preserves_allowlisted_operation_and_parameters(tables):
     assert "token" not in encoded.lower()
 
 
+def test_lifecycle_v2_claim_projects_only_the_frozen_exact_provider_binding(tables):
+    tables[0].items[CONNECTOR_ID]["profile_id"] = PROFILE_ID
+    jellyfin_user_id = "dbb85e8dd0844ee097a4c9fd8d358215"
+    tables[3].items["lifecycle-v2-delete-1"] = {
+        "request_id": "lifecycle-v2-delete-1",
+        "connector_id": CONNECTOR_ID,
+        "profile_id": PROFILE_ID,
+        "status": "pending",
+        "status_created_at": "pending#020#lifecycle-v2-delete-1",
+        "expires_at": control.epoch_now() + 60,
+        "request_json": json.dumps({
+            "provider": "home_server",
+            "method": "COMMAND",
+            "path": "/commands/account_lifecycle_v2.seerr.delete_exact_identity",
+            "query": {},
+            "body": {
+                "operation_id": "ald2-operation-1",
+                "profile_id": PROFILE_ID,
+                "jellyfin_user_id": jellyfin_user_id,
+                "seerr_user_id": 20,
+            },
+        }),
+        "profile_provider_binding_json": json.dumps({
+            "provider": "jellyfin",
+            "connector_id": CONNECTOR_ID,
+            "provider_user_id": jellyfin_user_id,
+        }),
+    }
+
+    result = control.lambda_handler(
+        signed(
+            "/v3/remote-requests/claim",
+            {"connector_id": CONNECTOR_ID},
+            "connectorcontrolnonce0123456877",
+        ),
+        None,
+    )
+    payload = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert payload["state"] == "claimed"
+    assert payload["request"]["profile_provider_binding"] == {
+        "provider": "jellyfin",
+        "connector_id": CONNECTOR_ID,
+        "provider_user_id": jellyfin_user_id,
+    }
+
+
+def test_non_lifecycle_command_cannot_inject_a_provider_binding():
+    projected = control.public_remote_request({
+        "request_id": "ordinary-command-1",
+        "connector_id": CONNECTOR_ID,
+        "profile_id": PROFILE_ID,
+        "status": "in_progress",
+        "request_json": json.dumps({
+            "provider": "home_server",
+            "method": "COMMAND",
+            "path": "/commands/provider.health",
+            "body": {"profile_provider_binding": {
+                "provider": "jellyfin",
+                "connector_id": CONNECTOR_ID,
+                "provider_user_id": "attacker-selected-user",
+            }},
+        }),
+        "profile_provider_binding_json": json.dumps({
+            "provider": "jellyfin",
+            "connector_id": CONNECTOR_ID,
+            "provider_user_id": "attacker-selected-user",
+        }),
+    })
+
+    assert "profile_provider_binding" not in projected
+
+
+def test_lifecycle_v2_binding_mismatch_fails_closed():
+    with pytest.raises(ValueError, match="frozen_provider_binding_invalid"):
+        control.public_remote_request({
+            "request_id": "lifecycle-v2-invalid-1",
+            "connector_id": CONNECTOR_ID,
+            "profile_id": PROFILE_ID,
+            "status": "in_progress",
+            "request_json": json.dumps({
+                "provider": "home_server",
+                "method": "COMMAND",
+                "path": "/commands/account_lifecycle_v2.jellyfin.delete_exact_identity",
+                "body": {"profile_id": PROFILE_ID},
+            }),
+            "profile_provider_binding_json": json.dumps({
+                "provider": "jellyfin",
+                "connector_id": "different-connector",
+                "provider_user_id": "dbb85e8dd0844ee097a4c9fd8d358215",
+            }),
+        })
+
+
 def test_completion_and_failure_transitions_are_consistent(tables):
     tables[0].items[CONNECTOR_ID]["profile_id"] = PROFILE_ID
     for request_id in ("complete-1", "fail-1"):

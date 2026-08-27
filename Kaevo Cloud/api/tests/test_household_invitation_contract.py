@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 import handler
 
 
@@ -33,6 +35,14 @@ class Invitations:
             item for item in self.records
             if item.get("code_hash") != Key.get("code_hash")
         ]
+
+    def update_item(self, *, Key, **_kwargs):
+        for item in self.records:
+            if item.get("code_hash") == Key.get("code_hash"):
+                item["state"] = "revoked"
+                item["revoked_at"] = _kwargs["ExpressionAttributeValues"][":revoked_at"]
+                item.pop("expires_at", None)
+                return
 
 
 class Entitlements:
@@ -79,10 +89,170 @@ def test_invitation_code_is_returned_once_but_only_hash_is_stored(monkeypatch):
     assert invitations.item["code_hash"] == handler._join_code_hash(payload["join_code"])
     assert payload["binding_handle"] == invitations.item["code_hash"]
     assert invitations.item["code_expires_at"] == payload["expires_at"]
-    assert invitations.item["expires_at"] > invitations.item["code_expires_at"]
+    assert "expires_at" not in invitations.item
     assert payload["profile_id"] == invitations.item["profile_id"]
     assert payload["profile_type"] == "adult"
     assert entitlements.item["profile_id"] == "profile-owner"
+
+
+def test_deleted_adult_profile_recovery_reuses_exact_tombstoned_profile_id(monkeypatch):
+    profile_id = "profile_RdirdBJ1OIm3ezAyDcFvJCZexEwFa-5H"
+    invitations = Invitations()
+    monkeypatch.setattr(handler, "household_invitations_table", invitations)
+    monkeypatch.setattr(handler, "identity_profiles_table", RecordsTable("identity-profiles"))
+    monkeypatch.setattr(handler, "profiles_table", RecordsTable("profiles"))
+    monkeypatch.setattr(handler, "profile_binding_tombstones_table", RecordsTable(
+        "profile-binding-tombstones",
+        [{
+            "profile_id": profile_id,
+            "household_id": "household-1",
+            "state": "deleted",
+            "expires_at": handler.epoch_now() + 3600,
+        }],
+    ))
+    monkeypatch.setattr(handler, "KAEVO_ENV", "dev")
+    monkeypatch.setattr(handler, "household_manager_bound_session", lambda _event: ({
+        "profile_id": "profile-owner", "principal_id": "principal-owner",
+        "account_id": "account-1", "household_id": "household-1",
+    }, None))
+    monkeypatch.setattr(
+        handler, "load_entitlements_for_profile",
+        lambda _profile: ({"family_enabled": True}, None),
+    )
+
+    result = handler.create_household_invitation({"body": json.dumps({
+        "display_name": "Kelly Test",
+        "profile_type": "adult",
+        "profile_id": profile_id,
+        "deleted_profile_recovery": True,
+        "request_access_enabled": True,
+    })})
+
+    assert result["statusCode"] == 201, result
+    assert body(result)["profile_id"] == profile_id
+    assert invitations.item["profile_id"] == profile_id
+    assert invitations.item["deleted_profile_recovery"] is True
+
+
+def test_deleted_profile_recovery_ignores_historical_consumed_invitation(monkeypatch):
+    profile_id = "profile_RdirdBJ1OIm3ezAyDcFvJCZexEwFa-5H"
+    invitations = Invitations([{
+        "profile_id": profile_id,
+        "household_id": "household-1",
+        "state": "consumed",
+    }])
+    monkeypatch.setattr(handler, "household_invitations_table", invitations)
+    monkeypatch.setattr(handler, "identity_profiles_table", RecordsTable("identity-profiles"))
+    monkeypatch.setattr(handler, "profiles_table", RecordsTable("profiles"))
+    monkeypatch.setattr(handler, "profile_binding_tombstones_table", RecordsTable(
+        "profile-binding-tombstones",
+        [{
+            "profile_id": profile_id,
+            "household_id": "household-1",
+            "state": "deleted",
+            "expires_at": handler.epoch_now() + 3600,
+        }],
+    ))
+    monkeypatch.setattr(handler, "KAEVO_ENV", "dev")
+    monkeypatch.setattr(handler, "household_manager_bound_session", lambda _event: ({
+        "profile_id": "profile-owner", "principal_id": "principal-owner",
+        "account_id": "account-1", "household_id": "household-1",
+    }, None))
+    monkeypatch.setattr(
+        handler, "load_entitlements_for_profile",
+        lambda _profile: ({"family_enabled": True}, None),
+    )
+
+    result = handler.create_household_invitation({"body": json.dumps({
+        "display_name": "Kelly Test",
+        "profile_type": "adult",
+        "profile_id": profile_id,
+        "deleted_profile_recovery": True,
+        "request_access_enabled": True,
+    })})
+
+    assert result["statusCode"] == 201, result
+    assert invitations.item["profile_id"] == profile_id
+    assert invitations.item["deleted_profile_recovery"] is True
+
+
+@pytest.mark.parametrize("state", ["pending", "consumed"])
+def test_deleted_profile_recovery_fails_closed_for_existing_recovery_invitation(
+    monkeypatch, state,
+):
+    profile_id = "profile_RdirdBJ1OIm3ezAyDcFvJCZexEwFa-5H"
+    invitations = Invitations([{
+        "profile_id": profile_id,
+        "household_id": "household-1",
+        "state": state,
+        "deleted_profile_recovery": True,
+    }])
+    monkeypatch.setattr(handler, "household_invitations_table", invitations)
+    monkeypatch.setattr(handler, "identity_profiles_table", RecordsTable("identity-profiles"))
+    monkeypatch.setattr(handler, "profiles_table", RecordsTable("profiles"))
+    monkeypatch.setattr(handler, "profile_binding_tombstones_table", RecordsTable(
+        "profile-binding-tombstones",
+        [{
+            "profile_id": profile_id,
+            "household_id": "household-1",
+            "state": "deleted",
+            "expires_at": handler.epoch_now() + 3600,
+        }],
+    ))
+    monkeypatch.setattr(handler, "KAEVO_ENV", "dev")
+    monkeypatch.setattr(handler, "household_manager_bound_session", lambda _event: ({
+        "profile_id": "profile-owner", "principal_id": "principal-owner",
+        "account_id": "account-1", "household_id": "household-1",
+    }, None))
+    monkeypatch.setattr(
+        handler, "load_entitlements_for_profile",
+        lambda _profile: ({"family_enabled": True}, None),
+    )
+
+    result = handler.create_household_invitation({"body": json.dumps({
+        "display_name": "Kelly Test",
+        "profile_type": "adult",
+        "profile_id": profile_id,
+        "deleted_profile_recovery": True,
+    })})
+
+    assert result["statusCode"] == 409
+    assert body(result)["state"] == "deleted_profile_recovery_unavailable"
+
+
+def test_deleted_profile_recovery_fails_closed_without_same_household_tombstone(monkeypatch):
+    profile_id = "profile_RdirdBJ1OIm3ezAyDcFvJCZexEwFa-5H"
+    monkeypatch.setattr(handler, "household_invitations_table", Invitations())
+    monkeypatch.setattr(handler, "identity_profiles_table", RecordsTable("identity-profiles"))
+    monkeypatch.setattr(handler, "profiles_table", RecordsTable("profiles"))
+    monkeypatch.setattr(handler, "profile_binding_tombstones_table", RecordsTable(
+        "profile-binding-tombstones",
+        [{
+            "profile_id": profile_id,
+            "household_id": "other-household",
+            "state": "deleted",
+            "expires_at": handler.epoch_now() + 3600,
+        }],
+    ))
+    monkeypatch.setattr(handler, "KAEVO_ENV", "dev")
+    monkeypatch.setattr(handler, "household_manager_bound_session", lambda _event: ({
+        "profile_id": "profile-owner", "principal_id": "principal-owner",
+        "account_id": "account-1", "household_id": "household-1",
+    }, None))
+    monkeypatch.setattr(
+        handler, "load_entitlements_for_profile",
+        lambda _profile: ({"family_enabled": True}, None),
+    )
+
+    result = handler.create_household_invitation({"body": json.dumps({
+        "display_name": "Kelly Test",
+        "profile_type": "adult",
+        "profile_id": profile_id,
+        "deleted_profile_recovery": True,
+    })})
+
+    assert result["statusCode"] == 409
+    assert body(result)["state"] == "deleted_profile_recovery_unavailable"
 
 
 def test_production_does_not_auto_grant_family_access(monkeypatch):
@@ -251,6 +421,70 @@ def test_owner_can_assign_exact_watching_targets_during_device_invitation(monkey
 
     assert result["statusCode"] == 201
     assert invitations.item["watching_profile_ids"] == [target_id]
+
+
+def test_owner_can_grant_an_active_adult_from_the_same_household(monkeypatch):
+    target_id = "profile_1234567890abcdef"
+    invitations = Invitations()
+    monkeypatch.setattr(handler, "household_invitations_table", invitations)
+    monkeypatch.setattr(handler, "identity_profiles_table", RecordsTable("identity-profiles", [{
+        "profile_id": target_id,
+        "account_id": "member-account",
+        "household_id": "household-1",
+        "state": "active",
+    }]))
+    monkeypatch.setattr(handler, "KAEVO_ENV", "dev")
+    monkeypatch.setattr(handler, "household_manager_bound_session", lambda _event: ({
+        "profile_id": "profile-owner", "principal_id": "principal-owner",
+        "account_id": "owner-account", "household_id": "household-1",
+        "household_access_role": "owner",
+    }, None))
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _profile: ({"family_enabled": True}, None))
+
+    result = handler.create_household_invitation({"body": json.dumps({
+        "display_name": "New member",
+        "profile_type": "adult",
+        "switch_profile_ids": [target_id],
+        "watching_profile_ids": [target_id],
+    })})
+
+    assert result["statusCode"] == 201
+    assert invitations.item["switch_profile_ids"] == [target_id]
+    assert invitations.item["watching_profile_ids"] == [target_id]
+
+
+def test_invitation_grants_still_reject_an_active_profile_from_another_household(monkeypatch):
+    target_id = "profile_1234567890abcdef"
+    monkeypatch.setattr(handler, "household_invitations_table", Invitations())
+    monkeypatch.setattr(handler, "identity_profiles_table", RecordsTable("identity-profiles", [{
+        "profile_id": target_id,
+        "account_id": "member-account",
+        "household_id": "other-household",
+        "state": "active",
+    }]))
+    monkeypatch.setattr(handler, "KAEVO_ENV", "dev")
+    monkeypatch.setattr(handler, "household_manager_bound_session", lambda _event: ({
+        "profile_id": "profile-owner", "principal_id": "principal-owner",
+        "account_id": "owner-account", "household_id": "household-1",
+        "household_access_role": "owner",
+    }, None))
+    monkeypatch.setattr(handler, "load_entitlements_for_profile", lambda _profile: ({"family_enabled": True}, None))
+
+    switch_result = handler.create_household_invitation({"body": json.dumps({
+        "display_name": "New member",
+        "profile_type": "adult",
+        "switch_profile_ids": [target_id],
+    })})
+    watching_result = handler.create_household_invitation({"body": json.dumps({
+        "display_name": "New member",
+        "profile_type": "adult",
+        "watching_profile_ids": [target_id],
+    })})
+
+    assert switch_result["statusCode"] == 400
+    assert body(switch_result)["state"] == "invalid_switch_profile_grants"
+    assert watching_result["statusCode"] == 400
+    assert body(watching_result)["state"] == "invalid_watching_targets"
 
 
 def test_existing_parent_managed_kid_profile_can_receive_one_device_invitation(monkeypatch):
@@ -434,10 +668,10 @@ def test_owner_refresh_rotates_only_the_code_and_keeps_the_pending_profile(monke
     refreshed = transaction[1]["Put"]["Item"]
     assert refreshed["profile_id"] == old["profile_id"]
     assert refreshed["code_hash"] != old["code_hash"]
-    assert refreshed["expires_at"] == 1_000 + handler.HOUSEHOLD_INVITATION_RETENTION_SECONDS
+    assert "expires_at" not in refreshed
 
 
-def test_list_marks_expired_pending_invitation_without_rotating_it(monkeypatch):
+def test_list_keeps_expired_pending_invitation_manageable(monkeypatch):
     invitation = {
         "invitation_id": "invite_12345678",
         "profile_id": "profile-pending",
@@ -453,27 +687,15 @@ def test_list_marks_expired_pending_invitation_without_rotating_it(monkeypatch):
     monkeypatch.setattr(handler, "epoch_now", lambda: 1_000)
 
     result = handler.list_household_invitations({})
-    listed = body(result)["invitations"][0]
+    payload = body(result)
 
     assert result["statusCode"] == 200
-    assert listed == {
-        "invitation_id": "invite_12345678",
-        "profile_id": "profile-pending",
-        "display_name": "Margaret",
-        "profile_type": "adult",
-        "canonical_role": "adult",
-        "household_access_role": "member",
-        "cloud_access_enabled": True,
-        "request_access_enabled": False,
-        "switch_profile_ids": [],
-        "state": "expired",
-        "expires_at": 999,
-    }
-    assert "join_code" not in listed
-    assert "code_hash" not in listed
+    assert [item["profile_id"] for item in payload["invitations"]] == ["profile-pending"]
+    assert payload["invitations"][0]["state"] == "expired"
+    assert "archived_invitations" not in payload
 
 
-def test_list_uses_household_query_and_never_returns_revoked_or_deleting_records(monkeypatch):
+def test_list_returns_manageable_unconsumed_records(monkeypatch):
     invitations = Invitations([
         {
             "invitation_id": "invite_pending1",
@@ -483,6 +705,7 @@ def test_list_uses_household_query_and_never_returns_revoked_or_deleting_records
             "profile_type": "adult",
             "state": "pending",
             "code_expires_at": 2_000,
+            "expires_at": 20_000,
         },
         {
             "invitation_id": "invite_revoked1",
@@ -492,6 +715,7 @@ def test_list_uses_household_query_and_never_returns_revoked_or_deleting_records
             "profile_type": "adult",
             "state": "revoked",
             "code_expires_at": 2_000,
+            "expires_at": 30_000,
         },
         {
             "invitation_id": "invite_deleting1",
@@ -501,6 +725,8 @@ def test_list_uses_household_query_and_never_returns_revoked_or_deleting_records
             "profile_type": "adult",
             "state": "deletion_pending",
             "code_expires_at": 2_000,
+            "expires_at": 40_000,
+            "deletion_execute_at_epoch": 35_000,
         },
     ])
     monkeypatch.setattr(handler, "household_invitations_table", invitations)
@@ -510,12 +736,44 @@ def test_list_uses_household_query_and_never_returns_revoked_or_deleting_records
     monkeypatch.setattr(handler, "epoch_now", lambda: 1_000)
 
     result = handler.list_household_invitations({})
-    listed = body(result)["invitations"]
+    payload = body(result)
+    listed = payload["invitations"]
 
-    assert [item["profile_id"] for item in listed] == ["profile-pending"]
+    assert [item["profile_id"] for item in listed] == [
+        "profile-pending", "profile-revoked", "profile-deleting",
+    ]
+    assert "archived_invitations" not in payload
     assert invitations.query_calls
     assert invitations.query_calls[0]["IndexName"] == "household_id-index"
     assert invitations.query_calls[0]["ConsistentRead"] is False
+
+
+def test_revoke_retains_invitation_for_explicit_profile_deletion(monkeypatch):
+    invitation = {
+        "code_hash": "pending-code-hash",
+        "invitation_id": "invite_12345678",
+        "profile_id": "profile-pending",
+        "household_id": "household-1",
+        "state": "pending",
+        "expires_at": 2_000,
+    }
+    invitations = Invitations([invitation])
+    monkeypatch.setattr(handler, "household_invitations_table", invitations)
+    monkeypatch.setattr(handler, "household_manager_bound_session", lambda _event: (
+        {"household_id": "household-1"}, None,
+    ))
+    monkeypatch.setattr(handler, "utc_now_iso", lambda: "2026-08-27T03:30:00Z")
+
+    result = handler.revoke_household_invitation(
+        {}, "/v2/household/invitations/invite_12345678/revoke",
+    )
+
+    assert result["statusCode"] == 200
+    assert body(result)["state"] == "invitation_revoked"
+    assert len(invitations.records) == 1
+    assert invitations.records[0]["state"] == "revoked"
+    assert invitations.records[0]["profile_id"] == "profile-pending"
+    assert "expires_at" not in invitations.records[0]
 
 
 def test_consumed_invitation_cannot_be_refreshed(monkeypatch):
@@ -564,7 +822,7 @@ def test_permanent_invitation_deletion_uses_exact_query_and_confirms_absence(mon
     assert all(call["IndexName"] == "household_id-index" for call in invitations.query_calls)
 
 
-def test_permanent_invitation_deletion_never_deletes_consumed_identity(monkeypatch):
+def test_permanent_invitation_deletion_never_deletes_consumed_active_identity(monkeypatch):
     invitation = {
         "code_hash": "consumed-code-hash",
         "invitation_id": "invite_12345678",
@@ -574,6 +832,15 @@ def test_permanent_invitation_deletion_never_deletes_consumed_identity(monkeypat
     }
     invitations = Invitations([invitation])
     monkeypatch.setattr(handler, "household_invitations_table", invitations)
+    monkeypatch.setattr(handler, "identity_profiles_table", RecordsTable(
+        "identity-profiles",
+        [{
+            "profile_id": "profile-active",
+            "household_id": "household-1",
+            "state": "active",
+        }],
+    ))
+    monkeypatch.setattr(handler, "profiles_table", RecordsTable("profiles"))
     monkeypatch.setattr(handler, "household_manager_bound_session", lambda _event: (
         {"household_id": "household-1"}, None,
     ))
@@ -583,5 +850,30 @@ def test_permanent_invitation_deletion_never_deletes_consumed_identity(monkeypat
     )
 
     assert result["statusCode"] == 409
-    assert body(result)["state"] == "invitation_not_deletable"
+    assert body(result)["state"] == "invitation_profile_still_active"
     assert invitations.records[0]["state"] == "consumed"
+
+
+def test_permanent_invitation_deletion_removes_consumed_orphan(monkeypatch):
+    invitation = {
+        "code_hash": "consumed-code-hash",
+        "invitation_id": "invite_12345678",
+        "profile_id": "profile-deleted",
+        "household_id": "household-1",
+        "state": "consumed",
+    }
+    invitations = Invitations([invitation])
+    monkeypatch.setattr(handler, "household_invitations_table", invitations)
+    monkeypatch.setattr(handler, "identity_profiles_table", RecordsTable("identity-profiles"))
+    monkeypatch.setattr(handler, "profiles_table", RecordsTable("profiles"))
+    monkeypatch.setattr(handler, "household_manager_bound_session", lambda _event: (
+        {"household_id": "household-1"}, None,
+    ))
+
+    result = handler.delete_household_invitation(
+        {}, "/v2/household/invitations/invite_12345678",
+    )
+
+    assert result["statusCode"] == 200
+    assert body(result)["state"] == "invitation_deleted"
+    assert invitations.records == []

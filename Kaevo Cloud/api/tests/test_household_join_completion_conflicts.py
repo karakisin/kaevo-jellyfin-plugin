@@ -184,6 +184,31 @@ def test_cloud_seat_reservation_uses_only_exact_active_device_memberships(monkey
     assert update["ExpressionAttributeValues"][":baseline_count"] == 1
 
 
+def test_local_family_entitlement_can_authorize_household_seats_without_remote_access():
+    entitlement = {
+        "plan": "local_family",
+        "family_enabled": True,
+        "cloud_enabled": False,
+        "family_seats": 6,
+    }
+    item = {"entitlements_json": json.dumps(entitlement)}
+
+    assert join._family_seat_limit(item) == 6
+
+
+def test_non_family_entitlement_cannot_authorize_household_seats():
+    entitlement = {
+        "plan": "cloud_individual",
+        "family_enabled": False,
+        "cloud_enabled": True,
+        "family_seats": 6,
+    }
+    item = {"entitlements_json": json.dumps(entitlement)}
+
+    with pytest.raises(join.AccountFoundationError, match="household_seat_entitlement_invalid"):
+        join._family_seat_limit(item)
+
+
 def test_cloud_seat_ledger_uses_canonical_household_owner_not_joining_member(monkeypatch):
     household = ExactTable({
         "household_id": "household-1",

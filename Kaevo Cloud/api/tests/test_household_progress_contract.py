@@ -31,6 +31,15 @@ class ExactProfileTable:
         return {"Item": dict(item)} if item else {}
 
 
+class ExactPrincipalTable:
+    def __init__(self, items):
+        self.items = {item["principal_id"]: dict(item) for item in items}
+
+    def get_item(self, *, Key, ConsistentRead=False):
+        item = self.items.get(Key["principal_id"])
+        return {"Item": dict(item)} if item else {}
+
+
 class ProgressEventsTable:
     def __init__(self):
         self.items = {}
@@ -81,6 +90,7 @@ def configure(monkeypatch):
     }
     events = ProgressEventsTable()
     monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable([source, target]))
+    monkeypatch.setattr(handler, "principals_table", None)
     monkeypatch.setattr(handler, "events_table", events)
     monkeypatch.setattr(handler, "authenticated_app_session", lambda _: {
         "profile_id": source["profile_id"],
@@ -159,6 +169,78 @@ def test_progress_rejects_a_profile_outside_explicit_watching_audience(monkeypat
     source, events = configure(monkeypatch)
     result = handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[
         source["profile_id"], "cloud-unrelated-003",
+    ]))})
+
+    assert result["statusCode"] == 403
+    assert json.loads(result["body"])["state"] == "viewer_selection_not_authorized"
+    assert events.items == {}
+
+
+def test_progress_accepts_exact_parent_managed_child_from_owner_principal(monkeypatch):
+    source, events = configure(monkeypatch)
+    source.update({
+        "account_id": "account-001",
+        "owner_principal_id": "principal-owner-001",
+        "watching_profile_ids": [],
+    })
+    child = {
+        "profile_id": "cloud-kids-003",
+        "account_id": "account-001",
+        "household_id": source["household_id"],
+        "state": "active",
+        "display_name": "Kids",
+        "profile_type": "kid",
+        "managed_by_owner": True,
+        "owner_principal_id": "principal-owner-001",
+    }
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable([source, child]))
+    monkeypatch.setattr(handler, "principals_table", ExactPrincipalTable([{
+        "principal_id": "principal-owner-001",
+        "account_id": "account-001",
+        "household_id": source["household_id"],
+        "state": "active",
+        "role": "owner",
+        "profile_ids": [source["profile_id"], child["profile_id"]],
+    }]))
+
+    result = handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[
+        source["profile_id"], child["profile_id"],
+    ]))})
+
+    assert result["statusCode"] == 202
+    assert json.loads(result["body"])["profile_ids"] == [source["profile_id"], child["profile_id"]]
+    assert set(profile_id for profile_id, _ in events.items) == {source["profile_id"], child["profile_id"]}
+
+
+def test_progress_rejects_deleted_or_unrelated_parent_managed_profile(monkeypatch):
+    source, events = configure(monkeypatch)
+    source.update({
+        "account_id": "account-001",
+        "owner_principal_id": "principal-owner-001",
+        "watching_profile_ids": [],
+    })
+    removed = {
+        "profile_id": "cloud-removed-003",
+        "account_id": "account-001",
+        "household_id": source["household_id"],
+        "state": "deleted",
+        "display_name": "Removed",
+        "profile_type": "kid",
+        "managed_by_owner": True,
+        "owner_principal_id": "principal-owner-001",
+    }
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable([source, removed]))
+    monkeypatch.setattr(handler, "principals_table", ExactPrincipalTable([{
+        "principal_id": "principal-owner-001",
+        "account_id": "account-001",
+        "household_id": source["household_id"],
+        "state": "active",
+        "role": "owner",
+        "profile_ids": [source["profile_id"], removed["profile_id"]],
+    }]))
+
+    result = handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[
+        source["profile_id"], removed["profile_id"],
     ]))})
 
     assert result["statusCode"] == 403
@@ -260,6 +342,91 @@ def test_progress_read_keeps_an_authorized_viewer_checkpoint_after_a_solo_sessio
     checkpoints = {entry["profile_id"]: entry["position_seconds"] for entry in body["items"][0]["viewer_progress"]}
     assert checkpoints == {"cloud-jefferson-001": 720.0, "cloud-margaret-002": 600.0}
     assert events.items[(source["profile_id"], "household-progress#jellyfin#" + "a" * 32)]
+
+
+def test_progress_read_is_two_way_for_an_exact_family_sync_session(monkeypatch):
+    source, events = configure(monkeypatch)
+    peer_id = "cloud-margaret-002"
+    assert handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[
+        source["profile_id"], peer_id,
+    ]))})["statusCode"] == 202
+
+    # Invitation authority can be one-way. The peer can select Jefferson, but
+    # Jefferson does not gain a broad reciprocal Who's Watching grant. His own
+    # exact item row is nevertheless proof that both profiles explicitly
+    # participated in this one Family Sync session.
+    jefferson = dict(source)
+    jefferson["watching_profile_ids"] = []
+    margaret = {
+        "profile_id": peer_id,
+        "household_id": source["household_id"],
+        "state": "active",
+        "watching_profile_ids": [source["profile_id"]],
+    }
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable([
+        jefferson, margaret,
+    ]))
+
+    assert handler.save_household_progress({"body": json.dumps(request_body(
+        selected_ids=[source["profile_id"]],
+        position_seconds=720,
+        session_started_at_epoch_milliseconds=1_784_000_001_000,
+    ))})["statusCode"] == 202
+    jefferson_key = (
+        source["profile_id"],
+        "household-progress#jellyfin#" + "a" * 32,
+    )
+    assert json.loads(events.items[jefferson_key]["metadata_json"])[
+        "family_sync_profile_ids"
+    ] == [source["profile_id"], peer_id]
+
+    # The peer later advances alone. Reading as Jefferson must return the exact
+    # peer checkpoint and a new revision without discovering any other member.
+    peer_key = (peer_id, "household-progress#jellyfin#" + "a" * 32)
+    peer_item = events.items[peer_key]
+    peer_metadata = json.loads(peer_item["metadata_json"])
+    peer_metadata["position_seconds"] = 1_800
+    peer_item["metadata_json"] = json.dumps(peer_metadata)
+    peer_item["received_at"] = "2026-08-27T11:45:44Z"
+
+    result = handler.get_household_progress({})
+
+    assert result["statusCode"] == 200
+    body = json.loads(result["body"])
+    item = next(entry for entry in body["items"] if entry["item_id"] == "a" * 32)
+    assert item["viewer_profile_ids"] == [source["profile_id"], peer_id]
+    assert {
+        checkpoint["profile_id"]: checkpoint["position_seconds"]
+        for checkpoint in item["viewer_progress"]
+    } == {source["profile_id"]: 720.0, peer_id: 1_800.0}
+    peer_metadata["position_seconds"] = 2_100
+    peer_item["metadata_json"] = json.dumps(peer_metadata)
+    peer_item["received_at"] = "2026-08-27T11:46:00Z"
+    next_body = json.loads(handler.get_household_progress({})["body"])
+    assert next_body["revision"] != body["revision"]
+
+
+def test_progress_read_drops_an_exact_peer_that_left_the_household(monkeypatch):
+    source, _ = configure(monkeypatch)
+    peer_id = "cloud-margaret-002"
+    assert handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[
+        source["profile_id"], peer_id,
+    ]))})["statusCode"] == 202
+    monkeypatch.setattr(handler, "identity_profiles_table", ExactProfileTable([
+        source,
+        {
+            "profile_id": peer_id,
+            "household_id": "household-other",
+            "state": "active",
+        },
+    ]))
+
+    item = json.loads(handler.get_household_progress({})["body"])["items"][0]
+
+    assert item["viewer_profile_ids"] == []
+    assert [checkpoint["profile_id"] for checkpoint in item["viewer_progress"]] == [
+        source["profile_id"],
+    ]
 
 
 def test_independent_solo_histories_do_not_create_family_sync(monkeypatch):

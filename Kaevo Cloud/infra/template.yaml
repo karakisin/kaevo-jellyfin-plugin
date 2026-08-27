@@ -144,6 +144,12 @@ Resources:
         "POST /v2/identity/enroll-owner":
           ThrottlingBurstLimit: 3
           ThrottlingRateLimit: 1
+        "POST /v4/account-lifecycle/enroll-owner":
+          ThrottlingBurstLimit: 3
+          ThrottlingRateLimit: 1
+        "POST /v4/account-lifecycle/migrate-existing":
+          ThrottlingBurstLimit: 2
+          ThrottlingRateLimit: 1
         "POST /v2/identity/social-links":
           ThrottlingBurstLimit: 3
           ThrottlingRateLimit: 1
@@ -292,6 +298,62 @@ Resources:
       KeySchema:
         - AttributeName: principal_id
           KeyType: HASH
+
+  KaevoAccountLifecycleV2Table:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-account-lifecycle-v2
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      AttributeDefinitions:
+        - AttributeName: account_id
+          AttributeType: S
+        - AttributeName: record_key
+          AttributeType: S
+        - AttributeName: operation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: account_id
+          KeyType: HASH
+        - AttributeName: record_key
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: operation_id-index
+          KeySchema:
+            - AttributeName: operation_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: KaevoDataClass
+          Value: account-lifecycle-authority-v2
+
+  KaevoAccountLifecycleV2DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: !Sub kaevo-cloud-${EnvironmentName}-account-lifecycle-v2-dead-letter
+      KmsMasterKeyId: alias/aws/sqs
+      MessageRetentionPeriod: 1209600
+
+  KaevoAccountLifecycleV2Queue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub kaevo-cloud-${EnvironmentName}-account-lifecycle-v2
+      KmsMasterKeyId: alias/aws/sqs
+      VisibilityTimeout: 90
+      MessageRetentionPeriod: 1209600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt KaevoAccountLifecycleV2DeadLetterQueue.Arn
+        maxReceiveCount: 8
 
   KaevoAccountsTable:
     Type: AWS::DynamoDB::Table
@@ -707,6 +769,20 @@ Resources:
         - Key: KaevoDataClass
           Value: pairing-v3-authorization-signing-key
 
+  KaevoAccountLifecycleV2StatusSigningSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub kaevo-cloud-${EnvironmentName}-account-lifecycle-v2-status-signing-key
+      Description: Environment-scoped HMAC key for narrow deletion operation status credentials
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+      Tags:
+        - Key: KaevoDataClass
+          Value: account-lifecycle-v2-status-signing-key
+
   KaevoHomeConnectorsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -867,15 +943,24 @@ Resources:
           EXPECTED_NATIVE_CLIENT_NAME: !If
             - IsSecurityStage
             - kaevo-security-stage-native-oidc
-            - !If [IsDevelopment, kaevo-cloud-dev-native-oidc, ""]
+            - !If
+              - IsProduction
+              - kaevo-cloud-production-native-oidc
+              - !If [IsDevelopment, kaevo-cloud-dev-native-oidc, ""]
           EXPECTED_NATIVE_CALLBACK_URI: !If
             - IsSecurityStage
             - kaevo-security-stage://oauth/callback
-            - !If [IsDevelopment, kaevo://oauth/callback, ""]
+            - !If
+              - IsProduction
+              - kaevo://oauth/callback
+              - !If [IsDevelopment, kaevo://oauth/callback, ""]
           EXPECTED_NATIVE_LOGOUT_URI: !If
             - IsSecurityStage
             - kaevo-security-stage://oauth/logout
-            - !If [IsDevelopment, kaevo://oauth/logout, ""]
+            - !If
+              - IsProduction
+              - kaevo://oauth/logout
+              - !If [IsDevelopment, kaevo://oauth/logout, ""]
           EXPECTED_NATIVE_GOOGLE_ENABLED: !If [HasGoogleIdentityProvider, "true", "false"]
           EXPECTED_NATIVE_APPLE_ENABLED: !If [HasAppleIdentityProvider, "true", "false"]
       Policies:
@@ -1315,6 +1400,7 @@ Resources:
           AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable
           PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
           IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
+          HOUSEHOLD_MEMBERSHIPS_TABLE: !Ref KaevoHouseholdMembershipsTable
           IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
           IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
           SECURITY_AUDIT_TABLE: !Ref KaevoSecurityAuditTable
@@ -1322,6 +1408,7 @@ Resources:
           EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
           EXPECTED_ENROLLMENT_CLIENT_ID: !Ref KaevoEnrollmentUserPoolClient
           EXPECTED_NATIVE_CLIENT_ID: !If [HasNativeOidc, !Ref KaevoSecurityStageNativeOidcClient, ""]
+          COGNITO_USER_POOL_ID: !Ref KaevoUserPool
       Policies:
         - AWSLambdaBasicExecutionRole
         - Statement:
@@ -1330,12 +1417,14 @@ Resources:
               Action:
                 - dynamodb:GetItem
                 - dynamodb:PutItem
+                - dynamodb:UpdateItem
                 - dynamodb:TransactWriteItems
               Resource:
                 - !GetAtt KaevoPrincipalsTable.Arn
                 - !GetAtt KaevoAccountsTable.Arn
                 - !GetAtt KaevoAuthIdentitiesTable.Arn
                 - !GetAtt KaevoIdentityMembershipsTable.Arn
+                - !GetAtt KaevoHouseholdMembershipsTable.Arn
                 - !GetAtt KaevoIdentityHouseholdsTable.Arn
                 - !GetAtt KaevoIdentityProfilesTable.Arn
                 - !GetAtt KaevoSecurityAuditTable.Arn
@@ -1344,6 +1433,11 @@ Resources:
               Action:
                 - secretsmanager:GetSecretValue
               Resource: !Ref KaevoAuditReferenceSecret
+            - Sid: ReadExactEnrollingCognitoUser
+              Effect: Allow
+              Action:
+                - cognito-idp:AdminGetUser
+              Resource: !Sub arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${KaevoUserPool}
       Events:
         EnrollOwner:
           Type: HttpApi
@@ -1362,6 +1456,376 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-owner-enrollment-promotion-v2
+      RetentionInDays: 30
+
+  KaevoAccountLifecycleV2ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-account-lifecycle-v2-api
+      CodeUri: ../api/src/
+      Handler: account_lifecycle_v2_api.lambda_handler
+      Timeout: 15
+      Environment:
+        Variables:
+          KAEVO_ENV: !Ref EnvironmentName
+          ACCOUNT_LIFECYCLE_V2_TABLE: !Ref KaevoAccountLifecycleV2Table
+          ACCOUNT_LIFECYCLE_V2_QUEUE_URL: !Ref KaevoAccountLifecycleV2Queue
+          AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable
+          APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
+          INSTALLATIONS_TABLE: !Ref KaevoInstallationsTable
+          PROFILE_MAPPINGS_TABLE: !Ref KaevoProfileMappingsTable
+          IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
+          HOME_CONNECTORS_TABLE: !Ref KaevoHomeConnectorsTable
+          PUBLIC_API_BASE_URL: !Ref PublicApiBaseUrl
+          ACCOUNT_LIFECYCLE_V2_STATUS_SIGNING_KEY: !Sub '{{resolve:secretsmanager:${KaevoAccountLifecycleV2StatusSigningSecret}:SecretString}}'
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KaevoAccountLifecycleV2Table
+        - Statement:
+            - Sid: ResolveCanonicalAuthIdentityForLifecycleV2
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource: !GetAtt KaevoAuthIdentitiesTable.Arn
+            - Sid: VerifyDPoPBoundLifecycleV2Session
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource:
+                - !GetAtt KaevoAppSessionsTable.Arn
+                - !GetAtt KaevoProfileMappingsTable.Arn
+                - !GetAtt KaevoInstallationsTable.Arn
+                - !GetAtt KaevoIdentityProfilesTable.Arn
+                - !GetAtt KaevoHomeConnectorsTable.Arn
+            - Sid: EnumerateExactAccountLifecycleV2RuntimeResources
+              Effect: Allow
+              Action:
+                - dynamodb:Scan
+              Resource:
+                - !GetAtt KaevoInstallationsTable.Arn
+                - !GetAtt KaevoAppSessionsTable.Arn
+            - Sid: EnqueueConfirmedAccountLifecycleV2Operation
+              Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt KaevoAccountLifecycleV2Queue.Arn
+      Events:
+        DeletionPreflight:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v4/account-lifecycle/deletion-preflights
+            Method: POST
+        ConfirmDeletion:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v4/account-lifecycle/deletions/{operationId}/confirm
+            Method: POST
+        DeletionStatus:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v4/account-lifecycle/deletions/{operationId}
+            Method: GET
+      Tags:
+        KaevoSecurityBoundary: account-lifecycle-v2
+
+  KaevoAccountLifecycleV2ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-account-lifecycle-v2-api
+      RetentionInDays: 30
+
+  KaevoAccountLifecycleV2WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-account-lifecycle-v2-worker
+      CodeUri: ../api/src/
+      Handler: account_lifecycle_v2_worker.lambda_handler
+      Timeout: 60
+      Environment:
+        Variables:
+          KAEVO_ENV: !Ref EnvironmentName
+          ACCOUNT_LIFECYCLE_V2_TABLE: !Ref KaevoAccountLifecycleV2Table
+          REMOTE_REQUESTS_TABLE: !Ref KaevoRemoteRequestsTable
+          ACCOUNTS_TABLE: !Ref KaevoAccountsTable
+          AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable
+          PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
+          IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
+          HOUSEHOLD_MEMBERSHIPS_TABLE: !Ref KaevoHouseholdMembershipsTable
+          IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
+          IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
+          PROFILES_TABLE: !Ref KaevoProfilesTable
+          PROFILE_BINDINGS_TABLE: !Ref KaevoProfileBindingsTable
+          PROFILE_MAPPINGS_TABLE: !Ref KaevoProfileMappingsTable
+          HOUSEHOLD_INVITATIONS_TABLE: !Ref KaevoHouseholdInvitationsTable
+          APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
+          INSTALLATIONS_TABLE: !Ref KaevoInstallationsTable
+          COGNITO_USER_POOL_ID: !Ref KaevoUserPool
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt KaevoAccountLifecycleV2Queue.QueueName
+        - Statement:
+            - Sid: ExecuteExactAccountLifecycleV2Graph
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:DeleteItem
+                - dynamodb:UpdateItem
+                - dynamodb:Query
+              Resource:
+                - !GetAtt KaevoAccountLifecycleV2Table.Arn
+                - !Sub ${KaevoAccountLifecycleV2Table.Arn}/index/*
+                - !GetAtt KaevoRemoteRequestsTable.Arn
+                - !GetAtt KaevoAccountsTable.Arn
+                - !GetAtt KaevoAuthIdentitiesTable.Arn
+                - !GetAtt KaevoPrincipalsTable.Arn
+                - !GetAtt KaevoIdentityMembershipsTable.Arn
+                - !GetAtt KaevoHouseholdMembershipsTable.Arn
+                - !GetAtt KaevoIdentityHouseholdsTable.Arn
+                - !GetAtt KaevoIdentityProfilesTable.Arn
+                - !GetAtt KaevoProfilesTable.Arn
+                - !GetAtt KaevoProfileBindingsTable.Arn
+                - !GetAtt KaevoProfileMappingsTable.Arn
+                - !GetAtt KaevoHouseholdInvitationsTable.Arn
+                - !Sub ${KaevoHouseholdInvitationsTable.Arn}/index/*
+                - !GetAtt KaevoAppSessionsTable.Arn
+                - !Sub ${KaevoAppSessionsTable.Arn}/index/*
+                - !GetAtt KaevoInstallationsTable.Arn
+            - Sid: DeleteAndVerifyExactCognitoSubject
+              Effect: Allow
+              Action:
+                - cognito-idp:ListUsers
+                - cognito-idp:AdminDeleteUser
+              Resource: !Sub arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${KaevoUserPool}
+      Events:
+        OperationQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt KaevoAccountLifecycleV2Queue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+      Tags:
+        KaevoSecurityBoundary: account-lifecycle-v2-worker
+
+  KaevoAccountLifecycleV2WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-account-lifecycle-v2-worker
+      RetentionInDays: 30
+
+  KaevoAccountLifecycleV2EnrollmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-account-lifecycle-v2-enrollment
+      CodeUri: ../api/src/
+      Handler: account_lifecycle_v2_enrollment.lambda_handler
+      Timeout: 15
+      Environment:
+        Variables:
+          KAEVO_ENV: !Ref EnvironmentName
+          ACCOUNT_LIFECYCLE_V2_TABLE: !Ref KaevoAccountLifecycleV2Table
+          ACCOUNTS_TABLE: !Ref KaevoAccountsTable
+          AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable
+          PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
+          IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
+          HOUSEHOLD_MEMBERSHIPS_TABLE: !Ref KaevoHouseholdMembershipsTable
+          IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
+          IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
+          PROFILES_TABLE: !Ref KaevoProfilesTable
+          PROFILE_BINDINGS_TABLE: !Ref KaevoProfileBindingsTable
+          SECURITY_AUDIT_TABLE: !Ref KaevoSecurityAuditTable
+          AUDIT_REFERENCE_SECRET_ARN: !Ref KaevoAuditReferenceSecret
+          EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
+          EXPECTED_ENROLLMENT_CLIENT_ID: !Ref KaevoEnrollmentUserPoolClient
+          EXPECTED_NATIVE_CLIENT_ID: !If [HasNativeOidc, !Ref KaevoSecurityStageNativeOidcClient, ""]
+          COGNITO_USER_POOL_ID: !Ref KaevoUserPool
+      Policies:
+        - Statement:
+            - Sid: CreateAccountLifecycleV2Atomically
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:TransactWriteItems
+              Resource:
+                - !GetAtt KaevoAccountLifecycleV2Table.Arn
+                - !GetAtt KaevoAccountsTable.Arn
+                - !GetAtt KaevoAuthIdentitiesTable.Arn
+                - !GetAtt KaevoPrincipalsTable.Arn
+                - !GetAtt KaevoIdentityMembershipsTable.Arn
+                - !GetAtt KaevoHouseholdMembershipsTable.Arn
+                - !GetAtt KaevoIdentityHouseholdsTable.Arn
+                - !GetAtt KaevoIdentityProfilesTable.Arn
+                - !GetAtt KaevoProfilesTable.Arn
+                - !GetAtt KaevoProfileBindingsTable.Arn
+                - !GetAtt KaevoSecurityAuditTable.Arn
+            - Sid: PutExactAccountLifecycleV2EnrollmentRecords
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource:
+                - !GetAtt KaevoAccountLifecycleV2Table.Arn
+                - !GetAtt KaevoAccountsTable.Arn
+                - !GetAtt KaevoAuthIdentitiesTable.Arn
+                - !GetAtt KaevoPrincipalsTable.Arn
+                - !GetAtt KaevoIdentityMembershipsTable.Arn
+                - !GetAtt KaevoHouseholdMembershipsTable.Arn
+                - !GetAtt KaevoIdentityHouseholdsTable.Arn
+                - !GetAtt KaevoIdentityProfilesTable.Arn
+                - !GetAtt KaevoProfilesTable.Arn
+                - !GetAtt KaevoProfileBindingsTable.Arn
+                - !GetAtt KaevoSecurityAuditTable.Arn
+              Condition:
+                ForAnyValue:StringEquals:
+                  dynamodb:EnclosingOperation:
+                    - TransactWriteItems
+            - Sid: ReadAccountLifecycleV2AuditReferenceKey
+              Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref KaevoAuditReferenceSecret
+            - Sid: ReadExactV2EnrollingCognitoUser
+              Effect: Allow
+              Action:
+                - cognito-idp:AdminGetUser
+              Resource: !Sub arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${KaevoUserPool}
+      Events:
+        EnrollOwner:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v4/account-lifecycle/enroll-owner
+            Method: POST
+            Auth:
+              Authorizer: KaevoEnrollmentAuthorizer
+      Tags:
+        KaevoSecurityBoundary: account-lifecycle-v2-enrollment
+
+  KaevoAccountLifecycleV2EnrollmentLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-account-lifecycle-v2-enrollment
+      RetentionInDays: 30
+
+  KaevoAccountLifecycleV2MigrationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-account-lifecycle-v2-migration
+      CodeUri: ../api/src/
+      Handler: account_lifecycle_v2_migration.lambda_handler
+      Timeout: 15
+      Environment:
+        Variables:
+          KAEVO_ENV: !Ref EnvironmentName
+          ACCOUNT_LIFECYCLE_V2_TABLE: !Ref KaevoAccountLifecycleV2Table
+          ACCOUNTS_TABLE: !Ref KaevoAccountsTable
+          AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable
+          PRINCIPALS_TABLE: !Ref KaevoPrincipalsTable
+          IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
+          HOUSEHOLD_MEMBERSHIPS_TABLE: !Ref KaevoHouseholdMembershipsTable
+          IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
+          IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
+          PROFILES_TABLE: !Ref KaevoProfilesTable
+          PROFILE_BINDINGS_TABLE: !Ref KaevoProfileBindingsTable
+          APP_SESSIONS_TABLE: !Ref KaevoAppSessionsTable
+          INSTALLATIONS_TABLE: !Ref KaevoInstallationsTable
+          SECURITY_AUDIT_TABLE: !Ref KaevoSecurityAuditTable
+          AUDIT_REFERENCE_SECRET_ARN: !Ref KaevoAuditReferenceSecret
+          EXPECTED_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${KaevoUserPool}
+          PUBLIC_API_BASE_URL: !Ref PublicApiBaseUrl
+      Policies:
+        - Statement:
+            - Sid: ReadExactLegacyGraphForLifecycleV2Migration
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+              Resource:
+                - !GetAtt KaevoAccountsTable.Arn
+                - !GetAtt KaevoAuthIdentitiesTable.Arn
+                - !GetAtt KaevoPrincipalsTable.Arn
+                - !GetAtt KaevoIdentityMembershipsTable.Arn
+                - !GetAtt KaevoHouseholdMembershipsTable.Arn
+                - !Sub ${KaevoHouseholdMembershipsTable.Arn}/index/*
+                - !GetAtt KaevoIdentityHouseholdsTable.Arn
+                - !GetAtt KaevoIdentityProfilesTable.Arn
+                - !GetAtt KaevoProfilesTable.Arn
+                - !GetAtt KaevoProfileBindingsTable.Arn
+                - !GetAtt KaevoAccountLifecycleV2Table.Arn
+                - !GetAtt KaevoAppSessionsTable.Arn
+                - !GetAtt KaevoInstallationsTable.Arn
+            - Sid: GuardLifecycleV2MigrationDPoPReplay
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !GetAtt KaevoAppSessionsTable.Arn
+            - Sid: CreateExactLifecycleV2MigrationAtomically
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:TransactWriteItems
+              Resource:
+                - !GetAtt KaevoAccountLifecycleV2Table.Arn
+                - !GetAtt KaevoSecurityAuditTable.Arn
+                - !GetAtt KaevoAccountsTable.Arn
+                - !GetAtt KaevoAuthIdentitiesTable.Arn
+                - !GetAtt KaevoPrincipalsTable.Arn
+                - !GetAtt KaevoIdentityMembershipsTable.Arn
+                - !GetAtt KaevoHouseholdMembershipsTable.Arn
+                - !GetAtt KaevoIdentityHouseholdsTable.Arn
+                - !GetAtt KaevoIdentityProfilesTable.Arn
+                - !GetAtt KaevoProfilesTable.Arn
+                - !GetAtt KaevoProfileBindingsTable.Arn
+            - Sid: ConditionExactLifecycleV2MigrationSnapshots
+              Effect: Allow
+              Action:
+                - dynamodb:ConditionCheckItem
+              Resource:
+                - !GetAtt KaevoAccountsTable.Arn
+                - !GetAtt KaevoAuthIdentitiesTable.Arn
+                - !GetAtt KaevoPrincipalsTable.Arn
+                - !GetAtt KaevoIdentityMembershipsTable.Arn
+                - !GetAtt KaevoHouseholdMembershipsTable.Arn
+                - !GetAtt KaevoIdentityHouseholdsTable.Arn
+                - !GetAtt KaevoIdentityProfilesTable.Arn
+                - !GetAtt KaevoProfilesTable.Arn
+                - !GetAtt KaevoProfileBindingsTable.Arn
+              Condition:
+                ForAnyValue:StringEquals:
+                  dynamodb:EnclosingOperation:
+                    - TransactWriteItems
+            - Sid: ReadAccountLifecycleV2MigrationAuditReferenceKey
+              Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref KaevoAuditReferenceSecret
+      Events:
+        MigrateExisting:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v4/account-lifecycle/migrate-existing
+            Method: POST
+      Tags:
+        KaevoSecurityBoundary: account-lifecycle-v2-migration
+
+  KaevoAccountLifecycleV2MigrationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-account-lifecycle-v2-migration
       RetentionInDays: 30
 
   KaevoCloudApiFunction:
@@ -2259,6 +2723,22 @@ Resources:
       RouteKey: POST /v3/identity/households/ownership-transfer
       Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
 
+  KaevoIdentityV3GetHomeConnectorBindingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: GET /v3/identity/home-connector-binding
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3BindHomeConnectorRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/bind-home-connector
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
   KaevoHouseholdJoinLogGroup:
     Type: AWS::Logs::LogGroup
     DeletionPolicy: Retain
@@ -2313,6 +2793,7 @@ Resources:
                   - !GetAtt KaevoProfileBindingsTable.Arn
                   - !GetAtt KaevoProfileMappingsTable.Arn
                   - !GetAtt KaevoIdentityHouseholdsTable.Arn
+                  - !GetAtt KaevoAccountLifecycleV2Table.Arn
               - Sid: ReadActiveHouseholdCloudSeats
                 Effect: Allow
                 Action:
@@ -2336,6 +2817,7 @@ Resources:
                   - !GetAtt KaevoProfilesTable.Arn
                   - !GetAtt KaevoProfileBindingsTable.Arn
                   - !GetAtt KaevoProfileMappingsTable.Arn
+                  - !GetAtt KaevoAccountLifecycleV2Table.Arn
               # DynamoDB authorizes the individual writes inside a transaction.
               # The Join table's own PutItem/UpdateItem statement covers the
               # pending pointer and transaction state; this statement covers
@@ -2368,6 +2850,19 @@ Resources:
                   - !GetAtt KaevoEntitlementsTable.Arn
                   - !GetAtt KaevoPrincipalsTable.Arn
                   - !GetAtt KaevoIdentityMembershipsTable.Arn
+                  - !GetAtt KaevoAccountLifecycleV2Table.Arn
+                Condition:
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+              # Profile Setup consumes and removes exactly the one invitation
+              # that authenticated this member. Keep that DeleteItem authority
+              # isolated to the invitation table and to the enclosing atomic
+              # profile-setup transaction.
+              - Sid: DeleteConsumedInvitationTransactionally
+                Effect: Allow
+                Action:
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt KaevoHouseholdInvitationsTable.Arn
                 Condition:
                   StringEquals:
                     dynamodb:EnclosingOperation: TransactWriteItems
@@ -2376,6 +2871,14 @@ Resources:
                 Action:
                   - dynamodb:UpdateItem
                 Resource: !GetAtt KaevoHouseholdMembershipsTable.Arn
+                Condition:
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+              - Sid: UpdateLifecycleV2OwnershipGuardTransactionally
+                Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt KaevoAccountLifecycleV2Table.Arn
                 Condition:
                   StringEquals:
                     dynamodb:EnclosingOperation: TransactWriteItems
@@ -2411,6 +2914,7 @@ Resources:
           IDENTITY_MEMBERSHIPS_TABLE: !Ref KaevoIdentityMembershipsTable
           IDENTITY_PROFILES_TABLE: !Ref KaevoIdentityProfilesTable
           IDENTITY_HOUSEHOLDS_TABLE: !Ref KaevoIdentityHouseholdsTable
+          ACCOUNT_LIFECYCLE_V2_TABLE: !Ref KaevoAccountLifecycleV2Table
           ACCOUNTS_TABLE: !Ref KaevoAccountsTable
           AUTH_IDENTITIES_TABLE: !Ref KaevoAuthIdentitiesTable
           HOUSEHOLD_MEMBERSHIPS_TABLE: !Ref KaevoHouseholdMembershipsTable

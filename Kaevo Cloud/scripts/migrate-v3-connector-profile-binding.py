@@ -31,6 +31,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--profiles-table", required=True)
     result.add_argument("--connector-id", required=True)
     result.add_argument("--profile-id", required=True)
+    result.add_argument("--account-id", required=True)
+    result.add_argument("--household-id", required=True)
     result.add_argument("--plugin-instance-id", required=True)
     result.add_argument("--server-id", required=True)
     result.add_argument("--fingerprint", required=True)
@@ -66,8 +68,14 @@ def main() -> None:
         "auth_state": "v3_active",
     }
     mismatches = [key for key, value in expected.items() if str(connector.get(key) or "") != value]
-    profile_account = hashlib.sha256(str(profile.get("account_id") or "").encode("utf-8")).digest()
-    profile_family = hashlib.sha256(str(profile.get("household_id") or "").encode("utf-8")).digest()
+    if str(profile.get("account_id") or "") != args.account_id:
+        mismatches.append("profile_account_id")
+    if str(profile.get("household_id") or "") != args.household_id:
+        mismatches.append("profile_household_id")
+    if str(profile.get("state") or "") != "active":
+        mismatches.append("profile_state")
+    profile_account = hashlib.sha256(args.account_id.encode("utf-8")).digest()
+    profile_family = hashlib.sha256(args.household_id.encode("utf-8")).digest()
     import base64
     encoded_account = base64.urlsafe_b64encode(profile_account).decode("ascii").rstrip("=")
     encoded_family = base64.urlsafe_b64encode(profile_family).decode("ascii").rstrip("=")
@@ -81,6 +89,15 @@ def main() -> None:
     existing_key_id = str(connector.get("plugin_key_id") or "")
     if existing_key_id and existing_key_id != args.plugin_key_id:
         mismatches.append("conflicting_plugin_key_id")
+    existing_account = str(connector.get("account_id") or "")
+    if existing_account and existing_account != args.account_id:
+        mismatches.append("conflicting_account_id")
+    existing_household = str(connector.get("household_id") or "")
+    if existing_household and existing_household != args.household_id:
+        mismatches.append("conflicting_household_id")
+    existing_binding_status = str(connector.get("binding_status") or "")
+    if existing_binding_status and existing_binding_status != "bound":
+        mismatches.append("conflicting_binding_status")
     if mismatches:
         print(json.dumps({
             "migration": "pairing_v3_profile_binding", "mode": "apply" if args.apply else "dry_run",
@@ -92,7 +109,14 @@ def main() -> None:
     if not args.apply:
         print(json.dumps({
             "migration": "pairing_v3_profile_binding", "mode": "dry_run", "result": "ready",
-            "operation": "idempotent_noop" if existing_profile == args.profile_id else "conditional_profile_bind",
+            "operation": (
+                "idempotent_noop"
+                if existing_profile == args.profile_id
+                and existing_account == args.account_id
+                and existing_household == args.household_id
+                and existing_binding_status == "bound"
+                else "conditional_profile_and_household_bind"
+            ),
             "connector_ref": digest(args.connector_id), "profile_ref": digest(args.profile_id),
             "creates_connector": False,
         }, separators=(",", ":"), sort_keys=True))
@@ -109,9 +133,23 @@ def main() -> None:
                 "plugin_instance_id = :plugin_instance AND server_id = :server AND "
                 "plugin_public_key_fingerprint = :fingerprint AND account_binding = :account AND "
                 "family_binding = :family AND #state = :state AND auth_state = :auth AND "
-                "(attribute_not_exists(profile_id) OR profile_id = :profile)"
+                "(attribute_not_exists(profile_id) OR profile_id = :profile) AND "
+                "(attribute_not_exists(account_id) OR account_id = :account_id) AND "
+                "(attribute_not_exists(household_id) OR household_id = :household_id) AND "
+                "(attribute_not_exists(binding_status) OR binding_status = :bound)"
             ),
-            UpdateExpression="SET profile_id = if_not_exists(profile_id, :profile), plugin_key_id = if_not_exists(plugin_key_id, :plugin_key_id), updated_at = :now",
+            UpdateExpression=(
+                "SET profile_id = if_not_exists(profile_id, :profile), "
+                "plugin_key_id = if_not_exists(plugin_key_id, :plugin_key_id), "
+                "account_id = if_not_exists(account_id, :account_id), "
+                "household_id = if_not_exists(household_id, :household_id), "
+                "binding_status = if_not_exists(binding_status, :bound), "
+                "bound_at = if_not_exists(bound_at, :now), "
+                "bound_by_account_id = if_not_exists(bound_by_account_id, :account_id), "
+                "binding_method = if_not_exists(binding_method, :binding_method), "
+                "binding_schema_version = if_not_exists(binding_schema_version, :binding_schema), "
+                "binding_updated_at = :now, updated_at = :now"
+            ),
             ExpressionAttributeNames={"#state": "state"},
             ExpressionAttributeValues={
                 ":protocol": PROTOCOL, ":plugin_instance": args.plugin_instance_id,
@@ -120,6 +158,11 @@ def main() -> None:
                 ":state": args.expected_state, ":auth": "v3_active",
                 ":profile": args.profile_id, ":now": now,
                 ":plugin_key_id": args.plugin_key_id,
+                ":account_id": args.account_id,
+                ":household_id": args.household_id,
+                ":bound": "bound",
+                ":binding_method": "verified_pairing_v3_profile_migration_v1",
+                ":binding_schema": 1,
             },
         )
     except ClientError as error:

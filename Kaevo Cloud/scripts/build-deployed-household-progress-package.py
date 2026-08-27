@@ -3,8 +3,10 @@
 
 This deliberately does not package the working tree or run a broad SAM
 deployment.  It starts from a pinned, previously verified ZIP and changes only
-``handler.py`` after checking every insertion anchor.  That makes a rollback
-the original artifact and avoids carrying unrelated local Cloud drift.
+``handler.py`` after checking every insertion anchor. If the deployed handler
+already has Household Sync, only that exact bounded block is replaced. That
+makes a rollback the original artifact and avoids carrying unrelated local
+Cloud drift.
 """
 
 from __future__ import annotations
@@ -58,8 +60,6 @@ def insert_once(text: str, anchor: str, insertion: str, *, before: bool = False)
 
 
 def patched_handler(deployed: str, source: str) -> str:
-    if "household-progress" in deployed or HOUSEHOLD_BLOCK_START in deployed:
-        raise ValueError("trusted artifact already contains a Household Sync patch")
     block = unique_slice(source, HOUSEHOLD_BLOCK_START, HOUSEHOLD_BLOCK_END)
     if "_household_progress_authorized_target_ids" not in block:
         raise ValueError("Household Sync block is missing its exact-ID authorization helper")
@@ -68,9 +68,21 @@ def patched_handler(deployed: str, source: str) -> str:
     if "Key(\"event_key\").begins_with" not in block:
         raise ValueError("Household Sync read is not constrained to Household Sync keys")
 
-    patched = insert_once(deployed, DEPLOYED_INSERT_ANCHOR, block, before=True)
-    patched = insert_once(patched, REMOTE_COMMAND_ANCHOR, ROUTE_INSERTION)
-    patched = insert_once(patched, CATALOG_ANCHOR, CATALOG_INSERTION)
+    if HOUSEHOLD_BLOCK_START in deployed:
+        deployed_block = unique_slice(
+            deployed, HOUSEHOLD_BLOCK_START, HOUSEHOLD_BLOCK_END,
+        )
+        if deployed.count(ROUTE_INSERTION) != 1:
+            raise ValueError("deployed Household Sync routes are missing or ambiguous")
+        if deployed.count(CATALOG_INSERTION) != 1:
+            raise ValueError("deployed Household Sync route catalog is missing or ambiguous")
+        patched = deployed.replace(deployed_block, block, 1)
+    else:
+        if "household-progress" in deployed:
+            raise ValueError("trusted artifact has an unrecognized Household Sync shape")
+        patched = insert_once(deployed, DEPLOYED_INSERT_ANCHOR, block, before=True)
+        patched = insert_once(patched, REMOTE_COMMAND_ANCHOR, ROUTE_INSERTION)
+        patched = insert_once(patched, CATALOG_ANCHOR, CATALOG_INSERTION)
     compile(patched, "handler.py", "exec")
     return patched
 

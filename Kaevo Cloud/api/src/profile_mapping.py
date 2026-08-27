@@ -28,6 +28,53 @@ def mapping_id(installation_id: Any, source_id: Any) -> str:
     return "pmp1_" + hashlib.sha256(f"{installation}\x00{source}".encode("utf-8")).hexdigest()
 
 
+def mapping_guard_source_id(cloud_profile_id: Any) -> str:
+    """Return the reserved per-installation uniqueness key for a Cloud Profile.
+
+    The guard shares the mapping table's partition so DynamoDB can conditionally
+    claim one local source for a Cloud Profile in the same transaction as the
+    mapping write. Its sort key deliberately remains in the table's validated
+    opaque-source namespace; callers distinguish it by ``entity_type`` and it
+    can never be inferred from a display name or email address.
+    """
+    profile = str(cloud_profile_id or "").strip()
+    if not profile:
+        raise AccountFoundationError("invalid_cloud_profile_id")
+    digest = hashlib.sha256(f"cloud-profile-guard-v1\x00{profile}".encode("utf-8")).hexdigest()
+    return f"lps1_{digest}"
+
+
+def build_mapping_guard(
+    *, installation_id: Any, account_id: Any, household_id: Any,
+    cloud_profile_id: Any, local_source_id: Any, now_iso: str, now_epoch: int,
+) -> dict[str, Any]:
+    installation = str(installation_id or "").strip()
+    account = str(account_id or "").strip()
+    household = str(household_id or "").strip()
+    profile = str(cloud_profile_id or "").strip()
+    source = local_profile_source_id(local_source_id)
+    guard_source = mapping_guard_source_id(profile)
+    if not all((installation, account, household)):
+        raise AccountFoundationError("invalid_mapping_context")
+    return {
+        "installation_id": installation,
+        "local_profile_source_id": guard_source,
+        "mapping_id": "pmg1_" + hashlib.sha256(
+            f"{installation}\x00{profile}".encode("utf-8")
+        ).hexdigest(),
+        "entity_type": "LocalProfileMappingGuard",
+        "account_id": account,
+        "household_id": household,
+        "cloud_profile_id": profile,
+        "current_local_profile_source_id": source,
+        "mapping_state": "active",
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "updated_at_epoch": int(now_epoch),
+        "schema_version": PROFILE_MAPPING_SCHEMA_VERSION,
+    }
+
+
 def build_confirmed_mapping(
     *, installation_id: Any, local_source_id: Any, account_id: Any, household_id: Any,
     cloud_profile_id: Any, now_iso: str, now_epoch: int,

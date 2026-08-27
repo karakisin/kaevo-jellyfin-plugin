@@ -69,6 +69,19 @@ def test_production_receives_an_isolated_api_stage_and_native_oidc_contract():
         "Fn::Sub": "kaevo-cloud-production-${AWS::AccountId}-${AWS::Region}"
     }
 
+    claim_environment = data["Resources"]["KaevoIdentityClaimIssuerFunction"]["Properties"][
+        "Environment"
+    ]["Variables"]
+    expected_native_values = {
+        "EXPECTED_NATIVE_CLIENT_NAME": "kaevo-cloud-production-native-oidc",
+        "EXPECTED_NATIVE_CALLBACK_URI": "kaevo://oauth/callback",
+        "EXPECTED_NATIVE_LOGOUT_URI": "kaevo://oauth/logout",
+    }
+    for name, expected_value in expected_native_values.items():
+        production_branch = claim_environment[name]["Fn::If"][2]["Fn::If"]
+        assert production_branch[0] == "IsProduction"
+        assert production_branch[1] == expected_value
+
 
 def test_production_outputs_are_complete_and_do_not_reuse_development_identity():
     outputs = template()["Outputs"]

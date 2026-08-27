@@ -45,7 +45,11 @@ from household_membership import (
     household_membership_id,
 )
 from profile_binding import build_profile_binding, build_profile_creation
-from profile_mapping import build_confirmed_mapping, local_profile_source_id
+from profile_mapping import (
+    build_confirmed_mapping,
+    mapping_guard_source_id,
+    local_profile_source_id,
+)
 
 
 class Table:
@@ -125,6 +129,8 @@ class Table:
             item["updated_at"] = values[":updated"]
         if ":epoch" in values:
             item["updated_at_epoch"] = values[":epoch"]
+        if ":display_name" in values:
+            item["display_name"] = values[":display_name"]
         self.items[key] = item
         if ":updated_epoch" in values:
             item["updated_at_epoch"] = values[":updated_epoch"]
@@ -187,6 +193,12 @@ class TransactionClient:
                     "updated_at_epoch": values[":updated_epoch"],
                     "revoked_at": values[":updated_at"],
                     "revocation_reason": values[":reason"],
+                })
+            if ":source" in values and item.get("entity_type") == "LocalProfileMappingGuard":
+                item.update({
+                    "current_local_profile_source_id": values[":source"],
+                    "updated_at": values[":updated_at"],
+                    "updated_at_epoch": values[":updated_epoch"],
                 })
             table.items[table.key_for(item)] = item
 
@@ -831,6 +843,103 @@ def test_sole_owner_account_deletion_plan_includes_managed_child_and_caller_last
     assert plan["graphs"]["profile-child"]["member_subject"] == ""
 
 
+def test_sole_owner_account_deletion_accepts_exact_owner_edge_without_member_edge(monkeypatch):
+    _tables, session, context = _prepare_account_deletion_context(monkeypatch)
+    profile = handler.identity_profiles_table.items["profile-1"]
+    profile.pop("member_principal_id", None)
+    membership_id = household_membership_id("acct_1", "household-1")
+    handler.household_memberships_table.items[
+        ("household-1", membership_id)
+    ].pop("profile_id", None)
+
+    plan = handler._account_deletion_plan(session, context)
+
+    assert plan["canonical_profile_ids"] == ["profile-1"]
+    assert plan["graphs"]["profile-1"]["member_subject"] == ""
+
+
+def test_account_deletion_plan_includes_exact_account_bound_cloud_profile(monkeypatch):
+    _tables, session, context = _prepare_account_deletion_context(monkeypatch)
+    cloud_profile_id = "prf1_device_cloud_profile"
+    handler.profiles_table.put_item(Item={
+        "profile_id": cloud_profile_id,
+        "entity_type": "Profile",
+        "household_id": "household-1",
+        "status": "active",
+    })
+    handler.profile_bindings_table.put_item(Item={
+        "account_id": "acct_1",
+        "profile_id": cloud_profile_id,
+        "entity_type": "ProfileBinding",
+        "household_id": "household-1",
+        "status": "active",
+    })
+
+    plan = handler._account_deletion_plan(session, context)
+
+    assert plan["canonical_profile_ids"] == ["profile-1"]
+    assert plan["cloud_profile_ids"] == [cloud_profile_id]
+    assert plan["profile_ids"] == ["profile-1", cloud_profile_id]
+    assert plan["cloud_profile_graphs"][cloud_profile_id]["binding"]["account_id"] == "acct_1"
+
+
+def test_account_deletion_removes_cloud_profile_binding_and_every_device_mapping(monkeypatch):
+    _tables, session, context = _prepare_account_deletion_context(monkeypatch)
+    cloud_profile_id = "prf1_device_cloud_profile"
+    source_one = "lps1_" + "1" * 64
+    source_two = "lps1_" + "2" * 64
+    handler.profiles_table.put_item(Item={
+        "profile_id": cloud_profile_id,
+        "entity_type": "Profile",
+        "household_id": "household-1",
+        "status": "active",
+    })
+    handler.profile_bindings_table.put_item(Item={
+        "account_id": "acct_1",
+        "profile_id": cloud_profile_id,
+        "entity_type": "ProfileBinding",
+        "household_id": "household-1",
+        "status": "active",
+    })
+    handler.profile_mappings_table.put_item(Item=build_confirmed_mapping(
+        installation_id="installation-1", local_source_id=source_one,
+        account_id="acct_1", household_id="household-1",
+        cloud_profile_id=cloud_profile_id,
+        now_iso="2026-08-21T00:00:00Z", now_epoch=1,
+    ))
+    handler.profile_mappings_table.put_item(Item=build_confirmed_mapping(
+        installation_id="installation-2", local_source_id=source_two,
+        account_id="acct_1", household_id="household-1",
+        cloud_profile_id=cloud_profile_id,
+        now_iso="2026-08-21T00:00:00Z", now_epoch=1,
+    ))
+    monkeypatch.setattr(handler, "installations_table", Table("installation_id", [
+        {
+            "installation_id": "installation-1", "principal_id": "subject-1",
+            "account_id": "acct_1", "household_id": "household-1",
+            "created_at_epoch": 1,
+        },
+        {
+            "installation_id": "installation-2", "principal_id": "subject-1",
+            "account_id": "acct_1", "household_id": "household-1",
+            "created_at_epoch": 2,
+        },
+    ]))
+    monkeypatch.setattr(handler, "events_table", Table(("profile_id", "event_key"), []))
+    monkeypatch.setattr(handler, "profile_settings_table", Table("profile_id", []))
+    monkeypatch.setattr(handler, "entitlements_table", Table("profile_id", []))
+    monkeypatch.setattr(handler, "devices_table", Table("device_id", []))
+    monkeypatch.setattr(handler, "s3_client", None)
+    plan = handler._account_deletion_plan(session, context)
+
+    handler._execute_account_cloud_profile_deletion(plan, cloud_profile_id)
+
+    assert cloud_profile_id not in handler.profiles_table.items
+    assert ("acct_1", cloud_profile_id) not in handler.profile_bindings_table.items
+    assert ("installation-1", source_one) not in handler.profile_mappings_table.items
+    assert ("installation-2", source_two) not in handler.profile_mappings_table.items
+
+
 def test_member_account_deletion_plan_is_exact_self_scope(monkeypatch):
     install_identity_context(
         monkeypatch, account_id="member-account", subject="member-subject", role="adult",
@@ -866,6 +975,7 @@ def test_member_account_deletion_plan_is_exact_self_scope(monkeypatch):
 def test_account_deletion_plan_includes_exact_pending_join_lookup(monkeypatch):
     _tables, session, context = _prepare_account_deletion_context(monkeypatch)
     installation_id = "installation.member"
+    session["installation_id"] = installation_id
     installation_hash = handler.hashlib.sha256(installation_id.encode("utf-8")).hexdigest()
     lookup_key = handler._account_deletion_pending_lookup_key(
         "subject-1", installation_id,
@@ -899,9 +1009,43 @@ def test_account_deletion_plan_includes_exact_pending_join_lookup(monkeypatch):
     assert plan["pending_lookup_keys"] == [lookup_key]
 
 
+def test_account_deletion_plan_strongly_reads_current_installation_when_gsi_omits_it(monkeypatch):
+    _tables, session, context = _prepare_account_deletion_context(monkeypatch)
+
+    class LaggingInstallationIndex(Table):
+        def query(self, **_kwargs):
+            return {"Items": []}
+
+    current = {
+        "installation_id": session["installation_id"],
+        "principal_id": session["principal_id"],
+        "account_id": session["account_id"],
+        "household_id": session["household_id"],
+        "state": "active",
+        "revoked": False,
+    }
+    monkeypatch.setattr(
+        handler,
+        "installations_table",
+        LaggingInstallationIndex("installation_id", [current]),
+    )
+
+    plan = handler._account_deletion_plan(session, context)
+
+    assert plan["installation_ids"] == [session["installation_id"]]
+    receipt = handler._account_deletion_receipt_for_plan(
+        "del_0123456789abcdef0123456789abcdef",
+        plan,
+        state="in_progress",
+    )
+    assert receipt["installation_ids"] == [session["installation_id"]]
+    assert receipt["is_owner"] is True
+
+
 def test_account_deletion_plan_rejects_mismatched_pending_join_lookup(monkeypatch):
     _tables, session, context = _prepare_account_deletion_context(monkeypatch)
     installation_id = "installation.member"
+    session["installation_id"] = installation_id
     lookup_key = handler._account_deletion_pending_lookup_key(
         "subject-1", installation_id,
     )
@@ -1028,6 +1172,8 @@ def test_account_deletion_success_returns_only_a_verified_terminal_receipt(monke
         "provider_deletion_requested": False,
         "seerr_identity_absence_confirmed": False,
         "jellyfin_identity_absence_confirmed": False,
+        "cognito_identity_absence_confirmed": True,
+        "kaevo_graph_absence_confirmed": True,
         "subscription_cancellation_required": True,
     }
     assert pending_lookups.get_item(
@@ -1406,7 +1552,31 @@ def test_identity_me_returns_only_explicit_active_bindings(monkeypatch):
         "display_name": "Owner Adult", "profile_type": "adult", "age_classification": "adult",
     })})
     profile_id = json.loads(created["body"])["profile_access"][0]["profile_id"]
-    assert json.loads(handler.identity_me_v3({}, verified_session=session)["body"])["profile_access"][0]["profile_id"] == profile_id
+    profile_access = json.loads(
+        handler.identity_me_v3({}, verified_session=session)["body"]
+    )["profile_access"]
+    assert profile_access[0]["profile_id"] == profile_id
+    assert profile_access[0]["is_self"] is True
+
+    # More than one eligible adult binding is ambiguous and must never be
+    # promoted to self from display fields or account ownership alone.
+    second = handler.create_profile_v3({"body": json.dumps({
+        "display_name": "Second Adult", "profile_type": "adult", "age_classification": "adult",
+    })})
+    assert second["statusCode"] == 200
+    ambiguous_access = json.loads(
+        handler.identity_me_v3({}, verified_session=session)["body"]
+    )["profile_access"]
+    assert not any(item.get("is_self") is True for item in ambiguous_access)
+
+    second_profile_ids = {
+        item["profile_id"]
+        for item in json.loads(second["body"])["profile_access"]
+        if item["profile_id"] != profile_id
+    }
+    assert len(second_profile_ids) == 1
+    second_profile_id = second_profile_ids.pop()
+    tables["profile-bindings"].items[("acct_1", second_profile_id)]["status"] = "revoked"
     # A revoked binding remains historical data but is not resolved access.
     tables["profile-bindings"].items[("acct_1", profile_id)]["status"] = "revoked"
     assert json.loads(handler.identity_me_v3({}, verified_session=session)["body"])["profile_access"] == []
@@ -1444,6 +1614,24 @@ def test_identity_me_exposes_only_the_exact_normalized_self_profile_for_replacem
     # never surfaced as a candidate for device-local mapping.
     membership["profile_id"] = "another-profile"
     assert json.loads(handler.identity_me_v3({}, verified_session=session)["body"])["profile_access"] == []
+
+
+def test_identity_me_repairs_the_exact_fresh_owner_profile_missing_its_display_name(monkeypatch):
+    tables, _transaction_client, session = install_normalized_profile_context(monkeypatch)
+    membership_id = household_membership_id("acct_1", "household-1")
+    membership = tables["household-memberships"].items[("household-1", membership_id)]
+    membership["profile_id"] = "profile-1"
+    identity_profile = handler.identity_profiles_table.items["profile-1"]
+    identity_profile.pop("display_name", None)
+
+    response = handler.identity_me_v3({}, verified_session=session)
+
+    assert response["statusCode"] == 200
+    body = json.loads(response["body"])
+    assert body["profile_access"][0]["profile_id"] == "profile-1"
+    assert body["profile_access"][0]["display_name"] == "My Profile"
+    assert body["profile_access"][0]["is_self"] is True
+    assert handler.identity_profiles_table.items["profile-1"]["display_name"] == "My Profile"
 
 
 def test_identity_me_prefers_exact_profile_request_policy_over_stale_membership_projection(monkeypatch):
@@ -1675,6 +1863,9 @@ def test_owner_recovers_exact_parent_managed_kid_as_switch_and_view_target(monke
 
 def test_owner_roster_reads_back_parent_managed_kid_access_without_membership_or_seat(monkeypatch):
     tables, _transaction_client, session = install_normalized_profile_context(monkeypatch)
+    cognito_identity = next(iter(tables["auth-identities"].items.values()))
+    cognito_identity["normalized_email"] = "owner@example.com"
+    cognito_identity["email_verified"] = True
     membership_id = household_membership_id("acct_1", "household-1")
     membership = tables["household-memberships"].items[("household-1", membership_id)]
     membership["profile_id"] = "profile-1"
@@ -1730,6 +1921,8 @@ def test_owner_roster_reads_back_parent_managed_kid_access_without_membership_or
     assert roster["profile-kid"]["allowed_profile_switch_targets"] == ["profile-1"]
     assert roster["profile-kid"]["allowed_watching_targets"] == ["profile-1"]
     assert roster["profile-kid"]["cloud_access_enabled"] is False
+    assert roster["profile-1"]["account_email"] == "owner@example.com"
+    assert "account_email" not in roster["profile-kid"]
     assert all(
         str(item.get("profile_id") or "") != "profile-kid"
         for item in tables["household-memberships"].items.values()
@@ -1875,6 +2068,8 @@ def test_profile_mapping_preview_and_confirmation_are_explicit_and_installation_
     confirmed_body = json.loads(confirmed["body"])
     assert confirmed_body["state"] == "mapping_confirmed"
     assert tables["profile-mappings"].items[("installation-1", source)]["cloud_profile_id"] == cloud_profile_id
+    guard_key = ("installation-1", mapping_guard_source_id(cloud_profile_id))
+    assert tables["profile-mappings"].items[guard_key]["current_local_profile_source_id"] == source
     repeated = handler.confirm_profile_mapping_v3({"body": json.dumps({
         "local_profile_source_id": source, "cloud_profile_id": cloud_profile_id, "explicit_confirmation": True,
     })})
@@ -1923,13 +2118,52 @@ def test_create_and_confirm_profile_mapping_is_atomic_and_local_only_has_no_clou
     })})
     body = json.loads(created["body"])
     assert body["state"] == "cloud_profile_created_and_mapped"
-    assert len(transaction_client.calls[-1]) == 4
+    assert len(transaction_client.calls[-1]) == 5
     profile = tables["profiles"].get_item(Key={"profile_id": body["cloud_profile_id"]})["Item"]
     assert "watch_history" not in profile and "pin" not in profile
     assert tables["profile-mappings"].items[("installation-1", source)]["mapping_state"] == "confirmed"
     # Local Only is intentionally device-local and has no Cloud route/record.
-    assert len(tables["profile-mappings"].items) == 1
+    assert len(tables["profile-mappings"].items) == 2
     assert local_profile_source_id(source) == source
+
+
+def test_profile_mapping_enforces_one_local_source_per_cloud_profile_and_explicit_rebind(monkeypatch):
+    tables, _transaction_client, _session = install_normalized_profile_context(monkeypatch)
+    created = handler.create_profile_v3({"body": json.dumps({
+        "display_name": "Canonical Owner", "profile_type": "adult", "age_classification": "adult",
+    })})
+    profile_id = json.loads(created["body"])["profile_access"][0]["profile_id"]
+    original_source = "lps1_" + "6" * 64
+    replacement_source = "lps1_" + "7" * 64
+
+    first = handler.confirm_profile_mapping_v3({"body": json.dumps({
+        "local_profile_source_id": original_source,
+        "cloud_profile_id": profile_id,
+        "explicit_confirmation": True,
+    })})
+    assert json.loads(first["body"])["state"] == "mapping_confirmed"
+
+    duplicate = handler.confirm_profile_mapping_v3({"body": json.dumps({
+        "local_profile_source_id": replacement_source,
+        "cloud_profile_id": profile_id,
+        "explicit_confirmation": True,
+    })})
+    assert json.loads(duplicate["body"])["state"] == "duplicate_cloud_profile_mapping"
+    assert ("installation-1", replacement_source) not in tables["profile-mappings"].items
+
+    rebound = handler.confirm_profile_mapping_v3({"body": json.dumps({
+        "local_profile_source_id": replacement_source,
+        "cloud_profile_id": profile_id,
+        "explicit_confirmation": True,
+        "replace_existing_mapping": True,
+    })})
+    rebound_body = json.loads(rebound["body"])
+    assert rebound_body["state"] == "mapping_rebound"
+    assert rebound_body["replaced_local_profile_source_ids"] == [original_source]
+    assert tables["profile-mappings"].items[("installation-1", original_source)]["mapping_state"] == "revoked"
+    assert tables["profile-mappings"].items[("installation-1", replacement_source)]["mapping_state"] == "confirmed"
+    guard_key = ("installation-1", mapping_guard_source_id(profile_id))
+    assert tables["profile-mappings"].items[guard_key]["current_local_profile_source_id"] == replacement_source
 
 
 def test_profile_mapping_conflict_converges_after_concurrent_same_confirmation(monkeypatch):
