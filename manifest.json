@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.17.0",
+        "changelog": "Allows the canonical Kaevo household Owner to submit Seerr requests through the already-authenticated connector identity while preserving exact immutable Seerr user attribution for members.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.17/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "6dc93cc428e5d889b6e12d84d6e6b682",
+        "timestamp": "2026-08-28T05:03:12Z"
+      },
+      {
         "version": "0.3.16.0",
         "changelog": "Keeps the Cloud heartbeat independent from remote-command and playback work so a connected plugin cannot become falsely stale, without changing Requests or Download Details behavior.",
         "targetAbi": "10.11.0.0",
