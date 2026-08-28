@@ -1279,18 +1279,29 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             var is4K = parameters.TryGetValue("is_4k", out var fourKElement)
                 && (fourKElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
                 && fourKElement.GetBoolean();
-            // Cloud resolves this immutable Seerr user id from the protected
-            // profile binding. The iOS device never supplies it, so a command
-            // cannot attribute a request to another household member.
-            var requesterUserId = RequirePositiveInt(parameters, "requester_user_id");
-            var created = await SendSeerrJsonAsync(secrets, HttpMethod.Post, "/api/v1/request", new
+            // Cloud derives this authority from the protected profile session.
+            // Members always carry an exact immutable Seerr user id. The
+            // canonical household Owner may instead use the Seerr identity
+            // already authenticated by this connector; no duplicate provider
+            // account is created and the device cannot select this mode.
+            var requesterUserId = ResolveSeerrCreateRequesterUserId(parameters);
+            var requestBody = new Dictionary<string, object?>
             {
-                mediaType,
-                mediaId,
-                seasons,
-                is4k = is4K,
-                userId = requesterUserId
-            }, cancellationToken).ConfigureAwait(false);
+                ["mediaType"] = mediaType,
+                ["mediaId"] = mediaId,
+                ["seasons"] = seasons,
+                ["is4k"] = is4K
+            };
+            if (requesterUserId is not null)
+            {
+                requestBody["userId"] = requesterUserId.Value;
+            }
+            var created = await SendSeerrJsonAsync(
+                secrets,
+                HttpMethod.Post,
+                "/api/v1/request",
+                requestBody,
+                cancellationToken).ConfigureAwait(false);
             return CompleteCommand(request, operation, created);
         }
 
@@ -2551,6 +2562,33 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             throw new InvalidOperationException("sonarrParameterInvalid");
         }
         return result;
+    }
+
+    internal static int? ResolveSeerrCreateRequesterUserId(
+        IReadOnlyDictionary<string, JsonElement> parameters)
+    {
+        if (!parameters.TryGetValue("requester_mode", out var modeValue))
+        {
+            // Backward compatibility for already-queued Cloud commands from
+            // releases that carried only the exact bound user id.
+            return RequirePositiveInt(parameters, "requester_user_id");
+        }
+        if (modeValue.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException("seerrRequesterModeInvalid");
+        }
+
+        var mode = modeValue.GetString()?.Trim() ?? string.Empty;
+        if (string.Equals(mode, "bound_user", StringComparison.Ordinal))
+        {
+            return RequirePositiveInt(parameters, "requester_user_id");
+        }
+        if (string.Equals(mode, "authenticated_connection_owner", StringComparison.Ordinal)
+            && !parameters.ContainsKey("requester_user_id"))
+        {
+            return null;
+        }
+        throw new InvalidOperationException("seerrRequesterModeInvalid");
     }
 
     private static int? OptionalNonNegativeInt(IReadOnlyDictionary<string, JsonElement> parameters, string key)

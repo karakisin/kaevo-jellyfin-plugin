@@ -41,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Keeps the Cloud heartbeat independent from remote-command and playback work so a connected plugin cannot become falsely stale, without changing Requests or Download Details behavior.",
+  "changelog": "Allows the canonical Kaevo household Owner to submit Seerr requests through the already-authenticated connector identity while preserving exact immutable Seerr user attribution for members.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
