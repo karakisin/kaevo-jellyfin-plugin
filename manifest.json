@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.19.0",
+        "changelog": "Makes exact-profile watched and unwatched commands resilient on Jellyfin 10.11 by supplying a complete client identity and requiring authoritative exact-user, exact-item state readback; missing, stale, conflicting, or mismatched bindings still fail closed.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.19/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "3e1eb214b82123d1ed7e99339cbbe6b5",
+        "timestamp": "2026-08-29T07:39:42Z"
+      },
+      {
         "version": "0.3.18.0",
         "changelog": "Keeps exact-profile watched and unwatched commands working when Jellyfin temporarily cannot persist the Cloud-authoritative binding, while missing, stale, conflicting, or mismatched bindings still fail closed.",
         "targetAbi": "10.11.0.0",
