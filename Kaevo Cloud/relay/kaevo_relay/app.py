@@ -347,7 +347,7 @@ class FamilySyncRegistry:
     def __init__(self, *, clock=time.time):
         self.clock = clock
         self.channels: dict[str, FamilySyncChannel] = {}
-        self.latest: dict[tuple[str, str, str], tuple[tuple[int, int], float]] = {}
+        self.latest: dict[tuple[str, str, str, str], tuple[tuple[int, int], float]] = {}
 
     def add(self, channel: FamilySyncChannel) -> str:
         channel_id = str(uuid.uuid4())
@@ -404,7 +404,12 @@ class FamilySyncRegistry:
         source_profile_id = str(claims.get("profile_id") or "")
         allowed_ids = set(claims.get("allowed_profile_ids") or [])
         audience_ids = set(claims.get("audience_profile_ids") or [])
-        if source_profile_id not in selected or not set(selected + departed).issubset(allowed_ids):
+        # The authenticated source profile controls the protected session, but
+        # it is not automatically a viewer. This lets a parent keep their
+        # account signed in while selecting only the children who are actually
+        # watching. The exact viewer set still must be non-empty and remain
+        # within the source profile's canonical audience.
+        if not set(selected + departed).issubset(allowed_ids):
             raise ValueError("familySyncLiveSelectionUnauthorized")
         if not set(selected + departed).issubset(audience_ids):
             raise ValueError("familySyncLiveAudienceMismatch")
@@ -440,7 +445,11 @@ class FamilySyncRegistry:
         delivered = 0
         for recipient in recipients:
             recipient_profile_id = str(recipient.claims["profile_id"])
-            key = (household_id, item_id, recipient_profile_id)
+            # Order only within the exact publisher profile. Two household
+            # members can watch the same item concurrently; a newer session
+            # from one profile must not suppress another profile's still-live
+            # status for their shared observer.
+            key = (household_id, item_id, recipient_profile_id, source_profile_id)
             previous = self.latest.get(key)
             if previous is not None and order <= previous[0]:
                 continue
@@ -456,7 +465,7 @@ class FamilySyncRegistry:
 grants = GrantRegistry(SIGNING_KEY)
 connectors = ConnectorRegistry()
 family_sync = FamilySyncRegistry()
-app = FastAPI(title="Kaevo Playback Relay", version="0.2.15")
+app = FastAPI(title="Kaevo Playback Relay", version="0.2.17")
 
 
 @app.get("/health")
@@ -464,7 +473,7 @@ async def health() -> dict[str, Any]:
     return {
         "state": "ok",
         "service": "kaevo-playback-relay",
-        "version": "0.2.15",
+        "version": "0.2.17",
         "connectors": len(connectors.channels),
         "channels": connectors.channel_count,
         "family_sync_channels": len(family_sync.channels),

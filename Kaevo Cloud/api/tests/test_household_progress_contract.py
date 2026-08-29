@@ -248,15 +248,20 @@ def test_progress_rejects_deleted_or_unrelated_parent_managed_profile(monkeypatc
     assert events.items == {}
 
 
-def test_progress_requires_the_authenticated_active_profile(monkeypatch):
+def test_authenticated_controller_may_exclude_itself_from_exact_viewers(monkeypatch):
     source, events = configure(monkeypatch)
     result = handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[
         "cloud-margaret-002",
     ]))})
 
-    assert result["statusCode"] == 400
-    assert json.loads(result["body"])["state"] == "active_profile_required"
-    assert events.items == {}
+    assert result["statusCode"] == 202
+    assert json.loads(result["body"])["profile_ids"] == ["cloud-margaret-002"]
+    assert (source["profile_id"], "household-progress#jellyfin#" + "a" * 32) not in events.items
+    selected = json.loads(events.items[(
+        "cloud-margaret-002", "household-progress#jellyfin#" + "a" * 32,
+    )]["metadata_json"])
+    assert selected["source_profile_id"] == source["profile_id"]
+    assert selected["is_currently_selected"] is True
 
 
 def test_departing_authorized_viewer_receives_only_its_final_checkpoint(monkeypatch):
@@ -493,7 +498,7 @@ def decode_ticket_payload(ticket):
     return json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
 
 
-def test_live_publisher_ticket_preserves_exact_item_audience(monkeypatch):
+def test_live_publisher_ticket_separates_controller_from_exact_viewer(monkeypatch):
     source, _ = configure(monkeypatch)
     monkeypatch.setattr(handler, "PLAYBACK_GRANT_SIGNING_KEY", "x" * 32)
     monkeypatch.setattr(handler, "PLAYBACK_RELAY_PUBLIC_URL", "https://relay.example")
@@ -501,11 +506,7 @@ def test_live_publisher_ticket_preserves_exact_item_audience(monkeypatch):
         "profile_id": source["profile_id"],
         "installation_id": "installation-001",
     })
-    assert handler.save_household_progress({"body": json.dumps(request_body(selected_ids=[
-        source["profile_id"], "cloud-margaret-002",
-    ]))})["statusCode"] == 202
-
-    ticket_request = request_body(selected_ids=[source["profile_id"]])
+    ticket_request = request_body(selected_ids=["cloud-margaret-002"])
     ticket_request["role"] = "publisher"
     for field in ("sequence", "position_seconds", "runtime_seconds", "playback_state"):
         ticket_request.pop(field)
@@ -516,6 +517,7 @@ def test_live_publisher_ticket_preserves_exact_item_audience(monkeypatch):
     assert body["websocket_url"] == "wss://relay.example/v1/family-sync"
     claims = decode_ticket_payload(body["relay_ticket"])
     assert claims["profile_id"] == source["profile_id"]
+    assert claims["profile_id"] not in ticket_request["selected_viewer_profile_ids"]
     assert claims["installation_id"] == "installation-001"
     assert claims["audience_profile_ids"] == ["cloud-jefferson-001", "cloud-margaret-002"]
     assert claims["allowed_profile_ids"] == ["cloud-jefferson-001", "cloud-margaret-002"]

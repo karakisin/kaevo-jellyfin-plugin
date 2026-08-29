@@ -217,6 +217,50 @@ async def test_family_sync_fanout_filters_exact_audience_and_rejects_old_owner()
 
 
 @pytest.mark.asyncio
+async def test_family_sync_ordering_is_independent_for_each_source_profile():
+    registry = FamilySyncRegistry(clock=lambda: 1000.0)
+    first_socket = LiveObserverWebSocket()
+    second_socket = LiveObserverWebSocket()
+    registry.add(FamilySyncChannel(
+        websocket=first_socket,
+        claims=family_sync_claims(role="observer", profile_id="profile-1"),
+    ))
+    registry.add(FamilySyncChannel(
+        websocket=second_socket,
+        claims=family_sync_claims(role="observer", profile_id="profile-2"),
+    ))
+    message = {
+        "type": "progress",
+        "sequence": 4,
+        "position_seconds": 12.5,
+        "runtime_seconds": 7200,
+        "selected_viewer_profile_ids": ["profile-1", "profile-2"],
+        "departed_viewer_profile_ids": [],
+        "playback_state": "active",
+    }
+    first_source = FamilySyncChannel(
+        websocket=LiveObserverWebSocket(),
+        claims={
+            **family_sync_claims(role="publisher", profile_id="profile-1"),
+            "session_started_at_epoch_milliseconds": 2_000_000,
+        },
+    )
+    second_source = FamilySyncChannel(
+        websocket=LiveObserverWebSocket(),
+        claims={
+            **family_sync_claims(role="publisher", profile_id="profile-2"),
+            "session_id": "profile-2-session",
+            "session_started_at_epoch_milliseconds": 1_000_000,
+        },
+    )
+
+    assert await registry.publish(first_source, message) == 2
+    assert await registry.publish(second_source, {**message, "sequence": 50}) == 2
+    assert [event["source_profile_id"] for event in first_socket.sent] == ["profile-1", "profile-2"]
+    assert [event["source_profile_id"] for event in second_socket.sent] == ["profile-1", "profile-2"]
+
+
+@pytest.mark.asyncio
 async def test_family_sync_publisher_cannot_widen_signed_audience():
     registry = FamilySyncRegistry(clock=lambda: 1000.0)
     publisher = FamilySyncChannel(websocket=LiveObserverWebSocket(), claims=family_sync_claims(role="publisher"))
@@ -230,6 +274,37 @@ async def test_family_sync_publisher_cannot_widen_signed_audience():
             "departed_viewer_profile_ids": [],
             "playback_state": "active",
         })
+
+
+@pytest.mark.asyncio
+async def test_family_sync_controller_may_publish_for_another_exact_viewer():
+    registry = FamilySyncRegistry(clock=lambda: 1000.0)
+    controller_socket = LiveObserverWebSocket()
+    viewer_socket = LiveObserverWebSocket()
+    registry.add(FamilySyncChannel(
+        websocket=controller_socket,
+        claims=family_sync_claims(role="observer", profile_id="profile-1"),
+    ))
+    registry.add(FamilySyncChannel(
+        websocket=viewer_socket,
+        claims=family_sync_claims(role="observer", profile_id="profile-2"),
+    ))
+    publisher = FamilySyncChannel(
+        websocket=LiveObserverWebSocket(),
+        claims=family_sync_claims(role="publisher", profile_id="profile-1"),
+    )
+
+    assert await registry.publish(publisher, {
+        "type": "progress",
+        "sequence": 1,
+        "position_seconds": 12.5,
+        "runtime_seconds": 100,
+        "selected_viewer_profile_ids": ["profile-2"],
+        "departed_viewer_profile_ids": [],
+        "playback_state": "active",
+    }) == 2
+    assert viewer_socket.sent[0]["source_profile_id"] == "profile-1"
+    assert viewer_socket.sent[0]["selected_viewer_profile_ids"] == ["profile-2"]
 
 
 def test_avfoundation_safe_grant_path_round_trips_and_rewrites_playlists():

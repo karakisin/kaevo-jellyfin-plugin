@@ -8859,9 +8859,6 @@ def _household_progress_payload(body, *, source_profile, household_id):
         if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(profile_id) or profile_id in requested_ids:
             return None, "invalid_viewer_selection"
         requested_ids.append(profile_id)
-    if source_profile_id not in requested_ids:
-        return None, "active_profile_required"
-
     departed_profile_ids = []
     for value in departed_ids:
         profile_id = str(value or "").strip()
@@ -8967,9 +8964,6 @@ def create_family_sync_live_ticket(event):
             if not SAFE_PLAYBACK_IDENTIFIER.fullmatch(profile_id) or profile_id in requested_ids:
                 return response(400, {"state": "invalid_viewer_selection"})
             requested_ids.append(profile_id)
-        if source_profile_id not in requested_ids:
-            return response(400, {"state": "active_profile_required"})
-
         allowed_ids = {source_profile_id}
         allowed_ids.update(_household_progress_authorized_target_ids(
             source_profile=source_profile,
@@ -8978,21 +8972,13 @@ def create_family_sync_live_ticket(event):
         if not set(requested_ids).issubset(allowed_ids):
             return response(403, {"state": "viewer_selection_not_authorized"})
 
-        event_key = "#".join((HOUSEHOLD_PROGRESS_EVENT_PREFIX, provider, item_id))
-        existing = events_table.get_item(
-            Key={"profile_id": source_profile_id, "event_key": event_key},
-            ConsistentRead=True,
-        ).get("Item") if events_table is not None else None
-        existing_metadata = parse_json_field((existing or {}).get("metadata_json"), {})
-        existing_family_ids = existing_metadata.get("family_sync_profile_ids") or []
-        audience_ids = {
-            str(value or "").strip() for value in existing_family_ids
-            if str(value or "").strip() in allowed_ids
-        } if isinstance(existing_family_ids, list) else set()
-        if len(requested_ids) > 1:
-            audience_ids.update(requested_ids)
-        if not audience_ids:
-            audience_ids.add(source_profile_id)
+        # Live presence is visible to the same exact profiles that this source
+        # may already select through Profile Switching or Who's Watching. Do
+        # not derive the socket audience from a previous exact-item progress
+        # row: a new solo playback session otherwise becomes visible only to
+        # its source phone until the user first creates a shared checkpoint.
+        # `allowed_ids` is the canonical, active, fail-closed authority set.
+        audience_ids = set(allowed_ids)
 
         claims.update({
             "provider": provider,
@@ -9043,7 +9029,7 @@ def save_household_progress(event):
         household_id=household_id,
     )
     if error:
-        return response(400 if error.startswith("invalid") or error == "active_profile_required" else 403, {"state": error})
+        return response(400 if error.startswith("invalid") else 403, {"state": error})
 
     # A fresh player reports position zero before its local resume seek has
     # settled. Do not let that provisional packet replace a meaningful
