@@ -1195,18 +1195,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 configuration,
                 request,
                 "profileJellyfinBindingMissing");
-            var method = operation == "jellyfin.mark_played"
-                ? HttpMethod.Post
-                : HttpMethod.Delete;
-            var readback = await SendLocalAsync(
+            var played = await ApplyAndReadWatchedStateAsync(
                 configuration,
                 secrets,
-                method,
-                BuildWatchedMutationPath(itemId, jellyfinUserId),
-                null,
-                null,
+                operation,
+                itemId,
+                jellyfinUserId,
                 cancellationToken).ConfigureAwait(false);
-            var played = ReadWatchedMutationState(readback.Payload, itemId);
             return new CommandResult(
                 200,
                 BuildWatchedMutationPayload(request, operation, itemId, played),
@@ -1628,15 +1623,22 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return $"/UserPlayedItems/{Uri.EscapeDataString(itemId)}?userId={Uri.EscapeDataString(jellyfinUserId)}";
     }
 
-    internal static bool ReadWatchedMutationState(JsonElement payload, string expectedItemId)
+    internal static string BuildWatchedReadbackPath(string itemId, string jellyfinUserId)
     {
-        if (!TryGetResponseProperty(payload, "ItemId", "itemId", out var itemIdValue)
+        return $"/Users/{Uri.EscapeDataString(jellyfinUserId)}/Items/{Uri.EscapeDataString(itemId)}";
+    }
+
+    internal static bool ReadWatchedItemState(JsonElement payload, string expectedItemId)
+    {
+        if (!TryGetResponseProperty(payload, "Id", "id", out var itemIdValue)
             || itemIdValue.ValueKind != JsonValueKind.String
             || !string.Equals(
                 itemIdValue.GetString()?.Replace("-", string.Empty, StringComparison.Ordinal),
                 expectedItemId.Replace("-", string.Empty, StringComparison.Ordinal),
                 StringComparison.OrdinalIgnoreCase)
-            || !TryGetResponseProperty(payload, "Played", "played", out var playedValue)
+            || !TryGetResponseProperty(payload, "UserData", "userData", out var userData)
+            || userData.ValueKind != JsonValueKind.Object
+            || !TryGetResponseProperty(userData, "Played", "played", out var playedValue)
             || playedValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
         {
             throw new InvalidOperationException("jellyfinWatchedStateReadbackInvalid");
@@ -1644,6 +1646,30 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
         return playedValue.GetBoolean();
     }
+
+    internal static string BuildWatchedAuthorizationHeader(
+        string jellyfinApiKey,
+        string connectorId,
+        string version)
+    {
+        if (!SafeJellyfinAuthorizationValue(jellyfinApiKey)
+            || string.IsNullOrWhiteSpace(connectorId)
+            || string.IsNullOrWhiteSpace(version))
+        {
+            throw new InvalidOperationException("jellyfinAuthorizationInvalid");
+        }
+
+        var deviceId = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(connectorId)))
+            .ToLowerInvariant();
+        return $"MediaBrowser Client=\"Kaevo\", Device=\"Kaevo Jellyfin Plugin\", DeviceId=\"{deviceId}\", Version=\"{version}\", Token=\"{jellyfinApiKey}\"";
+    }
+
+    private static bool SafeJellyfinAuthorizationValue(string value)
+        => !string.IsNullOrWhiteSpace(value)
+            && value.Length <= 8_192
+            && value.All(character => character is >= '!' and <= '~'
+                && character is not '\"' and not '\\' and not ',');
 
     private static bool TryGetResponseProperty(
         JsonElement payload,
@@ -3119,6 +3145,145 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
 
         return ($"/Users/{userId}/Items", query);
+    }
+
+    private async Task<bool> ApplyAndReadWatchedStateAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string operation,
+        string itemId,
+        string jellyfinUserId,
+        CancellationToken cancellationToken)
+    {
+        var desiredPlayed = operation == "jellyfin.mark_played";
+        Exception? mutationFailure = null;
+        try
+        {
+            await SendWatchedMutationAsync(
+                configuration,
+                secrets,
+                desiredPlayed ? HttpMethod.Post : HttpMethod.Delete,
+                BuildWatchedMutationPath(itemId, jellyfinUserId),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // A connection can close after Jellyfin commits the mutation but
+            // before its response body reaches the plugin. Keep the exception
+            // only as diagnostic context and let the exact-provider readback
+            // decide whether the idempotent desired state was reached.
+            mutationFailure = exception;
+            _logger.LogWarning(
+                exception,
+                "Kaevo Jellyfin watched mutation did not return cleanly; verifying the exact user and item state");
+        }
+
+        bool played;
+        try
+        {
+            played = await ReadWatchedStateAsync(
+                configuration,
+                secrets,
+                itemId,
+                jellyfinUserId,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Kaevo could not read back the exact Jellyfin watched state after a mutation attempt");
+            throw new InvalidOperationException(
+                mutationFailure is null
+                    ? "jellyfinWatchedReadbackUnavailable"
+                    : "jellyfinWatchedMutationUnavailable",
+                exception);
+        }
+
+        if (played == desiredPlayed)
+        {
+            return played;
+        }
+
+        throw new InvalidOperationException(
+            mutationFailure is null
+                ? "jellyfinWatchedStateMismatch"
+                : "jellyfinWatchedMutationUnavailable",
+            mutationFailure);
+    }
+
+    private async Task SendWatchedMutationAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        HttpMethod method,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        using var message = new HttpRequestMessage(method, BuildLocalUri(configuration, path, null));
+        ApplyWatchedRequestHeaders(message, secrets.JellyfinApiKey, configuration.ConnectorId, PluginVersion);
+        using var response = await _jellyfin.SendAsync(
+            message,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"jellyfinHttp{(int)response.StatusCode}");
+        }
+    }
+
+    private async Task<bool> ReadWatchedStateAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string itemId,
+        string jellyfinUserId,
+        CancellationToken cancellationToken)
+    {
+        using var message = new HttpRequestMessage(
+            HttpMethod.Get,
+            BuildLocalUri(configuration, BuildWatchedReadbackPath(itemId, jellyfinUserId), null));
+        ApplyWatchedRequestHeaders(message, secrets.JellyfinApiKey, configuration.ConnectorId, PluginVersion);
+        message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        using var response = await _jellyfin.SendAsync(
+            message,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        var bounded = await ReadBoundedAsync(
+            response.Content,
+            configuration.MaximumRemoteResponseBytes,
+            cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"jellyfinHttp{(int)response.StatusCode}");
+        }
+        if (bounded.Truncated || bounded.Data.Length == 0)
+        {
+            throw new InvalidOperationException("jellyfinWatchedStateReadbackInvalid");
+        }
+
+        return ReadWatchedItemState(
+            JsonSerializer.Deserialize<JsonElement>(bounded.Data, JsonOptions),
+            itemId);
+    }
+
+    internal static void ApplyWatchedRequestHeaders(
+        HttpRequestMessage message,
+        string jellyfinApiKey,
+        string connectorId,
+        string version)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        message.Headers.Add("X-Emby-Token", jellyfinApiKey);
+        message.Headers.TryAddWithoutValidation(
+            "Authorization",
+            BuildWatchedAuthorizationHeader(jellyfinApiKey, connectorId, version));
     }
 
     private async Task<CommandResult> SendLocalAsync(

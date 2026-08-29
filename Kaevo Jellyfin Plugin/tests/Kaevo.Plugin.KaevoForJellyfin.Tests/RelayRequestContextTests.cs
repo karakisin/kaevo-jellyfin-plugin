@@ -76,41 +76,94 @@ public sealed class RelayRequestContextTests
             KaevoCloudConnectorService.BuildWatchedMutationPath(itemId, jellyfinUserId));
     }
 
+    [Fact]
+    public void WatchedReadbackTargetsExactItemAndBoundUser()
+    {
+        Assert.Equal(
+            "/Users/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/Items/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            KaevoCloudConnectorService.BuildWatchedReadbackPath(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+    }
+
     [Theory]
-    [InlineData("ItemId", "Played", true)]
-    [InlineData("itemId", "played", false)]
-    public void WatchedMutationUsesAuthoritativeJellyfinResponse(
-        string itemIdProperty,
+    [InlineData("Id", "UserData", "Played", true)]
+    [InlineData("id", "userData", "played", false)]
+    public void WatchedMutationUsesAuthoritativeExactItemReadback(
+        string idProperty,
+        string userDataProperty,
         string playedProperty,
         bool played)
     {
         const string itemId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         var payload = JsonSerializer.SerializeToElement(new Dictionary<string, object>
         {
-            [itemIdProperty] = itemId,
-            [playedProperty] = played
+            [idProperty] = itemId,
+            [userDataProperty] = new Dictionary<string, object>
+            {
+                [playedProperty] = played
+            }
         });
 
         Assert.Equal(
             played,
-            KaevoCloudConnectorService.ReadWatchedMutationState(payload, itemId));
+            KaevoCloudConnectorService.ReadWatchedItemState(payload, itemId));
     }
 
     [Theory]
-    [InlineData("{\"ItemId\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"Played\":true}")]
-    [InlineData("{\"ItemId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}")]
-    [InlineData("{\"Played\":true}")]
-    [InlineData("{\"ItemId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"Played\":\"true\"}")]
+    [InlineData("{\"Id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"UserData\":{\"Played\":true}}")]
+    [InlineData("{\"Id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}")]
+    [InlineData("{\"UserData\":{\"Played\":true}}")]
+    [InlineData("{\"Id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"UserData\":{\"Played\":\"true\"}}")]
     public void WatchedMutationRejectsMissingOrMismatchedReadback(string json)
     {
         using var document = JsonDocument.Parse(json);
 
         var error = Assert.Throws<InvalidOperationException>(() =>
-            KaevoCloudConnectorService.ReadWatchedMutationState(
+            KaevoCloudConnectorService.ReadWatchedItemState(
                 document.RootElement,
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
 
         Assert.Equal("jellyfinWatchedStateReadbackInvalid", error.Message);
+    }
+
+    [Fact]
+    public void WatchedMutationSuppliesModernSessionIdentityAndLegacyTokenCompatibility()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "http://localhost/UserPlayedItems/item");
+
+        KaevoCloudConnectorService.ApplyWatchedRequestHeaders(
+            request,
+            "0123456789abcdef0123456789abcdef",
+            "v3_connector-1",
+            "0.3.19");
+
+        Assert.Equal(
+            "0123456789abcdef0123456789abcdef",
+            Assert.Single(request.Headers.GetValues("X-Emby-Token")));
+        var authorization = Assert.Single(request.Headers.GetValues("Authorization"));
+        Assert.StartsWith("MediaBrowser Client=\"Kaevo\"", authorization, StringComparison.Ordinal);
+        Assert.Contains("Device=\"Kaevo Jellyfin Plugin\"", authorization, StringComparison.Ordinal);
+        Assert.Contains("Version=\"0.3.19\"", authorization, StringComparison.Ordinal);
+        Assert.Contains("Token=\"0123456789abcdef0123456789abcdef\"", authorization, StringComparison.Ordinal);
+        Assert.Matches("DeviceId=\"[0-9a-f]{64}\"", authorization);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("token,other")]
+    [InlineData("token\"other")]
+    [InlineData("token\\other")]
+    [InlineData("token other")]
+    public void WatchedAuthorizationRejectsAmbiguousCredentialSyntax(string token)
+    {
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            KaevoCloudConnectorService.BuildWatchedAuthorizationHeader(
+                token,
+                "v3_connector-1",
+                "0.3.19"));
+
+        Assert.Equal("jellyfinAuthorizationInvalid", error.Message);
     }
 
     [Theory]
