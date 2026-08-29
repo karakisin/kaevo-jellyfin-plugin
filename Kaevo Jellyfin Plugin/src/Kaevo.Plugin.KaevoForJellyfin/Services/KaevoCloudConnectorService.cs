@@ -456,7 +456,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
     }
 
-    internal static void ApplyAuthoritativeProfileProviderBinding(
+    private void ApplyAuthoritativeProfileProviderBinding(
         PluginConfiguration configuration,
         CloudRequest request)
     {
@@ -473,7 +473,33 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 return;
             }
             configuration.ProfileJellyfinBindingsJson = update.BindingsJson;
-            KaevoPlugin.Instance?.SaveConfiguration();
+            _ = TryPersistAuthoritativeProfileProviderBinding(
+                () => KaevoPlugin.Instance?.SaveConfiguration(),
+                exception => _logger.LogWarning(
+                    exception,
+                    "Kaevo deferred persistence of a Cloud-authoritative profile binding; the live binding remains active"));
+        }
+    }
+
+    internal static bool TryPersistAuthoritativeProfileProviderBinding(
+        Action persist,
+        Action<Exception> persistenceDeferred)
+    {
+        try
+        {
+            persist();
+            return true;
+        }
+        catch (Exception exception)
+        {
+            // The binding was supplied by Cloud for this exact request and is
+            // already installed in the live configuration. A transient
+            // Jellyfin configuration-write failure must not discard the
+            // provider-confirmed watched mutation. Cloud sends the same
+            // canonical binding on every profile-scoped command, so a restart
+            // safely rehydrates it while conflicts still fail closed below.
+            persistenceDeferred(exception);
+            return false;
         }
     }
 

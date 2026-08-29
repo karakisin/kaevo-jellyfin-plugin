@@ -378,6 +378,35 @@ public sealed class RelayRequestContextTests
     }
 
     [Fact]
+    public void AuthoritativeBindingRemainsUsableWhenPersistenceIsTemporarilyUnavailable()
+    {
+        var persistenceFailure = new IOException("configuration-write-failed");
+        Exception? deferred = null;
+
+        var persisted = KaevoCloudConnectorService.TryPersistAuthoritativeProfileProviderBinding(
+            () => throw persistenceFailure,
+            exception => deferred = exception);
+
+        Assert.False(persisted);
+        Assert.Same(persistenceFailure, deferred);
+    }
+
+    [Fact]
+    public void AuthoritativeBindingPersistenceReportsSuccessWithoutDeferral()
+    {
+        var didPersist = false;
+        var didDefer = false;
+
+        var persisted = KaevoCloudConnectorService.TryPersistAuthoritativeProfileProviderBinding(
+            () => didPersist = true,
+            _ => didDefer = true);
+
+        Assert.True(persisted);
+        Assert.True(didPersist);
+        Assert.False(didDefer);
+    }
+
+    [Fact]
     public void ProviderBindingForAnotherConnectorFailsClosed()
     {
         var request = new CloudRequest(
