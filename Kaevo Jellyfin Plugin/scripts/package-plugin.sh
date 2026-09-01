@@ -41,7 +41,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Makes exact-profile watched and unwatched commands resilient on Jellyfin 10.11 by supplying a complete client identity and requiring authoritative exact-user, exact-item state readback; missing, stale, conflicting, or mismatched bindings still fail closed.",
+  "changelog": "Completes clean Pairing V3 setup by provisioning a dedicated local Jellyfin API key for connector registration and heartbeat without sending the key to Kaevo Cloud.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",

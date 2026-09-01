@@ -47,6 +47,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     };
 
     private readonly KaevoSecretStore _secretStore;
+    private readonly KaevoJellyfinApiKeyProvisioner _jellyfinApiKeyProvisioner;
     private readonly KaevoCloudState _state;
     private readonly ILibraryManager _libraryManager;
     private readonly IUserManager _userManager;
@@ -64,6 +65,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
     public KaevoCloudConnectorService(
         KaevoSecretStore secretStore,
+        KaevoJellyfinApiKeyProvisioner jellyfinApiKeyProvisioner,
         KaevoCloudState state,
         ILibraryManager libraryManager,
         IUserManager userManager,
@@ -78,6 +80,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         ILogger<KaevoCloudConnectorService> logger)
     {
         _secretStore = secretStore;
+        _jellyfinApiKeyProvisioner = jellyfinApiKeyProvisioner;
         _state = state;
         _libraryManager = libraryManager;
         _userManager = userManager;
@@ -255,11 +258,20 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         if (!string.IsNullOrWhiteSpace(pairingV3ConnectorId))
         {
             _pairingV3Active = true;
+            if (string.IsNullOrWhiteSpace(jellyfinCredential))
+            {
+                jellyfinCredential = await _jellyfinApiKeyProvisioner.EnsureAsync(cancellationToken).ConfigureAwait(false);
+            }
             configuration.ConnectorId = pairingV3ConnectorId;
             configuration.PairingCode = string.Empty;
             var pairingV3Secrets = existing is null
                 ? new KaevoConnectorSecrets(string.Empty, string.Empty, jellyfinCredential)
                 : existing with { ConnectorToken = string.Empty, PlaybackGrantKey = string.Empty, JellyfinApiKey = jellyfinCredential };
+            if (string.IsNullOrWhiteSpace(environmentApiKey)
+                && !string.Equals(existing?.JellyfinApiKey, jellyfinCredential, StringComparison.Ordinal))
+            {
+                await _secretStore.WriteAsync(pairingV3Secrets, cancellationToken).ConfigureAwait(false);
+            }
             KaevoPlugin.Instance?.SaveConfiguration();
             return pairingV3Secrets;
         }
