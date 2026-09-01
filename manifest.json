@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.20.0",
+        "changelog": "Completes clean Pairing V3 setup by provisioning a dedicated local Jellyfin API key for connector registration and heartbeat without sending the key to Kaevo Cloud.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.20/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "49219c5b71ebc40686640a20d73de543",
+        "timestamp": "2026-09-01T19:16:54Z"
+      },
+      {
         "version": "0.3.19.0",
         "changelog": "Makes exact-profile watched and unwatched commands resilient on Jellyfin 10.11 by supplying a complete client identity and requiring authoritative exact-user, exact-item state readback; missing, stale, conflicting, or mismatched bindings still fail closed.",
         "targetAbi": "10.11.0.0",
