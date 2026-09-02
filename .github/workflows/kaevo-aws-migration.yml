@@ -234,10 +234,9 @@ jobs:
             legacy_original_target=None
           fi
           if [[ -z "${legacy_original_target}" || "${legacy_original_target}" == "None" ]]; then
-            legacy_route_id=$(aws apigatewayv2 get-routes \
-              --api-id "${http_api_id}" \
-              --query "Items[?RouteKey=='POST /v3/remote-requests/claim'].RouteId | [0]" \
-              --output text)
+            routes=$(aws apigatewayv2 get-routes --api-id "${http_api_id}" --output json)
+            legacy_route_id=$(jq -r '.Items[] | select(.RouteKey == "POST /v3/remote-requests/claim") | .RouteId' <<<"${routes}")
+            [[ -n "${legacy_route_id}" && "${legacy_route_id}" != "null" ]]
             legacy_original_target=$(aws apigatewayv2 get-route \
               --api-id "${http_api_id}" \
               --route-id "${legacy_route_id}" \
