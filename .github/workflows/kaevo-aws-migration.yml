@@ -16,6 +16,7 @@ on:
           - security-baseline
           - inspect-control-development
           - control-development
+          - inspect-relay-canary
           - relay-canary
 
 permissions:
@@ -98,6 +99,34 @@ jobs:
           aws dynamodb describe-table \
             --table-name kaevo-cloud-dev-remote-requests \
             --query 'Table.[TableName,TableStatus,StreamSpecification.StreamEnabled,StreamSpecification.StreamViewType]' \
+            --output table
+
+      - name: Inspect relay canary stack
+        if: inputs.target == 'inspect-relay-canary'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AWS_PAGER=""
+          stack=kaevo-playback-relay-green
+          aws cloudformation describe-stacks \
+            --stack-name "${stack}" \
+            --query 'Stacks[0].[StackName,StackStatus,CreationTime]' \
+            --output table
+          aws cloudformation describe-stack-events \
+            --stack-name "${stack}" \
+            --query 'StackEvents[?ResourceStatusReason!=`null`].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]' \
+            --output table
+          aws cloudformation list-stack-resources \
+            --stack-name "${stack}" \
+            --query 'StackResourceSummaries[].[LogicalResourceId,ResourceType,ResourceStatus,PhysicalResourceId]' \
+            --output table
+          aws logs describe-log-groups \
+            --log-group-name-prefix '/aws/lambda/kaevo-playback-relay-green' \
+            --query 'logGroups[].[logGroupName,retentionInDays]' \
+            --output table
+          aws secretsmanager list-secrets \
+            --filters Key=name,Values=kaevo/playback-relay/green-origin-auth \
+            --query 'SecretList[].[Name,DeletedDate]' \
             --output table
 
       - name: Preview and apply security baseline
@@ -248,7 +277,13 @@ jobs:
           echo "${changes}" | jq -r '.[] | [.ResourceChange.Action,.ResourceChange.LogicalResourceId] | @tsv'
           echo "${changes}" | jq -e 'all(.[]; .ResourceChange.Action == "Add")' >/dev/null
           aws cloudformation execute-change-set --stack-name "${stack}" --change-set-name "${create_change_set}"
-          aws cloudformation wait stack-create-complete --stack-name "${stack}"
+          if ! aws cloudformation wait stack-create-complete --stack-name "${stack}"; then
+            aws cloudformation describe-stack-events \
+              --stack-name "${stack}" \
+              --query 'StackEvents[?ResourceStatusReason!=`null`].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]' \
+              --output table
+            exit 1
+          fi
 
           docker build --platform linux/amd64 --provenance=false \
             --tag "kaevo-relay:${GITHUB_SHA}" 'Kaevo Cloud/relay'
