@@ -26,7 +26,7 @@ Conditions:
 Resources:
   RelayOriginAuthSecret:
     Type: AWS::SecretsManager::Secret
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       Name: kaevo/playback-relay/green-origin-auth
@@ -119,10 +119,14 @@ Resources:
           - Id: lightsail-green
             DomainName:
               Fn::Select:
-                - 1
+                - 0
                 - Fn::Split:
-                    - '://'
-                    - !GetAtt RelayContainerService.Url
+                    - '/'
+                    - Fn::Select:
+                        - 1
+                        - Fn::Split:
+                            - '://'
+                            - !GetAtt RelayContainerService.Url
             OriginCustomHeaders:
               - HeaderName: X-Kaevo-Origin-Auth
                 HeaderValue: !Sub '{{resolve:secretsmanager:${RelayOriginAuthSecret}:SecretString}}'
@@ -148,7 +152,7 @@ Resources:
 
   RelayMonitorLogGroup:
     Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       LogGroupName: /aws/lambda/kaevo-playback-relay-green-monitor
