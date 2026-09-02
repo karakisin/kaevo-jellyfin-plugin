@@ -18,8 +18,8 @@ on:
           - control-development
           - control-production
           - inspect-relay-canary
-          - reset-failed-relay-canary
           - relay-canary
+          - validate-relay-canary
           - playback-cutover-production
           - decommission-legacy-relay
       physical_validation:
@@ -151,48 +151,37 @@ jobs:
             --query 'logEvents[-40:].message' \
             --output text || true
 
-      - name: Reset failed relay canary bootstrap
-        if: inputs.target == 'reset-failed-relay-canary'
+      - name: Validate the active relay canary without mutation
+        if: inputs.target == 'validate-relay-canary'
         shell: bash
         run: |
           set -euo pipefail
           export AWS_PAGER=""
           stack=kaevo-playback-relay-green
-          status=$(aws cloudformation describe-stacks --stack-name "${stack}" --query 'Stacks[0].StackStatus' --output text)
-          [[ "${status}" == "ROLLBACK_COMPLETE" ]]
-          if aws lightsail get-container-services \
-            --service-name kaevo-playback-relay-green >/dev/null 2>&1; then
-            echo "Relay green service unexpectedly still exists" >&2
-            exit 1
-          fi
-          log_count=$(aws logs describe-log-groups \
-            --log-group-name-prefix '/aws/lambda/kaevo-playback-relay-green-monitor' \
-            --query 'length(logGroups)' --output text)
-          [[ "${log_count}" == "1" ]]
-          log_stream_count=$(aws logs describe-log-streams \
-            --log-group-name '/aws/lambda/kaevo-playback-relay-green-monitor' \
-            --query 'length(logStreams)' --output text)
-          [[ "${log_stream_count}" == "0" ]]
-          secret_arn=$(aws secretsmanager list-secrets \
-            --filters Key=name,Values=kaevo/playback-relay/green-origin-auth \
-            --query 'SecretList[?Name==`kaevo/playback-relay/green-origin-auth`].ARN | [0]' \
-            --output text)
-          [[ "${secret_arn}" == *:secret:kaevo/playback-relay/green-origin-auth-* ]]
-          echo "::add-mask::${secret_arn}"
-          aws cloudformation delete-stack --stack-name "${stack}"
-          aws cloudformation wait stack-delete-complete --stack-name "${stack}"
-          aws logs delete-log-group --log-group-name '/aws/lambda/kaevo-playback-relay-green-monitor'
-          aws secretsmanager delete-secret \
-            --secret-id "${secret_arn}" \
-            --force-delete-without-recovery >/dev/null
-          for _ in $(seq 1 30); do
-            if ! aws secretsmanager describe-secret --secret-id "${secret_arn}" >/dev/null 2>&1; then
-              break
-            fi
-            sleep 2
+          service=kaevo-playback-relay-green
+          state=$(aws lightsail get-container-services --service-name "${service}" --query 'containerServices[0].currentDeployment.state' --output text)
+          [[ "${state}" == "ACTIVE" ]]
+          service_url=$(aws cloudformation describe-stacks --stack-name "${stack}" --query "Stacks[0].Outputs[?OutputKey=='ServiceUrl'].OutputValue" --output text)
+          relay_url=$(aws cloudformation describe-stacks --stack-name "${stack}" --query "Stacks[0].Outputs[?OutputKey=='RelayPublicUrl'].OutputValue" --output text)
+          echo "::add-mask::${service_url}"
+          echo "::add-mask::${relay_url}"
+          direct_health=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${service_url}/health")
+          direct_protected=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${service_url}/v1/playback/not-a-grant/Videos/not-an-item/stream")
+          edge_health=000
+          edge_protected=000
+          for _ in $(seq 1 12); do
+            edge_health=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url}/health" || true)
+            edge_protected=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url}/v1/playback/not-a-grant/Videos/not-an-item/stream" || true)
+            [[ "${edge_health}" == "200" && "${edge_protected}" == "401" ]] && break
+            sleep 10
           done
-          ! aws secretsmanager describe-secret --secret-id "${secret_arn}" >/dev/null 2>&1
-          echo "Removed only the unused retained resources from the failed relay green bootstrap"
+          printf 'direct_health=%s direct_protected=%s edge_health=%s edge_protected=%s\n' \
+            "${direct_health}" "${direct_protected}" "${edge_health}" "${edge_protected}"
+          [[ "${direct_health}" == "200" ]]
+          [[ "${direct_protected}" == "403" ]]
+          [[ "${edge_health}" == "200" ]]
+          [[ "${edge_protected}" == "401" ]]
+          echo "Active Lightsail canary, CloudFront HTTPS edge, and direct-origin rejection verified"
 
       - name: Preview and apply security baseline
         if: inputs.target == 'security-baseline'
@@ -458,8 +447,16 @@ jobs:
           echo "::add-mask::${relay_url}"
           direct_health=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${service_url}/health")
           direct_protected=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${service_url}/v1/playback/not-a-grant/Videos/not-an-item/stream")
-          edge_health=$(curl --retry 12 --retry-delay 10 --retry-all-errors --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url}/health")
-          edge_protected=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url}/v1/playback/not-a-grant/Videos/not-an-item/stream")
+          edge_health=000
+          edge_protected=000
+          for _ in $(seq 1 12); do
+            edge_health=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url}/health" || true)
+            edge_protected=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url}/v1/playback/not-a-grant/Videos/not-an-item/stream" || true)
+            [[ "${edge_health}" == "200" && "${edge_protected}" == "401" ]] && break
+            sleep 10
+          done
+          printf 'direct_health=%s direct_protected=%s edge_health=%s edge_protected=%s\n' \
+            "${direct_health}" "${direct_protected}" "${edge_health}" "${edge_protected}"
           [[ "${direct_health}" == "200" ]]
           [[ "${direct_protected}" == "403" ]]
           [[ "${edge_health}" == "200" ]]
