@@ -1,11 +1,6 @@
 name: Kaevo AWS migration
 
 on:
-  push:
-    branches:
-      - migration/aws-cost-architecture-20260902
-    paths:
-      - .github/workflows/kaevo-aws-migration.yml
   workflow_dispatch:
     inputs:
       target:

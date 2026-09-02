@@ -1,6 +1,6 @@
 # Kaevo AWS Cost and Architecture Migration
 
-Status: development control plane deployed; low-cost relay canary deployment and physical playback acceptance remain gates. Production traffic and the legacy ECS/ALB relay have not been changed.
+Status: development control plane and low-cost relay canary deployed and automatically validated; physical playback acceptance remains the production gate. Production traffic and the legacy ECS/ALB relay have not been changed.
 
 ## Executive summary
 
@@ -95,6 +95,7 @@ Automated suites:
 - Full Jellyfin plugin suite: 305 tests.
 - SAM lint: security baseline, connector control, and Lightsail relay templates.
 - Development cloud validation: encrypted on-demand connection table with TTL; source request stream active; invalid ticket rejected; invalid WebSocket rejected; legacy route resolves to the authenticated compatibility handler; unauthenticated legacy claim rejected.
+- Relay cloud validation: Lightsail deployment `ACTIVE`; direct health 200; direct protected route 403; CloudFront health 200; CloudFront protected route reaches grant authentication and returns 401 for an invalid grant.
 
 The suites cover ticket expiry/replay/binding isolation, duplicate notifications and claims, stale connections, disconnected recovery, zero polling while connected, compatibility enforcement, secret-free logs, grant rejection, HTTP range responses, HLS paths, WebSocket authentication, origin authentication, and graceful upstream failure. Simulated tests do not substitute for physical iPhone playback.
 
@@ -141,3 +142,69 @@ That guarded target deletes the legacy stack and therefore its ECS service/task 
 - After decommission, redeploy the preserved `playback-relay.yaml` at the baseline tag with the recorded immutable image and retained signing secret, then restore the prior relay URL.
 
 No secret value, permanent AWS credential, playback grant, private user data, or unredacted account identifier is included in this document or the baseline exports.
+
+## Migration-owned source files
+
+The migration changes below are measured from commit `34b15dc`, which preserved Jefferson's pre-existing dirty source snapshot. Those earlier user changes are not attributed to this migration.
+
+- `.github/workflows/kaevo-aws-migration.yml`
+- `Docs/REQUESTS_DOWNLOADS_FEATURE_LOCK.md`
+- `Kaevo Cloud/api/Makefile`
+- `Kaevo Cloud/api/connector_control/connector_control_handler.py`
+- `Kaevo Cloud/api/tests/test_v3_connector_control.py`
+- `Kaevo Cloud/api/tests/test_websocket_control.py`
+- `Kaevo Cloud/api/websocket_control/__init__.py`
+- `Kaevo Cloud/api/websocket_control/common.py`
+- `Kaevo Cloud/api/websocket_control/notification_handler.py`
+- `Kaevo Cloud/api/websocket_control/socket_handler.py`
+- `Kaevo Cloud/api/websocket_control/ticket_handler.py`
+- `Kaevo Cloud/docs/AWS_COST_ARCHITECTURE_MIGRATION_2026-09-02.md`
+- `Kaevo Cloud/infra/connector-control.yaml`
+- `Kaevo Cloud/infra/playback-relay-lightsail-canary.yaml`
+- `Kaevo Cloud/infra/security-baseline.yaml`
+- `Kaevo Cloud/infra/template.yaml`
+- `Kaevo Cloud/relay/kaevo_relay/app.py`
+- `Kaevo Cloud/relay/tests/test_relay_security.py`
+- `Kaevo Cloud/scripts/build-connector-control-artifact.sh`
+- `Kaevo Jellyfin Plugin/src/Kaevo.Plugin.KaevoForJellyfin/Services/KaevoCloudConnectorService.cs`
+- `Kaevo Jellyfin Plugin/src/Kaevo.Plugin.KaevoForJellyfin/Services/KaevoCloudContracts.cs`
+- `Kaevo Jellyfin Plugin/tests/Kaevo.Plugin.KaevoForJellyfin.Tests/ControlTransportContractTests.cs`
+
+## AWS resource inventory
+
+Created in `kaevo-security-baseline`:
+
+- GitHub OIDC provider, `KaevoDeploymentRole`, and `KaevoCloudFormationExecutionRole`.
+- API Gateway account log-delivery role and account association.
+- Kaevo cost SNS topic/policy and $20/$30 forecast budgets. The conditional email subscription was not created.
+- Encrypted/versioned/public-blocked CloudTrail bucket and bucket policy.
+- One multi-region management-event CloudTrail with validation enabled.
+
+Created in `kaevo-cloud-dev-connector-control`:
+
+- Encrypted on-demand connections table with TTL.
+- WebSocket API, development stage, 30-day access log group, `$connect`, `$disconnect`, `ping`, and `recover` routes/integrations.
+- Ticket and exact-claim HTTP routes/integration; ticket Lambda/role/log group/permission.
+- Socket Lambda/role/log group/permission.
+- Request-stream notification Lambda/role/log group/event-source mapping and encrypted SQS DLQ.
+- Configuration Lambda/role/log group/custom resource.
+- SNS alert topic and alarms for WebSocket 4xx/5xx, notification errors, DLQ count/age, and legacy request throttling.
+
+Created in `kaevo-playback-relay-green`:
+
+- One Lightsail Nano container service with an immutable relay image deployment.
+- Origin-auth secret, zero-TTL cache policy, origin-request policy, and CloudFront distribution.
+- SNS alert topic, 30-day monitor log group, monitor Lambda/role/schedule/permission, relay health alarm, CloudFront 5xx alarm, and bandwidth-growth alarm.
+
+Modified existing development resources:
+
+- Enabled `NEW_IMAGE` DynamoDB stream on `kaevo-cloud-dev-remote-requests`.
+- Applied bounded API Gateway stage throttles to the legacy collection claim, ticket, and exact-claim routes.
+- Changed the legacy development claim route target to the authenticated protocol-compatibility handler. Stack deletion restores the recorded original target.
+
+Deleted during failed-bootstrap recovery:
+
+- One empty retained relay-monitor log group and one unused origin-auth secret from a rolled-back first create. Both were recreated under the successful stack.
+- Temporary connector and relay failed-bootstrap delete permissions were removed after recovery.
+
+No production application resource, ECS task, ALB, listener, target group, security group, public IPv4 resource, existing secret, existing CloudFront distribution, or user-data resource has been deleted. Those removals are intentionally deferred until production physical playback passes.
