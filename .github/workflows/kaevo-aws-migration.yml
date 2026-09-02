@@ -137,6 +137,19 @@ jobs:
             --filters Key=name,Values=kaevo/playback-relay/green-origin-auth \
             --query 'SecretList[].[Name,DeletedDate]' \
             --output table
+          aws lightsail get-container-services \
+            --service-name kaevo-playback-relay-green \
+            --query 'containerServices[0].[state,powerName,scale,currentDeployment.version,currentDeployment.state,currentDeployment.createdAt]' \
+            --output table
+          aws lightsail get-container-service-deployments \
+            --service-name kaevo-playback-relay-green \
+            --query 'deployments[].[version,state,createdAt]' \
+            --output table
+          aws lightsail get-container-log \
+            --service-name kaevo-playback-relay-green \
+            --container-name relay \
+            --query 'logEvents[-40:].message' \
+            --output text || true
 
       - name: Reset failed relay canary bootstrap
         if: inputs.target == 'reset-failed-relay-canary'
