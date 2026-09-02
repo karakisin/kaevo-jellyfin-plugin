@@ -304,6 +304,19 @@ Resources:
                   - sqs:ListQueues
                   - budgets:ViewBudget
                 Resource: '*'
+              - Sid: CleanupFailedDevelopmentConnectorControlBootstrap
+                Effect: Allow
+                Action: dynamodb:DeleteTable
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-dev-connector-control-connections
+              - Sid: CleanupFailedDevelopmentConnectorControlLogs
+                Effect: Allow
+                Action: logs:DeleteLogGroup
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/kaevo-cloud-dev-connector-control
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/kaevo-cloud-dev-connector-control-configuration
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/kaevo-cloud-dev-connector-control-notification
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/kaevo-cloud-dev-connector-control-socket
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/kaevo-cloud-dev-connector-control-ticket
 
   BudgetAlertTopic:
     Type: AWS::SNS::Topic
