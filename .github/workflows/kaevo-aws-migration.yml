@@ -139,10 +139,11 @@ jobs:
           stack=kaevo-playback-relay-green
           status=$(aws cloudformation describe-stacks --stack-name "${stack}" --query 'Stacks[0].StackStatus' --output text)
           [[ "${status}" == "ROLLBACK_COMPLETE" ]]
-          service_count=$(aws lightsail get-container-services \
-            --service-name kaevo-playback-relay-green \
-            --query 'length(containerServices)' --output text)
-          [[ "${service_count}" == "0" ]]
+          if aws lightsail get-container-services \
+            --service-name kaevo-playback-relay-green >/dev/null 2>&1; then
+            echo "Relay green service unexpectedly still exists" >&2
+            exit 1
+          fi
           log_count=$(aws logs describe-log-groups \
             --log-group-name-prefix '/aws/lambda/kaevo-playback-relay-green-monitor' \
             --query 'length(logGroups)' --output text)
