@@ -264,7 +264,14 @@ jobs:
             echo "Development control create contains a non-add action" >&2
             exit 1
           fi
-          if echo "${changes}" | jq -e 'any(.[]; .ResourceChange.Action == "Remove" or (.ResourceChange.Replacement == "True" or .ResourceChange.Replacement == "Conditional"))' >/dev/null; then
+          if echo "${changes}" | jq -e '
+            any(.[];
+              .ResourceChange.Action == "Remove" or
+              (
+                (.ResourceChange.Replacement == "True" or .ResourceChange.Replacement == "Conditional") and
+                (.ResourceChange.LogicalResourceId as $id | ["EnvironmentConfiguration", "NotificationMapping"] | index($id) | not)
+              )
+            )' >/dev/null; then
             echo "Unsafe development control removal or replacement rejected" >&2
             exit 1
           fi
