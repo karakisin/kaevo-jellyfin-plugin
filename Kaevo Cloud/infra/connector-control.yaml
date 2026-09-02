@@ -16,7 +16,7 @@ Parameters:
 Resources:
   ConnectionsTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub kaevo-cloud-${EnvironmentName}-connector-control-connections
@@ -42,7 +42,7 @@ Resources:
 
   WebSocketAccessLogGroup:
     Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       LogGroupName: !Sub /aws/apigateway/kaevo-cloud-${EnvironmentName}-connector-control
@@ -63,7 +63,7 @@ Resources:
 
   EnvironmentConfigurationLogGroup:
     Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-connector-control-configuration
@@ -185,6 +185,9 @@ Resources:
 
   EnvironmentConfiguration:
     Type: Custom::KaevoConnectorControlConfiguration
+    DependsOn:
+      - TicketRoute
+      - ExactClaimRoute
     Properties:
       ServiceToken: !GetAtt EnvironmentConfigurationFunction.Arn
       EnvironmentName: !Ref EnvironmentName
@@ -193,7 +196,7 @@ Resources:
 
   TicketLogGroup:
     Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-connector-control-ticket
@@ -291,7 +294,7 @@ Resources:
 
   SocketLogGroup:
     Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-connector-control-socket
@@ -403,7 +406,7 @@ Resources:
 
   NotificationLogGroup:
     Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-connector-control-notification

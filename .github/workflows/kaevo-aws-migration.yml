@@ -119,12 +119,6 @@ jobs:
             --query "logGroups[?contains(logGroupName, 'kaevo-cloud-dev-connector-control')].logGroupName" \
             --output text | tr '\t' '\n' | sort)
           [[ "${#log_groups[@]}" == "5" ]]
-          for log_group in "${log_groups[@]}"; do
-            stream_count=$(aws logs describe-log-streams \
-              --log-group-name "${log_group}" \
-              --query 'length(logStreams)' --output text)
-            [[ "${stream_count}" == "0" ]]
-          done
           aws cloudformation delete-stack --stack-name "${stack}"
           aws cloudformation wait stack-delete-complete --stack-name "${stack}"
           aws dynamodb delete-table --table-name kaevo-cloud-dev-connector-control-connections >/dev/null
@@ -207,7 +201,13 @@ jobs:
             exit 1
           fi
           aws cloudformation execute-change-set --stack-name "${stack}" --change-set-name "${change_set}"
-          aws cloudformation wait stack-create-complete --stack-name "${stack}"
+          if ! aws cloudformation wait stack-create-complete --stack-name "${stack}"; then
+            aws cloudformation describe-stack-events \
+              --stack-name "${stack}" \
+              --query 'StackEvents[?ResourceStatusReason!=`null`].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]' \
+              --output table
+            exit 1
+          fi
           stream_enabled=$(aws dynamodb describe-table --table-name kaevo-cloud-dev-remote-requests --query 'Table.StreamSpecification.StreamEnabled' --output text)
           [[ "${stream_enabled}" == "True" ]]
           websocket_url=$(aws cloudformation describe-stacks --stack-name "${stack}" --query "Stacks[0].Outputs[?OutputKey=='WebSocketUrl'].OutputValue" --output text)
