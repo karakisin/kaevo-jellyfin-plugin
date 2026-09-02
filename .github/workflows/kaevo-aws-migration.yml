@@ -285,6 +285,17 @@ jobs:
           fi
           stream_enabled=$(aws dynamodb describe-table --table-name kaevo-cloud-dev-remote-requests --query 'Table.StreamSpecification.StreamEnabled' --output text)
           [[ "${stream_enabled}" == "True" ]]
+          ticket_integration_id=$(aws cloudformation describe-stack-resource \
+            --stack-name "${stack}" \
+            --logical-resource-id TicketIntegration \
+            --query StackResourceDetail.PhysicalResourceId --output text)
+          routes=$(aws apigatewayv2 get-routes --api-id "${http_api_id}" --output json)
+          legacy_route_id=$(jq -r '.Items[] | select(.RouteKey == "POST /v3/remote-requests/claim") | .RouteId' <<<"${routes}")
+          legacy_target=$(aws apigatewayv2 get-route \
+            --api-id "${http_api_id}" \
+            --route-id "${legacy_route_id}" \
+            --query Target --output text)
+          [[ "${legacy_target}" == "integrations/${ticket_integration_id}" ]]
           websocket_url=$(aws cloudformation describe-stacks --stack-name "${stack}" --query "Stacks[0].Outputs[?OutputKey=='WebSocketUrl'].OutputValue" --output text)
           echo "::add-mask::${websocket_url}"
           http_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
@@ -292,6 +303,11 @@ jobs:
             --data '{"connector_id":"invalid","connector_control_protocol":2}' \
             "${api_url}/v3/home-connectors/invalid/control-ticket")
           [[ "${http_status}" == "401" ]]
+          legacy_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --request POST --header 'Content-Type: application/json' \
+            --data '{"connector_id":"invalid","connector_control_protocol":1}' \
+            "${api_url}/v3/remote-requests/claim")
+          [[ "${legacy_status}" == "401" ]]
           python3 -m pip install --quiet 'websockets>=14,<16'
           CONTROL_WEBSOCKET_URL="${websocket_url}" python3 - <<'PY'
           import asyncio
@@ -327,30 +343,32 @@ jobs:
             --logical-resource-id RelaySigningSecret \
             --query StackResourceDetail.PhysicalResourceId --output text)
           echo "::add-mask::${signing_secret}"
-          create_change_set="migration-create-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          aws cloudformation create-change-set \
-            --stack-name "${stack}" \
-            --change-set-name "${create_change_set}" \
-            --change-set-type CREATE \
-            --template-body file://Kaevo\ Cloud/infra/playback-relay-lightsail-canary.yaml \
-            --parameters \
-              ParameterKey=ServiceName,ParameterValue="${service}" \
-              ParameterKey=ContainerImage,ParameterValue= \
-              ParameterKey=RelaySigningSecretArn,ParameterValue="${signing_secret}" \
-              ParameterKey=SourceRevision,ParameterValue="${GITHUB_SHA}" \
-            --capabilities CAPABILITY_IAM \
-            --role-arn "${KAEVO_EXECUTION_ROLE}" >/dev/null
-          aws cloudformation wait change-set-create-complete --stack-name "${stack}" --change-set-name "${create_change_set}"
-          changes=$(aws cloudformation describe-change-set --stack-name "${stack}" --change-set-name "${create_change_set}" --query Changes --output json)
-          echo "${changes}" | jq -r '.[] | [.ResourceChange.Action,.ResourceChange.LogicalResourceId] | @tsv'
-          echo "${changes}" | jq -e 'all(.[]; .ResourceChange.Action == "Add")' >/dev/null
-          aws cloudformation execute-change-set --stack-name "${stack}" --change-set-name "${create_change_set}"
-          if ! aws cloudformation wait stack-create-complete --stack-name "${stack}"; then
-            aws cloudformation describe-stack-events \
+          if ! aws cloudformation describe-stacks --stack-name "${stack}" >/dev/null 2>&1; then
+            create_change_set="migration-create-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            aws cloudformation create-change-set \
               --stack-name "${stack}" \
-              --query 'StackEvents[?ResourceStatusReason!=`null`].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]' \
-              --output table
-            exit 1
+              --change-set-name "${create_change_set}" \
+              --change-set-type CREATE \
+              --template-body file://Kaevo\ Cloud/infra/playback-relay-lightsail-canary.yaml \
+              --parameters \
+                ParameterKey=ServiceName,ParameterValue="${service}" \
+                ParameterKey=ContainerImage,ParameterValue= \
+                ParameterKey=RelaySigningSecretArn,ParameterValue="${signing_secret}" \
+                ParameterKey=SourceRevision,ParameterValue="${GITHUB_SHA}" \
+              --capabilities CAPABILITY_IAM \
+              --role-arn "${KAEVO_EXECUTION_ROLE}" >/dev/null
+            aws cloudformation wait change-set-create-complete --stack-name "${stack}" --change-set-name "${create_change_set}"
+            changes=$(aws cloudformation describe-change-set --stack-name "${stack}" --change-set-name "${create_change_set}" --query Changes --output json)
+            echo "${changes}" | jq -r '.[] | [.ResourceChange.Action,.ResourceChange.LogicalResourceId] | @tsv'
+            echo "${changes}" | jq -e 'all(.[]; .ResourceChange.Action == "Add")' >/dev/null
+            aws cloudformation execute-change-set --stack-name "${stack}" --change-set-name "${create_change_set}"
+            if ! aws cloudformation wait stack-create-complete --stack-name "${stack}"; then
+              aws cloudformation describe-stack-events \
+                --stack-name "${stack}" \
+                --query 'StackEvents[?ResourceStatusReason!=`null`].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]' \
+                --output table
+              exit 1
+            fi
           fi
 
           docker build --platform linux/amd64 --provenance=false \
@@ -359,12 +377,16 @@ jobs:
             https://s3.us-west-2.amazonaws.com/lightsailctl/latest/linux-amd64/lightsailctl \
             --output /usr/local/bin/lightsailctl
           chmod +x /usr/local/bin/lightsailctl
-          push_result=$(aws lightsail push-container-image \
+          label="relay-${GITHUB_SHA:0:12}"
+          aws lightsail push-container-image \
             --service-name "${service}" \
-            --label "relay-${GITHUB_SHA:0:12}" \
-            --image "kaevo-relay:${GITHUB_SHA}")
-          image=$(echo "${push_result}" | jq -r '.containerImage.image')
-          [[ "${image}" == :${service}.relay-${GITHUB_SHA:0:12}.* ]]
+            --label "${label}" \
+            --image "kaevo-relay:${GITHUB_SHA}" >/dev/null
+          image=$(aws lightsail get-container-images \
+            --service-name "${service}" \
+            --query "containerImages[?label=='${label}'] | [0].image" \
+            --output text)
+          [[ "${image}" == :${service}.${label}.* ]]
           echo "::add-mask::${image}"
 
           update_change_set="migration-image-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

@@ -141,7 +141,10 @@ Resources:
           def handler(event, context):
               try:
                   properties = event["ResourceProperties"]
-                  routes = apigateway.get_routes(ApiId=properties["HttpApiId"]).get("Items", [])
+                  routes = []
+                  paginator = apigateway.get_paginator("get_routes")
+                  for page in paginator.paginate(ApiId=properties["HttpApiId"]):
+                      routes.extend(page.get("Items", []))
                   legacy_route = next(
                       (route for route in routes if route.get("RouteKey") == "POST /v3/remote-requests/claim"),
                       None,
