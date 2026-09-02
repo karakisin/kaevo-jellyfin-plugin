@@ -214,7 +214,7 @@ jobs:
               --change-set-type UPDATE \
               --use-previous-template \
               --parameters "${parameters}" \
-              --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+              --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
               --role-arn "${KAEVO_EXECUTION_ROLE}" >/dev/null
             aws cloudformation wait change-set-create-complete --stack-name "${api_stack}" --change-set-name "${change_set}"
             changes=$(aws cloudformation describe-change-set --stack-name "${api_stack}" --change-set-name "${change_set}" --query Changes --output json)
