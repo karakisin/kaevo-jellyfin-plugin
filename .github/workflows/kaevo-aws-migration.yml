@@ -85,6 +85,21 @@ jobs:
             --queue-name-prefix kaevo-cloud-dev-connector-control \
             --query 'QueueUrls' \
             --output table
+          api_url=$(aws cloudformation describe-stacks \
+            --stack-name kaevo-cloud-dev \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+            --output text)
+          http_api_id=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.urlparse(sys.argv[1]).hostname.split(".")[0])' "${api_url}")
+          echo "::add-mask::${api_url}"
+          echo "::add-mask::${http_api_id}"
+          aws apigatewayv2 get-stages \
+            --api-id "${http_api_id}" \
+            --query 'Items[].[StageName,AutoDeploy]' \
+            --output table
+          aws dynamodb describe-table \
+            --table-name kaevo-cloud-dev-remote-requests \
+            --query 'Table.[TableName,TableStatus,StreamSpecification.StreamEnabled,StreamSpecification.StreamViewType]' \
+            --output table
 
       - name: Reset failed development control bootstrap
         if: inputs.target == 'reset-failed-control-development'
