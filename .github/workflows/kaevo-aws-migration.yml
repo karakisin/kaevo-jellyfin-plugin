@@ -14,6 +14,7 @@ on:
         type: choice
         options:
           - security-baseline
+          - inspect-control-development
           - control-development
           - relay-canary
 
@@ -51,6 +52,22 @@ jobs:
           echo "KAEVO_EXECUTION_ROLE=${execution_role}" >> "${GITHUB_ENV}"
           caller_arn=$(aws sts get-caller-identity --query Arn --output text)
           [[ "${caller_arn}" == */KaevoDeploymentRole/* ]]
+
+      - name: Inspect failed development control stack
+        if: inputs.target == 'inspect-control-development'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AWS_PAGER=""
+          stack=kaevo-cloud-dev-connector-control
+          aws cloudformation describe-stacks \
+            --stack-name "${stack}" \
+            --query 'Stacks[0].[StackName,StackStatus,CreationTime]' \
+            --output table
+          aws cloudformation describe-stack-events \
+            --stack-name "${stack}" \
+            --query 'StackEvents[?ResourceStatusReason!=`null`].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]' \
+            --output table
 
       - name: Preview and apply security baseline
         if: inputs.target == 'security-baseline'
