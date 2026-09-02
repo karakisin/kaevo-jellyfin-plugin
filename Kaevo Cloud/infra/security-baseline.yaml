@@ -177,6 +177,10 @@ Resources:
                   - cloudformation:ListStacks
                   - cloudformation:ValidateTemplate
                 Resource: '*'
+              - Sid: ReadExistingSamArtifactStack
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/aws-sam-cli-managed-default/*
               - Sid: PassKaevoExecutionRole
                 Effect: Allow
                 Action: iam:PassRole
