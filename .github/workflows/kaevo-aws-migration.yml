@@ -15,7 +15,6 @@ on:
         options:
           - security-baseline
           - inspect-control-development
-          - reset-failed-control-development
           - control-development
           - relay-canary
 
@@ -101,38 +100,6 @@ jobs:
             --query 'Table.[TableName,TableStatus,StreamSpecification.StreamEnabled,StreamSpecification.StreamViewType]' \
             --output table
 
-      - name: Reset failed development control bootstrap
-        if: inputs.target == 'reset-failed-control-development'
-        shell: bash
-        run: |
-          set -euo pipefail
-          export AWS_PAGER=""
-          stack=kaevo-cloud-dev-connector-control
-          status=$(aws cloudformation describe-stacks --stack-name "${stack}" --query 'Stacks[0].StackStatus' --output text)
-          [[ "${status}" == "ROLLBACK_COMPLETE" ]]
-          item_count=$(aws dynamodb describe-table \
-            --table-name kaevo-cloud-dev-connector-control-connections \
-            --query 'Table.ItemCount' --output text)
-          [[ "${item_count}" == "0" ]]
-          mapfile -t log_groups < <(aws logs describe-log-groups \
-            --log-group-name-prefix '/aws/' \
-            --query "logGroups[?contains(logGroupName, 'kaevo-cloud-dev-connector-control')].logGroupName" \
-            --output text | tr '\t' '\n' | sort)
-          [[ "${#log_groups[@]}" == "5" ]]
-          aws cloudformation delete-stack --stack-name "${stack}"
-          aws cloudformation wait stack-delete-complete --stack-name "${stack}"
-          aws dynamodb delete-table --table-name kaevo-cloud-dev-connector-control-connections >/dev/null
-          aws dynamodb wait table-not-exists --table-name kaevo-cloud-dev-connector-control-connections
-          for log_group in "${log_groups[@]}"; do
-            aws logs delete-log-group --log-group-name "${log_group}"
-          done
-          remaining=$(aws logs describe-log-groups \
-            --log-group-name-prefix '/aws/' \
-            --query "length(logGroups[?contains(logGroupName, 'kaevo-cloud-dev-connector-control')])" \
-            --output text)
-          [[ "${remaining}" == "0" ]]
-          echo "Removed only the empty retained resources from the failed development control bootstrap"
-
       - name: Preview and apply security baseline
         if: inputs.target == 'security-baseline'
         shell: bash
@@ -181,10 +148,17 @@ jobs:
           echo "::add-mask::${http_api_id}"
           stack=kaevo-cloud-dev-connector-control
           change_set="migration-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if aws cloudformation describe-stacks --stack-name "${stack}" >/dev/null 2>&1; then
+            change_type=UPDATE
+            completion_waiter=stack-update-complete
+          else
+            change_type=CREATE
+            completion_waiter=stack-create-complete
+          fi
           aws cloudformation create-change-set \
             --stack-name "${stack}" \
             --change-set-name "${change_set}" \
-            --change-set-type CREATE \
+            --change-set-type "${change_type}" \
             --template-body file://Kaevo\ Cloud/infra/connector-control.yaml \
             --parameters \
               ParameterKey=EnvironmentName,ParameterValue=dev \
@@ -196,12 +170,16 @@ jobs:
           aws cloudformation wait change-set-create-complete --stack-name "${stack}" --change-set-name "${change_set}"
           changes=$(aws cloudformation describe-change-set --stack-name "${stack}" --change-set-name "${change_set}" --query Changes --output json)
           echo "${changes}" | jq -r '.[] | [.ResourceChange.Action,.ResourceChange.LogicalResourceId,(.ResourceChange.Replacement // "None")] | @tsv'
-          if echo "${changes}" | jq -e 'any(.[]; .ResourceChange.Action != "Add")' >/dev/null; then
+          if [[ "${change_type}" == "CREATE" ]] && echo "${changes}" | jq -e 'any(.[]; .ResourceChange.Action != "Add")' >/dev/null; then
             echo "Development control create contains a non-add action" >&2
             exit 1
           fi
+          if echo "${changes}" | jq -e 'any(.[]; .ResourceChange.Action == "Remove" or (.ResourceChange.Replacement == "True" or .ResourceChange.Replacement == "Conditional"))' >/dev/null; then
+            echo "Unsafe development control removal or replacement rejected" >&2
+            exit 1
+          fi
           aws cloudformation execute-change-set --stack-name "${stack}" --change-set-name "${change_set}"
-          if ! aws cloudformation wait stack-create-complete --stack-name "${stack}"; then
+          if ! aws cloudformation wait "${completion_waiter}" --stack-name "${stack}"; then
             aws cloudformation describe-stack-events \
               --stack-name "${stack}" \
               --query 'StackEvents[?ResourceStatusReason!=`null`].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]' \
