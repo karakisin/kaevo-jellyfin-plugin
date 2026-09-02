@@ -59,6 +59,7 @@ Resources:
       StageName: !Ref EnvironmentName
       AutoDeploy: true
       DefaultRouteSettings:
+        DetailedMetricsEnabled: true
         ThrottlingBurstLimit: 20
         ThrottlingRateLimit: 10
       AccessLogSettings:
@@ -187,14 +188,17 @@ Resources:
                   settings = stage.get("RouteSettings") or {}
                   settings.update({
                       "POST /v3/remote-requests/claim": {
+                          "DetailedMetricsEnabled": True,
                           "ThrottlingBurstLimit": 4,
                           "ThrottlingRateLimit": 1.0,
                       },
                       "POST /v3/home-connectors/{connectorId}/control-ticket": {
+                          "DetailedMetricsEnabled": True,
                           "ThrottlingBurstLimit": 10,
                           "ThrottlingRateLimit": 2.0,
                       },
                       "POST /v3/remote-requests/{requestId}/claim": {
+                          "DetailedMetricsEnabled": True,
                           "ThrottlingBurstLimit": 40,
                           "ThrottlingRateLimit": 20.0,
                       },
@@ -224,6 +228,7 @@ Resources:
       HttpApiId: !Ref HttpApiId
       LegacyClaimOriginalTarget: !Ref LegacyClaimOriginalTarget
       LegacyClaimNewTarget: !Sub integrations/${TicketIntegration}
+      ConfigurationRevision: protocol-2-observability-v1
       ConfigurationVersion: '3'
 
   TicketLogGroup:

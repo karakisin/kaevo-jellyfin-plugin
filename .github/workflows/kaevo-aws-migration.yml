@@ -15,6 +15,8 @@ on:
           - inspect-relay-canary
           - relay-canary
           - validate-relay-canary
+          - prepare-physical-validation
+          - snapshot-physical-validation
           - playback-cutover-production
           - decommission-legacy-relay
       physical_validation:
@@ -178,6 +180,126 @@ jobs:
           [[ "${edge_health}" == "200" ]]
           [[ "${edge_protected}" == "401" ]]
           echo "Active Lightsail canary, CloudFront HTTPS edge, and direct-origin rejection verified"
+
+      - name: Route only development playback grants to the green relay
+        if: inputs.target == 'prepare-physical-validation'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AWS_PAGER=""
+          relay_stack=kaevo-playback-relay-green
+          api_stack=kaevo-cloud-dev
+          relay_url=$(aws cloudformation describe-stacks --stack-name "${relay_stack}" --query "Stacks[0].Outputs[?OutputKey=='RelayPublicUrl'].OutputValue" --output text)
+          service_url=$(aws cloudformation describe-stacks --stack-name "${relay_stack}" --query "Stacks[0].Outputs[?OutputKey=='ServiceUrl'].OutputValue" --output text)
+          service_url=${service_url%/}
+          echo "::add-mask::${relay_url}"
+          echo "::add-mask::${service_url}"
+          [[ "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url}/health")" == "200" ]]
+          [[ "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url}/v1/playback/not-a-grant/Videos/not-an-item/stream")" == "401" ]]
+          [[ "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${service_url}/v1/playback/not-a-grant/Videos/not-an-item/stream")" == "403" ]]
+
+          configured_url=$(aws cloudformation describe-stacks --stack-name "${api_stack}" --query "Stacks[0].Parameters[?ParameterKey=='PlaybackRelayPublicUrl'].ParameterValue | [0]" --output text)
+          echo "::add-mask::${configured_url}"
+          if [[ "${configured_url}" != "${relay_url}" ]]; then
+            parameters=$(aws cloudformation describe-stacks --stack-name "${api_stack}" --query 'Stacks[0].Parameters' --output json | \
+              jq --arg relay "${relay_url}" '
+                map(if .ParameterKey == "PlaybackRelayPublicUrl"
+                    then {ParameterKey: .ParameterKey, ParameterValue: $relay}
+                    else {ParameterKey: .ParameterKey, UsePreviousValue: true}
+                    end)')
+            change_set="development-green-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            aws cloudformation create-change-set \
+              --stack-name "${api_stack}" \
+              --change-set-name "${change_set}" \
+              --change-set-type UPDATE \
+              --use-previous-template \
+              --parameters "${parameters}" \
+              --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+              --role-arn "${KAEVO_EXECUTION_ROLE}" >/dev/null
+            aws cloudformation wait change-set-create-complete --stack-name "${api_stack}" --change-set-name "${change_set}"
+            changes=$(aws cloudformation describe-change-set --stack-name "${api_stack}" --change-set-name "${change_set}" --query Changes --output json)
+            echo "${changes}" | jq -r '.[] | [.ResourceChange.Action,.ResourceChange.LogicalResourceId,(.ResourceChange.Replacement // "None")] | @tsv'
+            echo "${changes}" | jq -e '
+              length > 0 and all(.[].ResourceChange;
+                .Action == "Modify" and
+                (.Replacement // "False") == "False" and
+                (.LogicalResourceId as $id | [
+                  "KaevoCloudApiFunction",
+                  "KaevoCloudRemoteApiFunction",
+                  "KaevoV3ConnectorControlFunction"
+                ] | index($id) != null)
+              )' >/dev/null
+            aws cloudformation execute-change-set --stack-name "${api_stack}" --change-set-name "${change_set}"
+            aws cloudformation wait stack-update-complete --stack-name "${api_stack}"
+          fi
+          configured_url=$(aws cloudformation describe-stacks --stack-name "${api_stack}" --query "Stacks[0].Parameters[?ParameterKey=='PlaybackRelayPublicUrl'].ParameterValue | [0]" --output text)
+          [[ "${configured_url}" == "${relay_url}" ]]
+          production_url=$(aws cloudformation describe-stacks --stack-name kaevo-cloud-production --query "Stacks[0].Parameters[?ParameterKey=='PlaybackRelayPublicUrl'].ParameterValue | [0]" --output text)
+          echo "::add-mask::${production_url}"
+          [[ "${production_url}" != "${relay_url}" ]]
+          echo "Development playback grants target green; production playback remains unchanged"
+
+      - name: Build and test the private protocol-2 plugin canary
+        if: inputs.target == 'prepare-physical-validation'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet --version
+          dotnet test 'Kaevo Jellyfin Plugin/tests/Kaevo.Plugin.KaevoForJellyfin.Tests/Kaevo.Plugin.KaevoForJellyfin.Tests.csproj' \
+            --configuration Release \
+            --results-directory /tmp/kaevo-plugin-test-results
+          dotnet publish 'Kaevo Jellyfin Plugin/src/Kaevo.Plugin.KaevoForJellyfin/Kaevo.Plugin.KaevoForJellyfin.csproj' \
+            --configuration Release \
+            --output 'Kaevo Jellyfin Plugin/artifacts/build' \
+            --no-self-contained \
+            -p:UseAppHost=false
+          KAEVO_RELEASE_TIMESTAMP="$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            bash 'Kaevo Jellyfin Plugin/scripts/package-plugin.sh'
+          python3 - <<'PY'
+          import json
+          import zipfile
+
+          path = "Kaevo Jellyfin Plugin/artifacts/package/Kaevo.Plugin.KaevoForJellyfin.zip"
+          with zipfile.ZipFile(path) as archive:
+              meta = json.loads(archive.read("meta.json"))
+              names = set(archive.namelist())
+          assert meta["version"] == "0.3.18.0"
+          assert names == {
+              "BouncyCastle.Cryptography.dll",
+              "Kaevo.Plugin.KaevoForJellyfin.dll",
+              "QRCoder.dll",
+              "meta.json",
+          }
+          print("Private plugin canary 0.3.18.0 packaged with exact contents")
+          PY
+
+      - name: Upload the private protocol-2 plugin canary
+        if: inputs.target == 'prepare-physical-validation'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kaevo-plugin-0.3.18-protocol-2-${{ github.sha }}
+          path: Kaevo Jellyfin Plugin/artifacts/package/Kaevo.Plugin.KaevoForJellyfin.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Capture redacted physical-validation evidence
+        if: inputs.target == 'prepare-physical-validation' || inputs.target == 'snapshot-physical-validation'
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x 'Kaevo Cloud/scripts/collect-aws-physical-validation-evidence.sh'
+          'Kaevo Cloud/scripts/collect-aws-physical-validation-evidence.sh' \
+            /tmp/kaevo-physical-validation-evidence.txt \
+            '${{ inputs.target }}'
+
+      - name: Upload the redacted physical-validation evidence
+        if: inputs.target == 'prepare-physical-validation' || inputs.target == 'snapshot-physical-validation'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kaevo-physical-validation-evidence-${{ github.run_id }}
+          path: /tmp/kaevo-physical-validation-evidence.txt
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Preview and apply security baseline
         if: inputs.target == 'security-baseline'
@@ -410,7 +532,7 @@ jobs:
               ParameterKey=ServiceName,UsePreviousValue=true \
               ParameterKey=ContainerImage,ParameterValue="${image}" \
               ParameterKey=RelaySigningSecretArn,UsePreviousValue=true \
-              ParameterKey=SourceRevision,UsePreviousValue=true \
+              ParameterKey=SourceRevision,ParameterValue="${GITHUB_SHA}" \
             --capabilities CAPABILITY_IAM \
             --role-arn "${KAEVO_EXECUTION_ROLE}" >/dev/null
           aws cloudformation wait change-set-create-complete --stack-name "${stack}" --change-set-name "${update_change_set}"

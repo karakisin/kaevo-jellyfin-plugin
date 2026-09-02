@@ -19,6 +19,7 @@ from kaevo_relay.app import (
     MAX_CHUNK_BYTES,
     authorize_playback_video_path,
     grant_token_from_path,
+    opaque_fingerprint,
     rewrite_hls_playlist,
     split_grant_token,
     validate_family_sync_ticket,
@@ -40,6 +41,19 @@ def token(payload):
     encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()).decode().rstrip("=")
     signature = base64.urlsafe_b64encode(hmac.new(KEY.encode(), encoded.encode(), hashlib.sha256).digest()).decode().rstrip("=")
     return f"{encoded}.{signature}"
+
+
+def test_runtime_log_fingerprints_do_not_expose_identifiers():
+    connector_id = "connector-private-identifier"
+    request_id = "request-private-identifier"
+    connector_fingerprint = opaque_fingerprint("connector", connector_id)
+    request_fingerprint = opaque_fingerprint("request", request_id)
+
+    assert len(connector_fingerprint) == 20
+    assert len(request_fingerprint) == 20
+    assert connector_id not in connector_fingerprint
+    assert request_id not in request_fingerprint
+    assert connector_fingerprint != request_fingerprint
 
 
 @pytest.mark.asyncio

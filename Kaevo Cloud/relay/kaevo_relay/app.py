@@ -46,6 +46,10 @@ SAFE_TRICKPLAY_TILE = re.compile(r"^[0-9]+\.jpg$")
 LOGGER = logging.getLogger("kaevo.relay")
 
 
+def opaque_fingerprint(kind: str, value: str) -> str:
+    return hashlib.sha256(f"{kind}:{value}".encode("utf-8")).hexdigest()[:20]
+
+
 def origin_authorized(headers: Any) -> bool:
     supplied = str(headers.get(ORIGIN_AUTH_HEADER) or "")
     return (
@@ -498,7 +502,7 @@ async def health() -> dict[str, Any]:
     return {
         "state": "ok",
         "service": "kaevo-playback-relay",
-        "version": "0.2.17",
+        "version": "0.2.18",
     }
 
 
@@ -529,9 +533,9 @@ async def connector_socket(websocket: WebSocket, connector_id: str) -> None:
             task.result()
     except WebSocketDisconnect as error:
         LOGGER.warning(
-            "connector_disconnected connector_id=%s channel_id=%s close_code=%s pending=%s",
-            connector_id,
-            channel_id,
+            "connector_disconnected connector=%s channel=%s close_code=%s pending=%s",
+            opaque_fingerprint("connector", connector_id),
+            opaque_fingerprint("channel", channel_id),
             getattr(error, "code", None),
             len(channel.pending),
         )
@@ -539,9 +543,9 @@ async def connector_socket(websocket: WebSocket, connector_id: str) -> None:
         raise
     except Exception as error:
         LOGGER.warning(
-            "connector_failed connector_id=%s channel_id=%s category=%s pending=%s",
-            connector_id,
-            channel_id,
+            "connector_failed connector=%s channel=%s category=%s pending=%s",
+            opaque_fingerprint("connector", connector_id),
+            opaque_fingerprint("channel", channel_id),
             type(error).__name__,
             len(channel.pending),
         )
@@ -691,9 +695,9 @@ async def playback(grant_path: str, video_path: str, request: Request):
     if not channel:
         connector_online = connectors.get(connector_id) is not None
         LOGGER.warning(
-            "playback_connector_%s connector_id=%s wait_ms=%s",
+            "playback_connector_%s connector=%s wait_ms=%s",
             "busy" if connector_online else "unavailable",
-            connector_id,
+            opaque_fingerprint("connector", connector_id),
             int((time.monotonic() - started_at) * 1000),
         )
         if connector_online:
@@ -716,9 +720,9 @@ async def playback(grant_path: str, video_path: str, request: Request):
     except (RuntimeError, WebSocketDisconnect):
         channel.release_request(request_id)
         LOGGER.warning(
-            "playback_connector_send_failed connector_id=%s request_id=%s",
-            connector_id,
-            request_id,
+            "playback_connector_send_failed connector=%s request=%s",
+            opaque_fingerprint("connector", connector_id),
+            opaque_fingerprint("request", request_id),
         )
         raise HTTPException(status_code=503, detail="connectorUnavailable") from None
     try:
@@ -727,9 +731,9 @@ async def playback(grant_path: str, video_path: str, request: Request):
             raise HTTPException(status_code=502, detail="connectorResponseInvalid")
         status = int(start.get("status") or 502)
         LOGGER.info(
-            "playback_response_started connector_id=%s request_id=%s status=%s elapsed_ms=%s",
-            connector_id,
-            request_id,
+            "playback_response_started connector=%s request=%s status=%s elapsed_ms=%s",
+            opaque_fingerprint("connector", connector_id),
+            opaque_fingerprint("request", request_id),
             status,
             int((time.monotonic() - started_at) * 1000),
         )
@@ -799,9 +803,9 @@ async def playback(grant_path: str, video_path: str, request: Request):
         except (RuntimeError, WebSocketDisconnect):
             pass
         LOGGER.warning(
-            "playback_connector_timed_out connector_id=%s request_id=%s elapsed_ms=%s",
-            connector_id,
-            request_id,
+            "playback_connector_timed_out connector=%s request=%s elapsed_ms=%s",
+            opaque_fingerprint("connector", connector_id),
+            opaque_fingerprint("request", request_id),
             int((time.monotonic() - started_at) * 1000),
         )
         raise HTTPException(status_code=504, detail="connectorTimedOut") from None

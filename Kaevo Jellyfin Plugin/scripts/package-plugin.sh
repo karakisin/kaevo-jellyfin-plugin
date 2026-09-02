@@ -18,7 +18,13 @@ if [[ -n "${KAEVO_RELEASE_TIMESTAMP:-}" ]]; then
     TIMESTAMP="$KAEVO_RELEASE_TIMESTAMP"
 else
     RELEASE_EPOCH="$(git -C "$PROJECT_ROOT" show -s --format=%ct HEAD)"
-    TIMESTAMP="$(date -u -r "$RELEASE_EPOCH" '+%Y-%m-%dT%H:%M:%SZ')"
+    TIMESTAMP="$(python3 - "$RELEASE_EPOCH" <<'PY'
+import datetime
+import sys
+
+print(datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
 fi
 
 test -f "$BUILD_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" || {
@@ -41,7 +47,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Hardens Pairing V3 completion by checking the immutable attempt after an uncertain Cloud response and retrying redemption once only when Cloud confirms the first request did not commit.",
+  "changelog": "Private AWS migration canary: connector-control protocol 2 WebSocket delivery, exact request claims, bounded disconnected recovery, and no connected idle polling.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",
@@ -53,8 +59,21 @@ cat > "$PLUGIN_DIR/meta.json" <<EOF
 }
 EOF
 
-NORMALIZED_TIMESTAMP="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$TIMESTAMP" '+%Y%m%d%H%M.%S')"
-touch -t "$NORMALIZED_TIMESTAMP" "$PLUGIN_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/QRCoder.dll" "$PLUGIN_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/meta.json"
+python3 - "$TIMESTAMP" \
+    "$PLUGIN_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" \
+    "$PLUGIN_DIR/QRCoder.dll" \
+    "$PLUGIN_DIR/BouncyCastle.Cryptography.dll" \
+    "$PLUGIN_DIR/meta.json" <<'PY'
+import datetime
+import os
+import sys
+
+epoch = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(
+    tzinfo=datetime.UTC
+).timestamp()
+for path in sys.argv[2:]:
+    os.utime(path, (epoch, epoch))
+PY
 
 python3 "$SCRIPT_DIR/create-deterministic-plugin-zip.py" "$PLUGIN_DIR" "$ZIP_PATH"
 
