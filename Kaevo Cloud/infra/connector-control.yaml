@@ -12,6 +12,10 @@ Parameters:
     Type: String
   CodeKey:
     Type: String
+  LegacyClaimOriginalTarget:
+    Type: String
+    AllowedPattern: '^integrations/[A-Za-z0-9]+$'
+    Description: Exact pre-migration integration target restored if this attachment stack is deleted.
 
 Resources:
   ConnectionsTable:
@@ -92,7 +96,10 @@ Resources:
                 Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-remote-requests
               - Effect: Allow
                 Action: [apigateway:GET, apigateway:PATCH]
-                Resource: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/${HttpApiId}/stages/${EnvironmentName}
+                Resource:
+                  - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/${HttpApiId}/stages/${EnvironmentName}
+                  - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/${HttpApiId}/routes
+                  - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/${HttpApiId}/routes/*
 
   EnvironmentConfigurationFunction:
     Type: AWS::Lambda::Function
@@ -134,8 +141,23 @@ Resources:
           def handler(event, context):
               try:
                   properties = event["ResourceProperties"]
+                  routes = apigateway.get_routes(ApiId=properties["HttpApiId"]).get("Items", [])
+                  legacy_route = next(
+                      (route for route in routes if route.get("RouteKey") == "POST /v3/remote-requests/claim"),
+                      None,
+                  )
+                  if not legacy_route:
+                      raise RuntimeError("legacy_claim_route_unavailable")
                   if event["RequestType"] == "Delete":
-                      respond(event, context, "SUCCESS", {"Retained": "remote-request stream and safe route throttles"})
+                      apigateway.update_route(
+                          ApiId=properties["HttpApiId"],
+                          RouteId=legacy_route["RouteId"],
+                          Target=properties["LegacyClaimOriginalTarget"],
+                      )
+                      respond(event, context, "SUCCESS", {
+                          "Retained": "remote-request stream and safe route throttles",
+                          "LegacyRouteRestored": True,
+                      })
                       return
                   table_name = f"kaevo-cloud-{properties['EnvironmentName']}-remote-requests"
                   description = dynamodb.describe_table(TableName=table_name)["Table"]
@@ -179,6 +201,11 @@ Resources:
                       StageName=properties["EnvironmentName"],
                       RouteSettings=settings,
                   )
+                  apigateway.update_route(
+                      ApiId=properties["HttpApiId"],
+                      RouteId=legacy_route["RouteId"],
+                      Target=properties["LegacyClaimNewTarget"],
+                  )
                   respond(event, context, "SUCCESS", {"StreamArn": stream_arn})
               except Exception as error:
                   respond(event, context, "FAILED", reason=f"configuration_failed:{type(error).__name__}")
@@ -192,7 +219,9 @@ Resources:
       ServiceToken: !GetAtt EnvironmentConfigurationFunction.Arn
       EnvironmentName: !Ref EnvironmentName
       HttpApiId: !Ref HttpApiId
-      ConfigurationVersion: '2'
+      LegacyClaimOriginalTarget: !Ref LegacyClaimOriginalTarget
+      LegacyClaimNewTarget: !Sub integrations/${TicketIntegration}
+      ConfigurationVersion: '3'
 
   TicketLogGroup:
     Type: AWS::Logs::LogGroup
@@ -231,9 +260,10 @@ Resources:
                   - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-app-sessions
                   - !GetAtt ConnectionsTable.Arn
               - Effect: Allow
-                Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+                Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:UpdateItem]
                 Resource:
                   - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-remote-requests
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-remote-requests/index/connector_id-status_created_at-index
                   - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-binding-operations
 
   TicketFunction:

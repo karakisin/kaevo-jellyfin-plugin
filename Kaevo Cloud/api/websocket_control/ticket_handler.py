@@ -141,6 +141,8 @@ def lambda_handler(event, _context):
     path = connector_control.normalized_path(event)
     if connector_control.method_for(event) != "POST":
         return common.json_response(405, "method_not_allowed")
+    if path == "/v3/remote-requests/claim":
+        return connector_control.claim_remote_request(event)
     ticket_match = CONTROL_TICKET_ROUTE.fullmatch(path)
     if ticket_match:
         return issue_ticket(event, ticket_match.group(1))

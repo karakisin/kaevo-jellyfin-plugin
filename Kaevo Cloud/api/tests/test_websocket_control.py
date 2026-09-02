@@ -208,6 +208,20 @@ def test_old_protocol_is_authenticated_then_requires_upgrade(tables, monkeypatch
     assert response["headers"]["Retry-After"] == "60"
 
 
+def test_legacy_collection_route_uses_authenticated_upgrade_policy(monkeypatch):
+    expected = {"statusCode": 426, "body": "upgrade"}
+    monkeypatch.setattr(
+        ticket_handler.connector_control,
+        "claim_remote_request",
+        lambda event: expected if event["rawPath"] == "/v3/remote-requests/claim" else None,
+    )
+    response = ticket_handler.lambda_handler(
+        http_event("/v3/remote-requests/claim", {"connector_id": CONNECTOR_ID}),
+        None,
+    )
+    assert response is expected
+
+
 def test_connection_ticket_is_one_time_and_replay_fails(tables):
     ticket = "one-time-ticket"
     tables[0].items[f"ticket#{common.ticket_digest(ticket)}"] = {

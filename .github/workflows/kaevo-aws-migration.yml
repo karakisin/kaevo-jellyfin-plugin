@@ -224,10 +224,27 @@ jobs:
           if aws cloudformation describe-stacks --stack-name "${stack}" >/dev/null 2>&1; then
             change_type=UPDATE
             completion_waiter=stack-update-complete
+            legacy_original_target=$(aws cloudformation describe-stacks \
+              --stack-name "${stack}" \
+              --query "Stacks[0].Parameters[?ParameterKey=='LegacyClaimOriginalTarget'].ParameterValue | [0]" \
+              --output text)
           else
             change_type=CREATE
             completion_waiter=stack-create-complete
+            legacy_original_target=None
           fi
+          if [[ -z "${legacy_original_target}" || "${legacy_original_target}" == "None" ]]; then
+            legacy_route_id=$(aws apigatewayv2 get-routes \
+              --api-id "${http_api_id}" \
+              --query "Items[?RouteKey=='POST /v3/remote-requests/claim'].RouteId | [0]" \
+              --output text)
+            legacy_original_target=$(aws apigatewayv2 get-route \
+              --api-id "${http_api_id}" \
+              --route-id "${legacy_route_id}" \
+              --query Target --output text)
+          fi
+          [[ "${legacy_original_target}" == integrations/* ]]
+          echo "::add-mask::${legacy_original_target}"
           aws cloudformation create-change-set \
             --stack-name "${stack}" \
             --change-set-name "${change_set}" \
@@ -238,6 +255,7 @@ jobs:
               ParameterKey=HttpApiId,ParameterValue="${http_api_id}" \
               ParameterKey=CodeBucket,ParameterValue="${artifact_bucket}" \
               ParameterKey=CodeKey,ParameterValue="${artifact_key}" \
+              ParameterKey=LegacyClaimOriginalTarget,ParameterValue="${legacy_original_target}" \
             --capabilities CAPABILITY_IAM \
             --role-arn "${KAEVO_EXECUTION_ROLE}" >/dev/null
           aws cloudformation wait change-set-create-complete --stack-name "${stack}" --change-set-name "${change_set}"
