@@ -162,6 +162,7 @@ jobs:
           state=$(aws lightsail get-container-services --service-name "${service}" --query 'containerServices[0].currentDeployment.state' --output text)
           [[ "${state}" == "ACTIVE" ]]
           service_url=$(aws cloudformation describe-stacks --stack-name "${stack}" --query "Stacks[0].Outputs[?OutputKey=='ServiceUrl'].OutputValue" --output text)
+          service_url=${service_url%/}
           relay_url=$(aws cloudformation describe-stacks --stack-name "${stack}" --query "Stacks[0].Outputs[?OutputKey=='RelayPublicUrl'].OutputValue" --output text)
           echo "::add-mask::${service_url}"
           echo "::add-mask::${relay_url}"
@@ -442,6 +443,7 @@ jobs:
           done
           [[ "${state}" == "ACTIVE" ]]
           service_url=$(aws cloudformation describe-stacks --stack-name "${stack}" --query "Stacks[0].Outputs[?OutputKey=='ServiceUrl'].OutputValue" --output text)
+          service_url=${service_url%/}
           relay_url=$(aws cloudformation describe-stacks --stack-name "${stack}" --query "Stacks[0].Outputs[?OutputKey=='RelayPublicUrl'].OutputValue" --output text)
           echo "::add-mask::${service_url}"
           echo "::add-mask::${relay_url}"
@@ -476,6 +478,7 @@ jobs:
           [[ "${relay_status}" == "UPDATE_COMPLETE" || "${relay_status}" == "CREATE_COMPLETE" ]]
           relay_url=$(aws cloudformation describe-stacks --stack-name "${relay_stack}" --query "Stacks[0].Outputs[?OutputKey=='RelayPublicUrl'].OutputValue" --output text)
           service_url=$(aws cloudformation describe-stacks --stack-name "${relay_stack}" --query "Stacks[0].Outputs[?OutputKey=='ServiceUrl'].OutputValue" --output text)
+          service_url=${service_url%/}
           echo "::add-mask::${relay_url}"
           echo "::add-mask::${service_url}"
           [[ "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url}/health")" == "200" ]]
