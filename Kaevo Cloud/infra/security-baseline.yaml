@@ -1,0 +1,355 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Kaevo standalone-account deployment access and inexpensive durable management-event auditing.
+
+Parameters:
+  DeploymentRoleName:
+    Type: String
+    Default: KaevoDeploymentRole
+  ExecutionRoleName:
+    Type: String
+    Default: KaevoCloudFormationExecutionRole
+  TrailRetentionDays:
+    Type: Number
+    Default: 400
+    MinValue: 90
+    MaxValue: 2555
+  GitHubOwner:
+    Type: String
+    Default: karakisin
+    AllowedPattern: '[A-Za-z0-9_.-]+'
+  GitHubRepository:
+    Type: String
+    Default: kaevo-jellyfin-plugin
+    AllowedPattern: '[A-Za-z0-9_.-]+'
+
+Resources:
+  GitHubActionsOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: kaevo:component
+          Value: deployment-access
+
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref ExecutionRoleName
+      Description: CloudFormation-only execution role for Kaevo-managed stacks.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KaevoStackExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: KaevoApplicationServices
+                Effect: Allow
+                Action:
+                  - apigateway:*
+                  - cloudfront:*
+                  - cloudtrail:*
+                  - cloudwatch:*
+                  - dynamodb:*
+                  - ec2:*
+                  - ecr:*
+                  - ecs:*
+                  - elasticloadbalancing:*
+                  - events:*
+                  - lambda:*
+                  - lightsail:*
+                  - logs:*
+                  - s3:*
+                  - secretsmanager:*
+                  - sns:*
+                  - sqs:*
+                Resource: '*'
+              - Sid: KaevoBudgets
+                Effect: Allow
+                Action:
+                  - budgets:CreateBudget
+                  - budgets:DeleteBudget
+                  - budgets:ModifyBudget
+                  - budgets:UpdateBudget
+                  - budgets:CreateNotification
+                  - budgets:DeleteNotification
+                  - budgets:UpdateNotification
+                  - budgets:CreateSubscriber
+                  - budgets:DeleteSubscriber
+                  - budgets:UpdateSubscriber
+                  - budgets:ViewBudget
+                Resource: '*'
+              - Sid: KaevoRolesAndPolicies
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:UpdateRoleDescription
+                  - iam:PutRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:PassRole
+                  - iam:CreatePolicy
+                  - iam:DeletePolicy
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicyVersion
+                  - iam:ListPolicyVersions
+                  - iam:TagPolicy
+                  - iam:UntagPolicy
+                Resource:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/kaevo-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Kaevo*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/kaevo-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/Kaevo*
+
+  DeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref DeploymentRoleName
+      Description: Temporary-credential deployment role for Kaevo infrastructure only.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubActionsOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOwner}/${GitHubRepository}:ref:refs/heads/main
+                  - !Sub repo:${GitHubOwner}/${GitHubRepository}:ref:refs/heads/migration/aws-cost-architecture-20260902
+                  - !Sub repo:${GitHubOwner}/${GitHubRepository}:environment:development
+                  - !Sub repo:${GitHubOwner}/${GitHubRepository}:environment:production
+      Policies:
+        - PolicyName: KaevoDeployment
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: IdentifySession
+                Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: '*'
+              - Sid: ManageKaevoChangeSets
+                Effect: Allow
+                Action:
+                  - cloudformation:CancelUpdateStack
+                  - cloudformation:ContinueUpdateRollback
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ListChangeSets
+                  - cloudformation:ListStackResources
+                  - cloudformation:UpdateStack
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/kaevo-*/*
+              - Sid: ListAndValidateCloudFormation
+                Effect: Allow
+                Action:
+                  - cloudformation:ListStacks
+                  - cloudformation:ValidateTemplate
+                Resource: '*'
+              - Sid: PassKaevoExecutionRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt CloudFormationExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Sid: PushImmutableRelayImages
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:DescribeRepositories
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:ListImages
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                  - lightsail:CreateContainerServiceRegistryLogin
+                  - lightsail:GetContainerImages
+                  - lightsail:GetContainerServices
+                  - lightsail:RegisterContainerImage
+                Resource: '*'
+              - Sid: ReadKaevoDeploymentState
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetDistributionConfig
+                  - cloudfront:ListDistributions
+                  - cloudtrail:DescribeTrails
+                  - cloudtrail:GetTrailStatus
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - dynamodb:DescribeTable
+                  - dynamodb:DescribeTimeToLive
+                  - dynamodb:ListTables
+                  - ec2:Describe*
+                  - ecr:DescribeImages
+                  - ecr:DescribeRepositories
+                  - ecs:Describe*
+                  - ecs:List*
+                  - elasticloadbalancing:Describe*
+                  - events:DescribeRule
+                  - events:ListRules
+                  - iam:GetAccountSummary
+                  - iam:GetRole
+                  - lambda:GetAlias
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListAliases
+                  - lambda:ListFunctions
+                  - lambda:ListVersionsByFunction
+                  - lightsail:GetContainerImages
+                  - lightsail:GetContainerLog
+                  - lightsail:GetContainerServiceDeployments
+                  - lightsail:GetContainerServiceMetricData
+                  - lightsail:GetContainerServices
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                  - s3:GetBucketEncryption
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicy
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketVersioning
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:ListSecrets
+                  - sns:ListSubscriptionsByTopic
+                  - sns:ListTopics
+                  - sqs:GetQueueAttributes
+                  - sqs:ListQueues
+                Resource: '*'
+
+  TrailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub kaevo-management-cloudtrail-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireManagementAuditLogs
+            Status: Enabled
+            ExpirationInDays: !Ref TrailRetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref TrailRetentionDays
+      Tags:
+        - Key: kaevo:component
+          Value: security-audit
+
+  TrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt TrailBucket.Arn
+              - !Sub ${TrailBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+          - Sid: CloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt TrailBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/kaevo-management-events
+          - Sid: CloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${TrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceArn: !Sub arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/kaevo-management-events
+
+  ManagementTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: TrailBucketPolicy
+    Properties:
+      TrailName: kaevo-management-events
+      S3BucketName: !Ref TrailBucket
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      IsMultiRegionTrail: true
+      EventSelectors:
+        - IncludeManagementEvents: true
+          ReadWriteType: All
+          DataResources: []
+      Tags:
+        - Key: kaevo:component
+          Value: security-audit
+
+Outputs:
+  DeploymentRoleArn:
+    Value: !GetAtt DeploymentRole.Arn
+  CloudFormationExecutionRoleArn:
+    Value: !GetAtt CloudFormationExecutionRole.Arn
+  ManagementTrailArn:
+    Value: !GetAtt ManagementTrail.Arn
+  TrailBucketName:
+    Value: !Ref TrailBucket
+  GitHubActionsOidcProviderArn:
+    Value: !Ref GitHubActionsOidcProvider
