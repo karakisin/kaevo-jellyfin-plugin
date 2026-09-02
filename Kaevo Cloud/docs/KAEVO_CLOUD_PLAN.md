@@ -31,13 +31,32 @@ as client quality work.
   session. Completed in `0.0.19`.
 - Remove the one-time migration route and retired app credential. Completed.
 - Activate, inspect, and revoke plugin-confirmed trial sessions. Implemented.
-- Add App Store subscription receipt validation. Pending.
+- Verify StoreKit transaction JWS values with Apple's App Store Server Library,
+  bind the original transaction to the protected Kaevo Owner Session, and
+  process signed App Store Server Notifications V2. Implemented locally; not
+  deployed or configured in App Store Connect.
 
 ## Later approvals
 
 - Remote playback through a dedicated secure relay
 - Reversible Jellyfin user-data writes
 - Additional providers
+
+## App Store billing deployment gate
+
+- Dependency floor: `app-store-server-library>=3.1.2,<4` so the verifier
+  includes Apple's patched OCSP freshness behavior.
+- Deployment input `AppStoreRootCertificatesBase64` must contain the current
+  Apple PKI root certificates as comma-separated base64 DER. Missing or invalid
+  roots fail closed with HTTP 503.
+- Production notification path:
+  `/v1/app-store-server-notifications/production`
+- Sandbox notification path:
+  `/v1/app-store-server-notifications/sandbox`
+- Do not enter either URL in App Store Connect until the Cloud deployment has
+  completed and Apple's signed TEST notification receives HTTP 200.
+- No deployment or App Store Connect notification URL change was performed by
+  this preparation pass.
 
 ## Non-goals
 

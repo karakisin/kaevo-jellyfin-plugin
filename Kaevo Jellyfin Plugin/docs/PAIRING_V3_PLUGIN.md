@@ -36,9 +36,15 @@ itself is not logged or persisted.
 
 `POST /kaevo/v3/pairing/complete` proves QR possession first, then verifies a
 Cloud-signed Pairing Authorization, checks every binding, atomically reserves,
-and makes one signed Cloud redemption request. The local recovery endpoint is
-elevated and exists solely for an ambiguous reserved attempt. The deployed
-Phase B Cloud contract defines attempt status as **POST**
+and makes a signed Cloud redemption request. If that request has an uncertain
+transport or response outcome, the plugin queries the immutable attempt before
+any retry. A redeemed status is consumed locally without another redemption; a
+pending status proves that the first request did not commit and permits one
+retry with a fresh timestamp, nonce, and signature while retaining the exact
+ticket, authorization, and pairing-attempt identity. A second uncertain result
+is checked once more and remains reserved unless Cloud proves redemption. The
+local recovery endpoint is elevated and exists solely for an ambiguous reserved
+attempt. The deployed Phase B Cloud contract defines attempt status as **POST**
 `/v3/home-connectors/pairing/attempts/{pairingAttemptId}`; Phase C deliberately
 uses that contract rather than changing Cloud.
 

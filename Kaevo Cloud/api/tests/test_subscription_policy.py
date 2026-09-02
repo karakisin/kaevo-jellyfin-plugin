@@ -1,10 +1,8 @@
 import pytest
 
 from subscription_policy import (
-    CLOUD_FAMILY_MONTHLY,
-    CLOUD_INDIVIDUAL_MONTHLY,
-    LOCAL_FAMILY_MONTHLY,
-    LOCAL_INDIVIDUAL_MONTHLY,
+    FAMILY_MONTHLY,
+    LOCAL_MONTHLY,
     PRODUCT_POLICIES,
     entitlements_for_verified_subscription,
 )
@@ -13,10 +11,8 @@ from subscription_policy import (
 @pytest.mark.parametrize(
     ("product_id", "plan", "cloud_enabled", "family_enabled", "family_seats"),
     [
-        (LOCAL_INDIVIDUAL_MONTHLY, "local_individual", False, False, 1),
-        (LOCAL_FAMILY_MONTHLY, "local_family", False, True, 6),
-        (CLOUD_INDIVIDUAL_MONTHLY, "cloud_individual", True, False, 1),
-        (CLOUD_FAMILY_MONTHLY, "cloud_family", True, True, 6),
+        (LOCAL_MONTHLY, "local_family", False, False, 1),
+        (FAMILY_MONTHLY, "cloud_family", True, True, 6),
     ],
 )
 def test_verified_active_products_map_to_exact_capabilities(
@@ -40,25 +36,22 @@ def test_verified_active_products_map_to_exact_capabilities(
     assert entitlements["source"] == "app_store_server_api"
 
 
-def test_local_family_never_inherits_remote_or_family_sync_capabilities():
+def test_local_never_inherits_cloud_or_family_sync_capabilities():
     entitlements = entitlements_for_verified_subscription(
-        LOCAL_FAMILY_MONTHLY,
+        LOCAL_MONTHLY,
         "trialing",
         source="app_store_server_api",
     )
 
-    assert entitlements["family_enabled"] is True
+    assert entitlements["family_enabled"] is False
     assert entitlements["cloud_enabled"] is False
-    assert entitlements["feature_flags"] == {
-        "family_profiles": True,
-        "household_participants": True,
-    }
+    assert entitlements["feature_flags"] == {}
 
 
 @pytest.mark.parametrize("state", ["expired", "revoked", "billing_retry", ""])
 def test_inactive_states_fail_closed_without_discarding_product_identity(state):
     entitlements = entitlements_for_verified_subscription(
-        CLOUD_FAMILY_MONTHLY,
+        FAMILY_MONTHLY,
         state,
         source="app_store_server_api",
     )
@@ -79,10 +72,24 @@ def test_unknown_product_is_rejected_instead_of_inferred():
         )
 
 
-def test_catalog_contains_only_the_four_explicit_products():
+@pytest.mark.parametrize(
+    "retired_product_id",
+    [
+        "com.sumagang.kaevo.local.individual.monthly",
+        "com.sumagang.kaevo.local.family.monthly",
+    ],
+)
+def test_retired_product_ids_are_rejected(retired_product_id):
+    with pytest.raises(ValueError, match="unsupported_subscription_product"):
+        entitlements_for_verified_subscription(
+            retired_product_id,
+            "active",
+            source="app_store_server_api",
+        )
+
+
+def test_catalog_contains_only_the_two_app_store_products():
     assert set(PRODUCT_POLICIES) == {
-        LOCAL_INDIVIDUAL_MONTHLY,
-        LOCAL_FAMILY_MONTHLY,
-        CLOUD_INDIVIDUAL_MONTHLY,
-        CLOUD_FAMILY_MONTHLY,
+        LOCAL_MONTHLY,
+        FAMILY_MONTHLY,
     }

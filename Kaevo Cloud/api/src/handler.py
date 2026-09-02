@@ -137,6 +137,21 @@ from social_identity import (
     validate_identity_token as validate_social_identity_token,
 )
 from account_lifecycle_v2_provider import frozen_profile_provider_binding
+from app_store_subscriptions import (
+    AppStoreBindingConflict,
+    AppStoreBindingMissing,
+    AppStoreConfigurationError,
+    AppStoreVerificationError,
+    make_signed_data_verifier,
+    process_signed_notification,
+    sync_signed_transaction,
+)
+from sentry_issue_resolution import (
+    SENTRY_EVENT_ID_PATTERN,
+    SentryIssueResolutionError,
+    parse_credentials as parse_sentry_issue_resolver_credentials,
+    resolve_feedback_issue as resolve_sentry_feedback_issue,
+)
 
 
 SERVICE_NAME = "kaevo-cloud"
@@ -147,6 +162,10 @@ EVENTS_TABLE = os.environ.get("PROFILE_EVENTS_TABLE")
 PROFILE_SETTINGS_TABLE = os.environ.get("PROFILE_SETTINGS_TABLE")
 DEVICES_TABLE = os.environ.get("DEVICES_TABLE")
 ENTITLEMENTS_TABLE = os.environ.get("ENTITLEMENTS_TABLE")
+APP_STORE_TRANSACTIONS_TABLE = os.environ.get("APP_STORE_TRANSACTIONS_TABLE") or (
+    f"kaevo-cloud-{os.environ.get('KAEVO_ENV', 'dev').strip().lower()}-app-store-transactions"
+)
+SENTRY_ISSUE_RESOLVER_SECRET_ARN = os.environ.get("SENTRY_ISSUE_RESOLVER_SECRET_ARN", "")
 HOME_CONNECTORS_TABLE = os.environ.get("HOME_CONNECTORS_TABLE")
 REMOTE_REQUESTS_TABLE = os.environ.get("REMOTE_REQUESTS_TABLE")
 REMOTE_PAYLOADS_BUCKET = os.environ.get("REMOTE_PAYLOADS_BUCKET")
@@ -233,6 +252,7 @@ events_table = dynamodb.Table(EVENTS_TABLE) if EVENTS_TABLE else None
 profile_settings_table = dynamodb.Table(PROFILE_SETTINGS_TABLE) if PROFILE_SETTINGS_TABLE else None
 devices_table = dynamodb.Table(DEVICES_TABLE) if DEVICES_TABLE else None
 entitlements_table = dynamodb.Table(ENTITLEMENTS_TABLE) if ENTITLEMENTS_TABLE else None
+app_store_transactions_table = dynamodb.Table(APP_STORE_TRANSACTIONS_TABLE) if APP_STORE_TRANSACTIONS_TABLE else None
 home_connectors_table = dynamodb.Table(HOME_CONNECTORS_TABLE) if HOME_CONNECTORS_TABLE else None
 remote_requests_table = dynamodb.Table(REMOTE_REQUESTS_TABLE) if REMOTE_REQUESTS_TABLE else None
 s3_client = boto3.client("s3") if REMOTE_PAYLOADS_BUCKET or PROFILE_AVATARS_BUCKET else None
@@ -257,6 +277,8 @@ profile_binding_tombstones_table = dynamodb.Table(PROFILE_BINDING_TOMBSTONES_TAB
 cognito_client = boto3.client("cognito-idp")
 secrets_client = boto3.client("secretsmanager")
 _social_provider_secret_cache = {}
+_app_store_verifier_cache = {}
+_sentry_issue_resolver_secret_cache = {}
 
 
 DEFAULT_PROFILE_SETTINGS = {
@@ -928,6 +950,89 @@ def authenticated_app_session(event):
     return item
 
 
+def _app_store_verifier(environment):
+    normalized = str(environment or "").strip().lower()
+    cache_key = "production" if normalized == "production" else "sandbox" if normalized == "sandbox" else ""
+    if not cache_key:
+        raise AppStoreVerificationError("unsupported_environment")
+    verifier = _app_store_verifier_cache.get(cache_key)
+    if verifier is None:
+        verifier = make_signed_data_verifier(
+            cache_key,
+        )
+        _app_store_verifier_cache[cache_key] = verifier
+    return verifier
+
+
+def _app_store_error_response(error, *, notification=False):
+    if isinstance(error, AppStoreConfigurationError):
+        return response(503, {"state": "app_store_verification_unavailable", "retryable": True})
+    if isinstance(error, AppStoreVerificationError):
+        status = 503 if error.retryable else 400
+        return response(status, {
+            "state": "app_store_verification_failed",
+            "retryable": bool(error.retryable),
+        })
+    if isinstance(error, AppStoreBindingMissing):
+        # A notification can arrive before the device posts its authenticated
+        # transaction. Ask Apple to retry instead of discarding the event.
+        return response(503 if notification else 409, {
+            "state": "app_store_binding_missing",
+            "retryable": bool(notification),
+        })
+    if isinstance(error, AppStoreBindingConflict):
+        return response(409, {"state": "app_store_binding_conflict", "retryable": False})
+    LOGGER.exception("app_store_subscription_processing_failed")
+    return response(503, {"state": "app_store_subscription_unavailable", "retryable": True})
+
+
+def sync_app_store_subscription(event):
+    if app_store_transactions_table is None or entitlements_table is None:
+        return response(503, {"state": "app_store_subscription_storage_unavailable"})
+    session = authenticated_app_session(event)
+    if not session or session.get("record_type") != "access":
+        return response(401, {"state": "protected_session_required"})
+    if str(session.get("role") or "").strip().lower() != "owner":
+        return response(403, {"state": "owner_required"})
+    body = parse_json_body(event)
+    if body is None:
+        return response(400, {"state": "bad_request"})
+    environment = str(body.get("environment") or "").strip()
+    signed_transaction = body.get("signed_transaction")
+    try:
+        result = sync_signed_transaction(
+            signed_transaction=signed_transaction,
+            environment=environment,
+            session=session,
+            transactions_table=app_store_transactions_table,
+            entitlements_table=entitlements_table,
+            verifier=_app_store_verifier(environment),
+        )
+    except Exception as error:
+        return _app_store_error_response(error)
+    return response(200, result)
+
+
+def receive_app_store_notification(event, environment):
+    if app_store_transactions_table is None or entitlements_table is None:
+        return response(503, {"state": "app_store_subscription_storage_unavailable"})
+    body = parse_json_body(event)
+    if body is None:
+        return response(400, {"state": "bad_request"})
+    try:
+        result = process_signed_notification(
+            signed_payload=body.get("signedPayload"),
+            environment=environment,
+            transactions_table=app_store_transactions_table,
+            entitlements_table=entitlements_table,
+            verifier=_app_store_verifier(environment),
+        )
+    except Exception as error:
+        return _app_store_error_response(error, notification=True)
+    # Apple treats any 200-206 response as successful processing.
+    return response(200, result)
+
+
 def identity_me_v3(event, *, verified_session=None):
     """Resolve the caller exclusively from a DPoP-bound protected session.
 
@@ -1545,6 +1650,12 @@ def _authorized_switch_target_access(*, source_profile, household_id):
             "switch_protection": _profile_switch_protection(target),
             "cloud_access_enabled": _profile_cloud_access_enabled(target),
             "parental_controls": target.get("parental_controls"),
+            # Completeness is safe profile-routing metadata. Provider IDs stay
+            # private to Cloud and the paired connector, while clients can
+            # repair an exact legacy edge before attempting protected media.
+            "jellyfin_binding_status": _public_provider_binding_status(
+                target, provider="jellyfin",
+            ),
         })
     return resolved
 
@@ -1600,6 +1711,9 @@ def _authorized_parent_managed_profile_access(
             # or Cloud seat until an invitation is redeemed.
             "cloud_access_enabled": False,
             "parental_controls": target.get("parental_controls"),
+            "jellyfin_binding_status": _public_provider_binding_status(
+                target, provider="jellyfin",
+            ),
         })
     return resolved
 
@@ -1645,6 +1759,9 @@ def _authorized_viewing_profile_access(*, source_profile, household_id):
             "status": "active",
             "cloud_access_enabled": _profile_cloud_access_enabled(target),
             "parental_controls": target.get("parental_controls"),
+            "jellyfin_binding_status": _public_provider_binding_status(
+                target, provider="jellyfin",
+            ),
         })
     return resolved
 
@@ -8208,6 +8325,55 @@ def authorize_protected_owner_download_command(event, profile_id):
     return None
 
 
+def authorize_protected_household_manager_command(event, profile_id):
+    """Authorize one Owner/Admin server action inside the exact household.
+
+    Metadata refresh is server-wide administrative work, not a viewing-profile
+    mutation. The signed app session must therefore still be a live household
+    manager, while the selected profile is used only to resolve that
+    household's exact online connector. Every source/target lookup is by
+    immutable id and fails closed when authority or household membership is
+    missing or ambiguous.
+    """
+    if require_dev_key(event):
+        return None
+    session, error_response = household_manager_bound_session(event)
+    if error_response:
+        return error_response
+    if identity_profiles_table is None:
+        return response(503, {"state": "identity_context_storage_unavailable"})
+
+    source_profile_id = str(session.get("profile_id") or "").strip()
+    household_id = str(session.get("household_id") or "").strip()
+    if not source_profile_id or not household_id:
+        return response(403, {"state": "household_manager_authority_missing"})
+
+    source = identity_profiles_table.get_item(
+        Key={"profile_id": source_profile_id},
+        ConsistentRead=True,
+    ).get("Item")
+    if not (
+        isinstance(source, dict)
+        and source.get("state") == "active"
+        and hmac.compare_digest(str(source.get("profile_id") or ""), source_profile_id)
+        and hmac.compare_digest(str(source.get("household_id") or ""), household_id)
+    ):
+        return response(403, {"state": "household_manager_authority_missing"})
+
+    target = source if hmac.compare_digest(source_profile_id, profile_id) else identity_profiles_table.get_item(
+        Key={"profile_id": profile_id},
+        ConsistentRead=True,
+    ).get("Item")
+    if not (
+        isinstance(target, dict)
+        and target.get("state") == "active"
+        and hmac.compare_digest(str(target.get("profile_id") or ""), profile_id)
+        and hmac.compare_digest(str(target.get("household_id") or ""), household_id)
+    ):
+        return response(404, {"state": "target_not_found"})
+    return None
+
+
 def base64url_encode(value):
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
@@ -8562,6 +8728,14 @@ def save_event(event):
 
     if error:
         return response(400, {"state": "bad_request", "message": error})
+    if (
+        item["event_type"].startswith("bug_report_")
+        and item["event_type"] != "bug_report_submitted"
+    ):
+        return response(403, {
+            "state": "forbidden",
+            "message": "bug report lifecycle updates require the verification workflow",
+        })
     if not require_profile_auth(event, item["profile_id"]):
         return response(401, {"state": "unauthorized"})
 
@@ -8606,6 +8780,15 @@ def save_event_batch(event):
 
     if errors:
         return response(400, {"state": "bad_request", "errors": errors})
+    if any(
+        item["event_type"].startswith("bug_report_")
+        and item["event_type"] != "bug_report_submitted"
+        for item in items
+    ):
+        return response(403, {
+            "state": "forbidden",
+            "message": "bug report lifecycle updates require the verification workflow",
+        })
     if any(not require_profile_auth(event, item["profile_id"]) for item in items):
         return response(401, {"state": "unauthorized"})
 
@@ -8644,9 +8827,16 @@ def recent_events(event):
     })
 
 
-BUG_REPORT_EVENT_TYPES = {"bug_report_submitted", "bug_report_resolved"}
+BUG_REPORT_EVENT_TYPES = {
+    "bug_report_submitted",
+    "bug_report_verification_requested",
+    "bug_report_verified_resolved",
+    "bug_report_reopened",
+    "bug_report_resolved",
+}
 BUG_REPORT_EVENT_SCAN_LIMIT = 500
 BUG_REPORT_EVENT_RESULT_LIMIT = 100
+BUG_REPORT_REFERENCE_PATTERN = re.compile(r"^KV-[A-F0-9]{8}$")
 
 
 def bug_report_events(event):
@@ -8698,6 +8888,213 @@ def bug_report_events(event):
             break
 
     return response(200, {"profile_id": profile_id, "items": collected})
+
+
+def _latest_bug_report_lifecycle_event(profile_id, reference):
+    scanned = 0
+    exclusive_start_key = None
+    while scanned < BUG_REPORT_EVENT_SCAN_LIMIT:
+        request = {
+            "KeyConditionExpression": Key("profile_id").eq(profile_id),
+            "ScanIndexForward": False,
+            "Limit": min(100, BUG_REPORT_EVENT_SCAN_LIMIT - scanned),
+        }
+        if exclusive_start_key:
+            request["ExclusiveStartKey"] = exclusive_start_key
+        result = events_table.query(**request)
+        items = result.get("Items", [])
+        scanned += len(items)
+        for item in items:
+            if (
+                item.get("item_id") == reference
+                and item.get("event_type") in BUG_REPORT_EVENT_TYPES
+            ):
+                return item
+        exclusive_start_key = result.get("LastEvaluatedKey")
+        if not exclusive_start_key:
+            return None
+    return None
+
+
+def _bug_report_sentry_event_id(profile_id, reference):
+    """Return the immutable Sentry event bound to this exact Kaevo report."""
+    scanned = 0
+    exclusive_start_key = None
+    while scanned < BUG_REPORT_EVENT_SCAN_LIMIT:
+        request = {
+            "KeyConditionExpression": Key("profile_id").eq(profile_id),
+            "ScanIndexForward": False,
+            "Limit": min(100, BUG_REPORT_EVENT_SCAN_LIMIT - scanned),
+        }
+        if exclusive_start_key:
+            request["ExclusiveStartKey"] = exclusive_start_key
+        result = events_table.query(**request)
+        items = result.get("Items", [])
+        scanned += len(items)
+        for item in items:
+            if (
+                item.get("item_id") != reference
+                or item.get("event_type") != "bug_report_submitted"
+            ):
+                continue
+            metadata = parse_json_field(item.get("metadata_json"), {})
+            sentry_event_id = str(
+                metadata.get("sentry_event_id") if isinstance(metadata, dict) else ""
+            ).strip().lower()
+            if (
+                SENTRY_EVENT_ID_PATTERN.fullmatch(sentry_event_id)
+                and reference == f"KV-{sentry_event_id[:8].upper()}"
+            ):
+                return sentry_event_id
+        exclusive_start_key = result.get("LastEvaluatedKey")
+        if not exclusive_start_key:
+            return ""
+    return ""
+
+
+def _sentry_issue_resolver_credentials():
+    secret_arn = str(SENTRY_ISSUE_RESOLVER_SECRET_ARN or "").strip()
+    if not secret_arn:
+        raise SentryIssueResolutionError(
+            "sentry_resolution_configuration_missing", retryable=False
+        )
+    cached = _sentry_issue_resolver_secret_cache.get(secret_arn)
+    if cached is not None:
+        return cached
+    try:
+        raw = secrets_client.get_secret_value(SecretId=secret_arn).get("SecretString")
+    except Exception as error:
+        raise SentryIssueResolutionError(
+            "sentry_resolution_configuration_unavailable", retryable=True
+        ) from error
+    credentials = parse_sentry_issue_resolver_credentials(str(raw or ""))
+    _sentry_issue_resolver_secret_cache[secret_arn] = credentials
+    return credentials
+
+
+def _resolve_bug_report_sentry_issue(profile_id, reference, proposed):
+    issue_id = str(proposed.get("sentry_issue_id") or "").strip()
+    sentry_event_id = _bug_report_sentry_event_id(profile_id, reference)
+    if not issue_id:
+        raise SentryIssueResolutionError("sentry_issue_link_missing", retryable=False)
+    if not sentry_event_id:
+        raise SentryIssueResolutionError("sentry_event_link_missing", retryable=False)
+    credentials = _sentry_issue_resolver_credentials()
+    return resolve_sentry_feedback_issue(
+        auth_token=credentials["auth_token"],
+        organization_slug=credentials["organization_slug"],
+        project_slug=credentials["project_slug"],
+        issue_id=issue_id,
+        linked_issue_id=str(proposed.get("sentry_linked_issue_id") or "").strip(),
+        associated_event_id=sentry_event_id,
+    )
+
+
+def verify_bug_report_fix(event):
+    """Accept the exact reporter's verdict for a support-proposed fix.
+
+    A profile can respond only while its latest server-authored lifecycle event
+    is ``bug_report_verification_requested``. A normal event submission cannot
+    forge that state or mark a report Resolved.
+    """
+    if events_table is None:
+        return response(500, {"state": "server_error", "message": "events table is not configured"})
+
+    body = parse_json_body(event)
+    if body is None:
+        return response(400, {"state": "bad_request", "message": "invalid JSON body"})
+
+    profile_id = str(body.get("profile_id") or "").strip()
+    reference = str(body.get("reference") or "").strip().upper()
+    verdict = str(body.get("verdict") or "").strip().lower()
+    additional_details = str(body.get("additional_details") or "").strip()
+    if not profile_id:
+        return response(400, {"state": "bad_request", "message": "profile_id is required"})
+    if not BUG_REPORT_REFERENCE_PATTERN.fullmatch(reference):
+        return response(400, {"state": "bad_request", "message": "reference is invalid"})
+    if verdict not in {"fixed", "not_fixed"}:
+        return response(400, {"state": "bad_request", "message": "verdict must be fixed or not_fixed"})
+    if len(additional_details) > 4000:
+        return response(400, {"state": "bad_request", "message": "additional_details must be 4000 characters or fewer"})
+    if verdict == "not_fixed" and not additional_details:
+        return response(400, {"state": "bad_request", "message": "additional_details is required when the fix did not work"})
+    if not require_profile_auth(event, profile_id):
+        return response(401, {"state": "unauthorized"})
+
+    latest = _latest_bug_report_lifecycle_event(profile_id, reference)
+    if latest is None:
+        return response(404, {"state": "not_found"})
+    if latest.get("event_type") != "bug_report_verification_requested":
+        return response(409, {
+            "state": "verification_not_requested",
+            "reference": reference,
+        })
+
+    proposed = parse_json_field(latest.get("metadata_json"), {})
+    if not isinstance(proposed, dict):
+        proposed = {}
+    metadata = {
+        key: str(proposed[key])
+        for key in (
+            "resolution",
+            "probable_cause",
+            "user_action",
+            "fixed_in_version",
+            "sentry_issue_id",
+            "sentry_linked_issue_id",
+        )
+        if proposed.get(key) is not None
+    }
+    metadata["verification_result"] = verdict
+    if verdict == "fixed":
+        try:
+            sentry_result = _resolve_bug_report_sentry_issue(
+                profile_id, reference, proposed,
+            )
+        except SentryIssueResolutionError as error:
+            LOGGER.warning("bug_report_sentry_resolution_failed state=%s", error.state)
+            status_code = 503 if (
+                error.retryable or "configuration" in error.state
+            ) else 409
+            return response(status_code, {
+                "state": error.state,
+                "reference": reference,
+                "retryable": bool(error.retryable),
+            })
+        event_type = "bug_report_verified_resolved"
+        state = "resolved"
+        metadata["status"] = "resolved"
+        metadata["sentry_issue_id"] = sentry_result["issue_id"]
+        metadata["sentry_issue_status"] = sentry_result["status"]
+        metadata["sentry_linked_issue_id"] = sentry_result["linked_issue_id"]
+        metadata["sentry_linked_issue_status"] = sentry_result["linked_issue_status"]
+    else:
+        event_type = "bug_report_reopened"
+        state = "pending"
+        metadata["status"] = "pending"
+        metadata["reporter_feedback"] = additional_details
+
+    now = utc_now_iso()
+    event_id = str(uuid.uuid4())
+    events_table.put_item(Item={
+        "profile_id": profile_id,
+        "event_key": f"{now}#{event_id}",
+        "event_id": event_id,
+        "event_type": event_type,
+        "timestamp": now,
+        "received_at": now,
+        "item_id": reference,
+        "device_type": "ios-verification",
+        "source": "ios",
+        "session_id": "",
+        "metadata_json": json.dumps(metadata, separators=(",", ":")),
+        "expires_at": epoch_now() + (2 * 365 * 24 * 60 * 60),
+    })
+    return response(202, {
+        "state": state,
+        "reference": reference,
+        "event_id": event_id,
+    })
 
 
 HOUSEHOLD_PROGRESS_EVENT_TYPE = "household_playback_progress"
@@ -10599,6 +10996,7 @@ def issue_bound_session_v2(event):
         "refresh_token": refresh_token,
         "refresh_expires_at": refresh["expires_at"],
         "installation_id": installation_id,
+        "device_id": str(installation.get("device_id") or ""),
     })
 
 
@@ -10693,6 +11091,8 @@ def refresh_bound_session_v2(event):
         "access_expires_at": access["expires_at"],
         "refresh_token": next_refresh_token,
         "refresh_expires_at": next_refresh["expires_at"],
+        "installation_id": installation_id,
+        "device_id": str(record.get("device_id") or ""),
     })
 
 
@@ -11510,7 +11910,7 @@ def redeem_home_connector_pairing_v3(event):
             "account_binding": claims["accountBinding"], "family_binding": claims["familyBinding"],
             "ios_device_binding": claims["iosDeviceBinding"], "owner_session_provenance": claims["ownerSessionProvenance"],
             "profile_id": str(authorization.get("profile_id") or ""),
-            "paired_at": utc_now_iso(), "last_contact_at": utc_now_iso(), "revoked": False,
+            "paired_at": utc_now_iso(), "last_contact_at": utc_now_iso(), "updated_at": utc_now_iso(), "revoked": False,
         }
     profile_binding_writes, profile_binding_error = pairing_v3_profile_jellyfin_binding_writes(
         authorization, connector, jellyfin_user_id,
@@ -13849,6 +14249,8 @@ def list_owner_installations_v2(event):
     session, error_response = owner_bound_session(event)
     if error_response:
         return error_response
+    profile_id = str(session.get("profile_id") or "")
+    entitlement, _ = load_entitlements_for_profile(profile_id)
     records = installations_table.scan(
         FilterExpression=Attr("household_id").eq(str(session.get("household_id") or "")),
     ).get("Items", []) if installations_table else []
@@ -13869,7 +14271,15 @@ def list_owner_installations_v2(event):
             "state": "revoked" if bool_value(item.get("revoked"), False) else "active",
         })
     devices.sort(key=lambda item: (not item["is_current"], item["device_label"], item["created_at"]))
-    return response(200, {"state": "installations_listed", "devices": devices})
+    return response(200, {
+        "state": "installations_listed",
+        "profile_id": profile_id,
+        "connector_id": str(session.get("connector_id") or ""),
+        "session_expires_at": int(session.get("expires_at") or 0),
+        "entitlements": entitlement,
+        "devices": devices,
+        "device_id": str(session.get("device_id") or ""),
+    })
 
 
 def revoke_installation_v2(event, path):
@@ -14771,6 +15181,37 @@ def normalize_remote_command(operation, parameters):
             "body": {"item_id": item_id.lower()}
         }, ""
 
+    if operation == "jellyfin.refresh_metadata":
+        allowed_keys = {
+            "item_id", "mode", "replace_images", "regenerate_trickplay",
+        }
+        if any(key not in allowed_keys for key in parameters):
+            return None, "metadata refresh parameters are invalid"
+        item_id = str(parameters.get("item_id") or "").strip()
+        mode = str(parameters.get("mode") or "").strip()
+        replace_images = parameters.get("replace_images", False)
+        regenerate_trickplay = parameters.get("regenerate_trickplay", False)
+        if not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
+            return None, "item_id must be a 32-character Jellyfin id"
+        if mode not in {"scan", "missing", "replaceAll"}:
+            return None, "metadata refresh mode is invalid"
+        if not isinstance(replace_images, bool):
+            return None, "replace_images must be a boolean"
+        if not isinstance(regenerate_trickplay, bool):
+            return None, "regenerate_trickplay must be a boolean"
+        return {
+            "provider": "home_server",
+            "method": "COMMAND",
+            "path": "/commands/jellyfin.refresh_metadata",
+            "query": {},
+            "body": {
+                "item_id": item_id.lower(),
+                "mode": mode,
+                "replace_images": replace_images,
+                "regenerate_trickplay": regenerate_trickplay,
+            },
+        }, ""
+
     if operation == "optimizer.plan_remux":
         item_id = str(parameters.get("item_id") or "").strip()
         if not SAFE_JELLYFIN_ITEM_ID.fullmatch(item_id):
@@ -15512,14 +15953,53 @@ def _profile_scoped_seerr_response(profile_id, request_payload, response_payload
     return sanitize(response_payload)
 
 
+def _effective_household_access_role_for_profile(profile):
+    """Return the exact membership role for one already-validated profile.
+
+    Membership is authoritative when present. The profile projection remains a
+    compatibility fallback only for households created before normalized
+    membership records were introduced.
+    """
+    if not isinstance(profile, dict):
+        return "", ""
+
+    household_id = str(profile.get("household_id") or "")
+    account_id = str(profile.get("account_id") or "")
+    profile_id = str(profile.get("profile_id") or "")
+    if household_memberships_table is not None and household_id and account_id and profile_id:
+        try:
+            membership = household_memberships_table.get_item(Key={
+                "household_id": household_id,
+                "membership_id": household_membership_id(account_id, household_id),
+            }, ConsistentRead=True).get("Item")
+        except ClientError:
+            # A canonical membership read failure is not evidence that the
+            # profile lacks Owner authority. Fail closed with a distinct
+            # recoverable state instead of silently downgrading to a possibly
+            # stale profile projection.
+            return "", "profile_identity_unavailable"
+        if (
+            isinstance(membership, dict)
+            and membership.get("entity_type") == "HouseholdMembership"
+            and membership.get("status") == "active"
+            and str(membership.get("household_id") or "") == household_id
+            and str(membership.get("account_id") or "") == account_id
+            and str(membership.get("profile_id") or "") == profile_id
+        ):
+            return str(membership.get("household_access_role") or "").lower(), ""
+
+    return str(profile.get("household_access_role") or "").lower(), ""
+
+
 def _authorized_seerr_requester_for_command(profile_id, connector_id):
-    """Return the exact bound Seerr user for one protected create command.
+    """Return the canonical requester authority for one protected command.
 
     A device may prove only its Cloud profile session.  It must never be able
     to choose a Seerr requester id itself: that would let a forged command
-    impersonate another household member.  Resolve the requester from the
-    canonical profile record and require the same connector that will execute
-    the command.
+    impersonate another household member. Members therefore require an exact,
+    connector-bound Seerr identity. The canonical household Owner may instead
+    use the already-authenticated Seerr connector owner, matching Owner-wide
+    request reads without creating a duplicate provider identity.
     """
     if identity_profiles_table is None:
         return None, "profile_identity_unavailable"
@@ -15534,21 +16014,63 @@ def _authorized_seerr_requester_for_command(profile_id, connector_id):
         not isinstance(profile, dict)
         or str(profile.get("profile_id") or "") != profile_id
         or str(profile.get("state") or "") != "active"
-        or str(profile.get("seerr_binding_state") or "") != "active"
-        or not hmac.compare_digest(
-            str(profile.get("seerr_connector_id") or ""), str(connector_id or ""),
-        )
     ):
         return None, "profile_seerr_binding_required"
 
-    is_owner = str(profile.get("household_access_role") or "").lower() == HouseholdAccessRole.OWNER.value
+    effective_role, role_error = _effective_household_access_role_for_profile(profile)
+    if role_error:
+        return None, role_error
+    is_owner = effective_role == HouseholdAccessRole.OWNER.value
     if not is_owner and not bool_value(profile.get("request_access_enabled"), False):
         return None, "profile_request_access_required"
 
     seerr_user_id = _normalized_seerr_user_id(profile.get("seerr_user_id"))
-    if not seerr_user_id:
-        return None, "profile_seerr_binding_required"
-    return seerr_user_id, ""
+    has_exact_binding = (
+        str(profile.get("seerr_binding_state") or "") == "active"
+        and seerr_user_id
+        and hmac.compare_digest(
+            str(profile.get("seerr_connector_id") or ""), str(connector_id or ""),
+        )
+    )
+    if has_exact_binding:
+        return {
+            "mode": "bound_user",
+            "seerr_user_id": seerr_user_id,
+        }, ""
+    if is_owner:
+        return {"mode": "authenticated_connection_owner"}, ""
+    return None, "profile_seerr_binding_required"
+
+
+def _remote_command_rejection(
+    event,
+    profile_id,
+    operation,
+    state,
+    *,
+    connector_id="",
+    message="",
+):
+    """Return one bounded rejection and emit only non-secret correlation."""
+    try:
+        LOGGER.warning(json.dumps({
+            "event": "remote_command_rejected",
+            "state": str(state or "remote_command_rejected")[:96],
+            "operation": str(operation or "unknown")[:96],
+            "profile_fingerprint": _protected_identity_fingerprint(profile_id),
+            "connector_fingerprint": _protected_identity_fingerprint(connector_id),
+            "lambda_request_fingerprint": str(
+                (event or {}).get("_kaevo_lambda_request_fingerprint") or ""
+            )[:24],
+            "timestamp": utc_now_iso(),
+        }, sort_keys=True, separators=(",", ":")))
+    except Exception:
+        # Diagnostics must never change the existing fail-closed response.
+        pass
+    body = {"state": state}
+    if message:
+        body["message"] = message
+    return response(409, body)
 
 
 def _authorized_jellyfin_metadata_request(profile_id, connector_id, path, query):
@@ -15702,6 +16224,9 @@ def create_remote_command(event):
         "downloaders.set_queue_state",
         "sonarr.search_episodes",
     }
+    manager_authorized_operations = {
+        "jellyfin.refresh_metadata",
+    }
     switch_authorized_operations = {
         "jellyfin.mark_played",
         "jellyfin.mark_unplayed",
@@ -15717,6 +16242,10 @@ def create_remote_command(event):
         owner_error = authorize_protected_owner_download_command(event, profile_id)
         if owner_error:
             return owner_error
+    elif operation in manager_authorized_operations:
+        manager_error = authorize_protected_household_manager_command(event, profile_id)
+        if manager_error:
+            return manager_error
     elif not require_dev_key(event):
         if operation not in profile_authorized_operations:
             return response(401, {"state": "unauthorized"})
@@ -15750,22 +16279,32 @@ def create_remote_command(event):
 
     connector = latest_online_connector_for_profile(profile_id)
     if not connector:
-        return response(409, {
-            "state": "connector_unavailable",
-            "message": "No online Kaevo Jellyfin Plugin is available for this profile."
-        })
+        return _remote_command_rejection(
+            event,
+            profile_id,
+            operation,
+            "connector_unavailable",
+            message="No online Kaevo Jellyfin Plugin is available for this profile.",
+        )
 
     if operation == "seerr.create_request":
-        requester_user_id, requester_error = _authorized_seerr_requester_for_command(
+        requester, requester_error = _authorized_seerr_requester_for_command(
             profile_id, connector.get("connector_id"),
         )
-        if not requester_user_id:
-            return response(409, {"state": requester_error})
+        if requester is None:
+            return _remote_command_rejection(
+                event,
+                profile_id,
+                operation,
+                requester_error,
+                connector_id=connector.get("connector_id"),
+            )
         # `normalize_remote_command` deliberately discards client-supplied
-        # identity fields. Add only the canonical, connector-bound Seerr id
-        # derived above so the plugin can submit as the requested profile.
+        # identity fields. Add only server-derived requester authority.
         command_body = dict(request_payload["body"])
-        command_body["requester_user_id"] = int(requester_user_id)
+        command_body["requester_mode"] = requester["mode"]
+        if requester["mode"] == "bound_user":
+            command_body["requester_user_id"] = int(requester["seerr_user_id"])
         request_payload = {**request_payload, "body": command_body}
 
     request_id = str(uuid.uuid5(REMOTE_COMMAND_ID_NAMESPACE, f"{profile_id}:{idempotency_key}"))
@@ -15773,10 +16312,14 @@ def create_remote_command(event):
     existing = remote_requests_table.get_item(Key={"request_id": request_id}).get("Item")
     if existing:
         if existing.get("request_json") != encoded_request:
-            return response(409, {
-                "state": "idempotency_conflict",
-                "message": "idempotency_key was already used for a different command"
-            })
+            return _remote_command_rejection(
+                event,
+                profile_id,
+                operation,
+                "idempotency_conflict",
+                connector_id=connector.get("connector_id"),
+                message="idempotency_key was already used for a different command",
+            )
         return response(200, {
             "state": "existing",
             "request": public_remote_request_item(existing, include_payload=True)
@@ -16161,15 +16704,27 @@ def get_remote_request(event, path):
         "/commands/downloaders.set_queue_state",
         "/commands/sonarr.search_episodes",
     }
+    manager_command_paths = {
+        "/commands/jellyfin.refresh_metadata",
+    }
     is_owner_download_command = (
         isinstance(request_payload, dict)
         and request_payload.get("method") == "COMMAND"
         and request_payload.get("path") in owner_download_command_paths
     )
+    is_manager_command = (
+        isinstance(request_payload, dict)
+        and request_payload.get("method") == "COMMAND"
+        and request_payload.get("path") in manager_command_paths
+    )
     if is_owner_download_command:
         owner_error = authorize_protected_owner_download_command(event, profile_id)
         if owner_error:
             return owner_error
+    elif is_manager_command:
+        manager_error = authorize_protected_household_manager_command(event, profile_id)
+        if manager_error:
+            return manager_error
     else:
         switch_authorized_paths = {
             "/commands/jellyfin.mark_played",
@@ -16671,9 +17226,13 @@ def lambda_handler(event, context):
                 "/v1/events/batch",
                 "/v1/events/recent",
                 "/v1/bug-reports",
+                "/v1/bug-reports/verification",
                 "/v1/household-progress",
                 "/v1/household-progress/live-ticket",
                 "/v1/entitlements",
+                "/v1/subscriptions/app-store/sync",
+                "/v1/app-store-server-notifications/production",
+                "/v1/app-store-server-notifications/sandbox",
                 "/v1/devices/register",
                 "/v1/devices",
                 "/v1/profiles/{profileId}/settings",
@@ -16748,6 +17307,15 @@ def lambda_handler(event, context):
             "service": SERVICE_NAME,
             "version": VERSION
         })
+
+    if method == "POST" and path == "/v1/subscriptions/app-store/sync":
+        return sync_app_store_subscription(event)
+
+    if method == "POST" and path == "/v1/app-store-server-notifications/production":
+        return receive_app_store_notification(event, "Production")
+
+    if method == "POST" and path == "/v1/app-store-server-notifications/sandbox":
+        return receive_app_store_notification(event, "Sandbox")
 
     if method == "POST" and path == "/v1/trials/start":
         return start_cloud_trial(event)
@@ -16950,6 +17518,9 @@ def lambda_handler(event, context):
 
     if method == "GET" and path == "/v1/bug-reports":
         return bug_report_events(event)
+
+    if method == "POST" and path == "/v1/bug-reports/verification":
+        return verify_bug_report_fix(event)
 
     if method == "GET" and path == "/v1/entitlements":
         return get_entitlements(event)

@@ -61,6 +61,10 @@ ACCOUNT_LIFECYCLE_V2_PROVIDER_OPERATIONS = frozenset({
     "account_lifecycle_v2.jellyfin.delete_exact_identity",
     "account_lifecycle_v2.jellyfin.verify_exact_identity_absence",
 })
+PROFILE_SCOPED_JELLYFIN_BINDING_OPERATIONS = frozenset({
+    "jellyfin.mark_played",
+    "jellyfin.mark_unplayed",
+})
 BINDING_OPERATION_PHASE_RANK = {
     "created": 0, "authorized": 1, "dispatch_pending": 2, "dispatched": 3,
     "connector_claimed": 4, "inspection_completed": 5, "mutation_authorized": 6,
@@ -652,6 +656,42 @@ def frozen_profile_provider_binding(item, request_payload):
     }
 
 
+def canonical_profile_jellyfin_binding(item):
+    """Resolve one active profile edge for the exact claiming connector.
+
+    This projection is Cloud authority, never client command input. Missing,
+    malformed, inactive, stale, or cross-connector records intentionally
+    produce no binding so the plugin fails the mutation closed.
+    """
+    profile_id = str((item or {}).get("profile_id") or "")
+    connector_id = str((item or {}).get("connector_id") or "")
+    if identity_profiles_table is None or not profile_id or not connector_id:
+        return None
+    try:
+        profile = identity_profiles_table.get_item(
+            Key={"profile_id": profile_id}, ConsistentRead=True,
+        ).get("Item")
+    except ClientError:
+        return None
+    compact_user_id = str((profile or {}).get("jellyfin_user_id") or "").strip().replace("-", "")
+    if (
+        not isinstance(profile, dict)
+        or str(profile.get("profile_id") or "") != profile_id
+        or str(profile.get("state") or "") != "active"
+        or str(profile.get("jellyfin_binding_state") or "") != "active"
+        or not hmac.compare_digest(
+            str(profile.get("jellyfin_connector_id") or ""), connector_id,
+        )
+        or not re.fullmatch(r"[0-9a-fA-F]{32}", compact_user_id)
+    ):
+        return None
+    return {
+        "provider": "jellyfin",
+        "connector_id": connector_id,
+        "provider_user_id": compact_user_id.lower(),
+    }
+
+
 def public_remote_request(item):
     request_payload = _parse_json_field(item.get("request_json"), {})
     result = {
@@ -670,9 +710,14 @@ def public_remote_request(item):
         # but unusable providerParameterInvalid failure.
         result["operation"] = str(request_payload.get("path") or "").removeprefix("/commands/")
         result["parameters"] = request_payload.get("body", {})
+        operation = result["operation"]
         lifecycle_binding = frozen_profile_provider_binding(item, request_payload)
         if lifecycle_binding is not None:
             result["profile_provider_binding"] = lifecycle_binding
+        elif operation in PROFILE_SCOPED_JELLYFIN_BINDING_OPERATIONS:
+            binding = canonical_profile_jellyfin_binding(item)
+            if binding is not None:
+                result["profile_provider_binding"] = binding
     return result
 
 

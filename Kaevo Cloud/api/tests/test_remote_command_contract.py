@@ -40,6 +40,116 @@ def test_jellyfin_user_actions_reject_paths_and_urls():
     assert "Jellyfin id" in error
 
 
+def test_metadata_refresh_is_whole_item_bounded_and_maps_exact_options():
+    payload, error = command(
+        "jellyfin.refresh_metadata",
+        {
+            "item_id": "A" * 32,
+            "mode": "replaceAll",
+            "replace_images": True,
+            "regenerate_trickplay": False,
+        },
+    )
+    assert error == ""
+    assert payload == {
+        "provider": "home_server",
+        "method": "COMMAND",
+        "path": "/commands/jellyfin.refresh_metadata",
+        "query": {},
+        "body": {
+            "item_id": "a" * 32,
+            "mode": "replaceAll",
+            "replace_images": True,
+            "regenerate_trickplay": False,
+        },
+    }
+
+
+def test_metadata_refresh_rejects_unknown_modes_types_and_parameters():
+    valid = {
+        "item_id": "a" * 32,
+        "mode": "scan",
+        "replace_images": False,
+        "regenerate_trickplay": False,
+    }
+    invalid_parameters = [
+        {**valid, "mode": "all"},
+        {**valid, "replace_images": "false"},
+        {**valid, "regenerate_trickplay": 0},
+        {**valid, "path": "/Library/Refresh"},
+    ]
+    for parameters in invalid_parameters:
+        payload, error = command("jellyfin.refresh_metadata", parameters)
+        assert payload is None
+        assert error
+
+
+def test_metadata_refresh_requires_manager_capability_for_create_and_poll(monkeypatch):
+    class RemoteRequests:
+        def __init__(self):
+            self.items = {}
+
+        def get_item(self, *, Key):
+            item = self.items.get(Key["request_id"])
+            return {"Item": dict(item)} if item else {}
+
+        def put_item(self, *, Item, **_):
+            self.items[Item["request_id"]] = dict(Item)
+
+    requests = RemoteRequests()
+    monkeypatch.setattr(handler, "remote_requests_table", requests)
+    monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
+    monkeypatch.setattr(
+        handler,
+        "authorize_protected_household_manager_command",
+        lambda _event, profile_id: (
+            None
+            if profile_id == "manager-profile"
+            else handler.response(403, {"state": "household_manager_required"})
+        ),
+    )
+    monkeypatch.setattr(
+        handler,
+        "latest_online_connector_for_profile",
+        lambda _: {"connector_id": "connector-1"},
+    )
+
+    created = handler.create_remote_command({
+        "body": json.dumps({
+            "profile_id": "manager-profile",
+            "operation": "jellyfin.refresh_metadata",
+            "parameters": {
+                "item_id": "a" * 32,
+                "mode": "scan",
+                "replace_images": False,
+                "regenerate_trickplay": False,
+            },
+            "idempotency_key": "metadata-refresh-manager-1",
+        }),
+    })
+    assert created["statusCode"] == 202
+    request_id, queued = next(iter(requests.items.items()))
+    assert json.loads(queued["request_json"])["path"] == "/commands/jellyfin.refresh_metadata"
+
+    polled = handler.get_remote_request({}, f"/v1/remote-requests/{request_id}")
+    assert polled["statusCode"] == 200
+
+    denied = handler.create_remote_command({
+        "body": json.dumps({
+            "profile_id": "member-profile",
+            "operation": "jellyfin.refresh_metadata",
+            "parameters": {
+                "item_id": "a" * 32,
+                "mode": "scan",
+                "replace_images": False,
+                "regenerate_trickplay": False,
+            },
+            "idempotency_key": "metadata-refresh-member-1",
+        }),
+    })
+    assert denied["statusCode"] == 403
+
+
 def test_seerr_request_body_is_bounded_and_normalized():
     payload, error = command(
         "seerr.create_request",
@@ -280,6 +390,58 @@ def test_protected_download_command_rejects_non_owner_manager(monkeypatch):
     assert json.loads(denied["body"])["state"] == "owner_required"
 
 
+def test_protected_metadata_refresh_accepts_admin_only_inside_exact_household(monkeypatch):
+    class Profiles:
+        def __init__(self):
+            self.items = {
+                "admin-profile": {
+                    "profile_id": "admin-profile",
+                    "household_id": "household-1",
+                    "state": "active",
+                },
+                "member-profile": {
+                    "profile_id": "member-profile",
+                    "household_id": "household-1",
+                    "state": "active",
+                },
+                "foreign-profile": {
+                    "profile_id": "foreign-profile",
+                    "household_id": "household-2",
+                    "state": "active",
+                },
+            }
+
+        def get_item(self, *, Key, ConsistentRead):
+            assert ConsistentRead is True
+            item = self.items.get(Key["profile_id"])
+            return {"Item": dict(item)} if item else {}
+
+    monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
+    monkeypatch.setattr(
+        handler,
+        "household_manager_bound_session",
+        lambda _event: ({
+            "record_type": "access",
+            "profile_id": "admin-profile",
+            "household_id": "household-1",
+            "household_access_role": "admin",
+        }, None),
+    )
+
+    assert handler.authorize_protected_household_manager_command(
+        {}, "admin-profile",
+    ) is None
+    assert handler.authorize_protected_household_manager_command(
+        {}, "member-profile",
+    ) is None
+    denied = handler.authorize_protected_household_manager_command(
+        {}, "foreign-profile",
+    )
+    assert denied["statusCode"] == 404
+    assert json.loads(denied["body"])["state"] == "target_not_found"
+
+
 def test_protected_owner_can_poll_same_household_download_command(monkeypatch):
     class RemoteRequests:
         def get_item(self, *, Key):
@@ -367,7 +529,163 @@ def test_seerr_create_command_derives_the_bound_requester_not_the_client(monkeyp
 
     assert result["statusCode"] == 202
     queued = next(iter(remote_requests.items.values()))
-    assert json.loads(queued["request_json"])["body"]["requester_user_id"] == 14
+    queued_body = json.loads(queued["request_json"])["body"]
+    assert queued_body["requester_mode"] == "bound_user"
+    assert queued_body["requester_user_id"] == 14
+
+
+def test_seerr_create_command_uses_authenticated_connector_owner_for_canonical_owner(monkeypatch):
+    class RemoteRequests:
+        def __init__(self):
+            self.items = {}
+
+        def get_item(self, *, Key):
+            item = self.items.get(Key["request_id"])
+            return {"Item": dict(item)} if item else {}
+
+        def put_item(self, *, Item):
+            self.items[Item["request_id"]] = dict(Item)
+
+    class Profiles:
+        def get_item(self, *, Key, ConsistentRead):
+            assert Key == {"profile_id": "owner-profile"}
+            assert ConsistentRead is True
+            return {"Item": {
+                "profile_id": "owner-profile",
+                "account_id": "owner-account",
+                "household_id": "household-1",
+                "state": "active",
+                # Deliberately stale projection: the exact membership below
+                # remains the canonical Owner authority.
+                "household_access_role": "member",
+            }}
+
+    class Memberships:
+        def get_item(self, *, Key, ConsistentRead):
+            assert Key == {
+                "household_id": "household-1",
+                "membership_id": handler.household_membership_id(
+                    "owner-account", "household-1",
+                ),
+            }
+            assert ConsistentRead is True
+            return {"Item": {
+                "entity_type": "HouseholdMembership",
+                "status": "active",
+                "household_id": "household-1",
+                "account_id": "owner-account",
+                "profile_id": "owner-profile",
+                "household_access_role": "owner",
+            }}
+
+    remote_requests = RemoteRequests()
+    monkeypatch.setattr(handler, "remote_requests_table", remote_requests)
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
+    monkeypatch.setattr(handler, "household_memberships_table", Memberships())
+    monkeypatch.setattr(handler, "require_dev_key", lambda _: False)
+    monkeypatch.setattr(handler, "authenticated_app_session", lambda _event: {
+        "profile_id": "owner-profile",
+        "household_id": "household-1",
+    })
+    monkeypatch.setattr(
+        handler,
+        "latest_online_connector_for_profile",
+        lambda _: {"connector_id": "connector-1"},
+    )
+
+    result = handler.create_remote_command({
+        "headers": {"authorization": "Bearer scoped-session"},
+        "body": (
+            '{"profile_id":"owner-profile","operation":"seerr.create_request",'
+            '"parameters":{"media_type":"movie","media_id":42,"requester_user_id":999},'
+            '"idempotency_key":"seerr-create-owner-connector-1"}'
+        ),
+    })
+
+    assert result["statusCode"] == 202
+    queued_body = json.loads(
+        next(iter(remote_requests.items.values()))["request_json"]
+    )["body"]
+    assert queued_body["requester_mode"] == "authenticated_connection_owner"
+    assert "requester_user_id" not in queued_body
+
+
+def test_seerr_create_command_still_denies_unbound_member(monkeypatch):
+    class Profiles:
+        def get_item(self, *, Key, ConsistentRead):
+            return {"Item": {
+                "profile_id": Key["profile_id"],
+                "account_id": "member-account",
+                "household_id": "household-1",
+                "state": "active",
+                "household_access_role": "member",
+                "request_access_enabled": True,
+            }}
+
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
+    monkeypatch.setattr(handler, "household_memberships_table", None)
+
+    requester, reason = handler._authorized_seerr_requester_for_command(
+        "member-profile", "connector-1",
+    )
+
+    assert requester is None
+    assert reason == "profile_seerr_binding_required"
+
+
+def test_seerr_owner_membership_read_failure_does_not_silently_downgrade(monkeypatch):
+    class Profiles:
+        def get_item(self, *, Key, ConsistentRead):
+            return {"Item": {
+                "profile_id": Key["profile_id"],
+                "account_id": "owner-account",
+                "household_id": "household-1",
+                "state": "active",
+                "household_access_role": "owner",
+            }}
+
+    class Memberships:
+        def get_item(self, *, Key, ConsistentRead):
+            raise handler.ClientError({
+                "Error": {
+                    "Code": "ProvisionedThroughputExceededException",
+                    "Message": "temporary",
+                }
+            }, "GetItem")
+
+    monkeypatch.setattr(handler, "identity_profiles_table", Profiles())
+    monkeypatch.setattr(handler, "household_memberships_table", Memberships())
+
+    requester, reason = handler._authorized_seerr_requester_for_command(
+        "owner-profile", "connector-1",
+    )
+
+    assert requester is None
+    assert reason == "profile_identity_unavailable"
+
+
+def test_remote_command_rejection_logs_only_bounded_fingerprints(caplog):
+    result = handler._remote_command_rejection(
+        {"_kaevo_lambda_request_fingerprint": "request-fingerprint"},
+        "sensitive-profile-id",
+        "seerr.create_request",
+        "connector_unavailable",
+        connector_id="sensitive-connector-id",
+    )
+
+    assert result["statusCode"] == 409
+    assert json.loads(result["body"])["state"] == "connector_unavailable"
+    record = next(
+        json.loads(entry.message)
+        for entry in caplog.records
+        if '"event":"remote_command_rejected"' in entry.message
+    )
+    assert record["state"] == "connector_unavailable"
+    assert record["operation"] == "seerr.create_request"
+    assert record["profile_fingerprint"]
+    assert record["connector_fingerprint"]
+    assert "sensitive-profile-id" not in caplog.text
+    assert "sensitive-connector-id" not in caplog.text
 
 
 def test_optimizer_execute_requires_plan_token_and_exact_confirmation():

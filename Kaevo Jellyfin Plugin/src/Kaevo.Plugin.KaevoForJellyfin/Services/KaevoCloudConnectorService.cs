@@ -46,6 +46,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     };
 
     private readonly KaevoSecretStore _secretStore;
+    private readonly KaevoJellyfinApiKeyProvisioner _jellyfinApiKeyProvisioner;
     private readonly KaevoCloudState _state;
     private readonly ILibraryManager _libraryManager;
     private readonly IUserManager _userManager;
@@ -63,6 +64,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
     public KaevoCloudConnectorService(
         KaevoSecretStore secretStore,
+        KaevoJellyfinApiKeyProvisioner jellyfinApiKeyProvisioner,
         KaevoCloudState state,
         ILibraryManager libraryManager,
         IUserManager userManager,
@@ -77,6 +79,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         ILogger<KaevoCloudConnectorService> logger)
     {
         _secretStore = secretStore;
+        _jellyfinApiKeyProvisioner = jellyfinApiKeyProvisioner;
         _state = state;
         _libraryManager = libraryManager;
         _userManager = userManager;
@@ -193,11 +196,20 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         if (!string.IsNullOrWhiteSpace(pairingV3ConnectorId))
         {
             _pairingV3Active = true;
+            if (string.IsNullOrWhiteSpace(jellyfinCredential))
+            {
+                jellyfinCredential = await _jellyfinApiKeyProvisioner.EnsureAsync(cancellationToken).ConfigureAwait(false);
+            }
             configuration.ConnectorId = pairingV3ConnectorId;
             configuration.PairingCode = string.Empty;
             var pairingV3Secrets = existing is null
                 ? new KaevoConnectorSecrets(string.Empty, string.Empty, jellyfinCredential)
                 : existing with { ConnectorToken = string.Empty, PlaybackGrantKey = string.Empty, JellyfinApiKey = jellyfinCredential };
+            if (string.IsNullOrWhiteSpace(environmentApiKey)
+                && !string.Equals(existing?.JellyfinApiKey, jellyfinCredential, StringComparison.Ordinal))
+            {
+                await _secretStore.WriteAsync(pairingV3Secrets, cancellationToken).ConfigureAwait(false);
+            }
             KaevoPlugin.Instance?.SaveConfiguration();
             return pairingV3Secrets;
         }
@@ -1132,6 +1144,46 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 false);
         }
 
+        if (operation == "jellyfin.refresh_metadata")
+        {
+            if (!configuration.RemoteMetadataEnabled || !configuration.RemoteWritesEnabled)
+            {
+                throw new InvalidOperationException("remoteMetadataRefreshDisabled");
+            }
+
+            var itemId = RequireItemId(parameters);
+            var mode = RequireString(parameters, "mode", "metadataRefreshModeInvalid");
+            var replaceImages = RequireBoolean(
+                parameters,
+                "replace_images",
+                "metadataRefreshReplaceImagesInvalid");
+            var regenerateTrickplay = RequireBoolean(
+                parameters,
+                "regenerate_trickplay",
+                "metadataRefreshTrickplayInvalid");
+            var refreshRequest = BuildMetadataRefreshRequest(
+                itemId,
+                mode,
+                replaceImages,
+                regenerateTrickplay);
+            await SendLocalAsync(
+                configuration,
+                secrets,
+                HttpMethod.Post,
+                refreshRequest.Path,
+                refreshRequest.Query,
+                null,
+                cancellationToken).ConfigureAwait(false);
+            return CompleteCommand(request, operation, new
+            {
+                item_id = itemId,
+                queued = true,
+                mode,
+                replace_images = replaceImages,
+                regenerate_trickplay = regenerateTrickplay
+            });
+        }
+
         if (operation is "jellyfin.favorite" or "jellyfin.unfavorite")
         {
             var itemId = RequireItemId(parameters);
@@ -1224,18 +1276,29 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             var is4K = parameters.TryGetValue("is_4k", out var fourKElement)
                 && (fourKElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
                 && fourKElement.GetBoolean();
-            // Cloud resolves this immutable Seerr user id from the protected
-            // profile binding. The iOS device never supplies it, so a command
-            // cannot attribute a request to another household member.
-            var requesterUserId = RequirePositiveInt(parameters, "requester_user_id");
-            var created = await SendSeerrJsonAsync(secrets, HttpMethod.Post, "/api/v1/request", new
+            // Cloud derives this authority from the protected profile session.
+            // Members always carry an exact immutable Seerr user id. The
+            // canonical household Owner may instead use the Seerr identity
+            // already authenticated by this connector; no duplicate provider
+            // account is created and the device cannot select this mode.
+            var requesterUserId = ResolveSeerrCreateRequesterUserId(parameters);
+            var requestBody = new Dictionary<string, object?>
             {
-                mediaType,
-                mediaId,
-                seasons,
-                is4k = is4K,
-                userId = requesterUserId
-            }, cancellationToken).ConfigureAwait(false);
+                ["mediaType"] = mediaType,
+                ["mediaId"] = mediaId,
+                ["seasons"] = seasons,
+                ["is4k"] = is4K
+            };
+            if (requesterUserId is not null)
+            {
+                requestBody["userId"] = requesterUserId.Value;
+            }
+            var created = await SendSeerrJsonAsync(
+                secrets,
+                HttpMethod.Post,
+                "/api/v1/request",
+                requestBody,
+                cancellationToken).ConfigureAwait(false);
             return CompleteCommand(request, operation, created);
         }
 
@@ -2498,6 +2561,33 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return result;
     }
 
+    internal static int? ResolveSeerrCreateRequesterUserId(
+        IReadOnlyDictionary<string, JsonElement> parameters)
+    {
+        if (!parameters.TryGetValue("requester_mode", out var modeValue))
+        {
+            // Backward compatibility for already-queued Cloud commands from
+            // releases that carried only the exact bound user id.
+            return RequirePositiveInt(parameters, "requester_user_id");
+        }
+        if (modeValue.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException("seerrRequesterModeInvalid");
+        }
+
+        var mode = modeValue.GetString()?.Trim() ?? string.Empty;
+        if (string.Equals(mode, "bound_user", StringComparison.Ordinal))
+        {
+            return RequirePositiveInt(parameters, "requester_user_id");
+        }
+        if (string.Equals(mode, "authenticated_connection_owner", StringComparison.Ordinal)
+            && !parameters.ContainsKey("requester_user_id"))
+        {
+            return null;
+        }
+        throw new InvalidOperationException("seerrRequesterModeInvalid");
+    }
+
     private static int? OptionalNonNegativeInt(IReadOnlyDictionary<string, JsonElement> parameters, string key)
     {
         if (!parameters.TryGetValue(key, out var value) || value.ValueKind == JsonValueKind.Null)
@@ -3587,6 +3677,32 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return query.Any(pair => blocked.Contains(pair.Key) || pair.Value.ToString().Length > 2_048);
     }
 
+    internal static (string Path, IReadOnlyDictionary<string, JsonElement> Query) BuildMetadataRefreshRequest(
+        string itemId,
+        string mode,
+        bool replaceImages,
+        bool regenerateTrickplay)
+    {
+        var (refreshMode, replaceAllMetadata) = mode switch
+        {
+            "scan" => ("Default", false),
+            "missing" => ("FullRefresh", false),
+            "replaceAll" => ("FullRefresh", true),
+            _ => throw new InvalidOperationException("metadataRefreshModeInvalid")
+        };
+        return (
+            $"/Items/{itemId}/Refresh",
+            new Dictionary<string, JsonElement>
+            {
+                ["recursive"] = JsonSerializer.SerializeToElement(true),
+                ["imageRefreshMode"] = JsonSerializer.SerializeToElement(refreshMode),
+                ["metadataRefreshMode"] = JsonSerializer.SerializeToElement(refreshMode),
+                ["replaceAllImages"] = JsonSerializer.SerializeToElement(replaceImages),
+                ["regenerateTrickplay"] = JsonSerializer.SerializeToElement(regenerateTrickplay),
+                ["replaceAllMetadata"] = JsonSerializer.SerializeToElement(replaceAllMetadata)
+            });
+    }
+
     private static string RequireItemId(IReadOnlyDictionary<string, JsonElement> parameters)
     {
         var value = parameters.TryGetValue("item_id", out var item) ? item.GetString() ?? string.Empty : string.Empty;
@@ -3609,6 +3725,20 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return Guid.TryParse(value, out var result)
             ? result
             : throw new InvalidOperationException(error);
+    }
+
+    private static bool RequireBoolean(
+        IReadOnlyDictionary<string, JsonElement> parameters,
+        string key,
+        string error)
+    {
+        if (!parameters.TryGetValue(key, out var element)
+            || element.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            throw new InvalidOperationException(error);
+        }
+
+        return element.GetBoolean();
     }
 
     private static string RequireString(

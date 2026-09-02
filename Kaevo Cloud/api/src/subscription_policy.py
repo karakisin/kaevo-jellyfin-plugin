@@ -8,43 +8,21 @@ Apple transaction verification succeeds.
 
 ACTIVE_SUBSCRIPTION_STATES = frozenset({"active", "trialing", "grace_period"})
 
-LOCAL_INDIVIDUAL_MONTHLY = "com.sumagang.kaevo.local.individual.monthly"
-LOCAL_FAMILY_MONTHLY = "com.sumagang.kaevo.local.family.monthly"
-CLOUD_INDIVIDUAL_MONTHLY = "com.sumagang.kaevo.personal.monthly"
-CLOUD_FAMILY_MONTHLY = "com.sumagang.kaevo.family.monthly"
+# App Store Connect product identifiers are permanent. Kaevo now sells exactly
+# two monthly products; the older four-plan names must never be inferred or
+# accepted as aliases.
+LOCAL_MONTHLY = "com.sumagang.kaevo.personal.monthly"
+FAMILY_MONTHLY = "com.sumagang.kaevo.family.monthly"
 
 PRODUCT_POLICIES = {
-    LOCAL_INDIVIDUAL_MONTHLY: {
-        "plan": "local_individual",
+    LOCAL_MONTHLY: {
+        "plan": "local_family",
         "cloud_enabled": False,
         "family_enabled": False,
         "family_seats": 1,
         "feature_flags": {},
     },
-    LOCAL_FAMILY_MONTHLY: {
-        "plan": "local_family",
-        "cloud_enabled": False,
-        "family_enabled": True,
-        "family_seats": 6,
-        "feature_flags": {
-            "family_profiles": True,
-            "household_participants": True,
-        },
-    },
-    CLOUD_INDIVIDUAL_MONTHLY: {
-        "plan": "cloud_individual",
-        "cloud_enabled": True,
-        "family_enabled": False,
-        "family_seats": 1,
-        "feature_flags": {
-            "cloud_sync": True,
-            "cross_device_continue_watching": True,
-            "personalized_cloud_home": True,
-            "remote_jellyfin_metadata": True,
-            "remote_playback": True,
-        },
-    },
-    CLOUD_FAMILY_MONTHLY: {
+    FAMILY_MONTHLY: {
         "plan": "cloud_family",
         "cloud_enabled": True,
         "family_enabled": True,

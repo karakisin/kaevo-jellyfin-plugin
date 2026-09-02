@@ -48,6 +48,12 @@ Parameters:
     NoEcho: true
     Description: Optional Secrets Manager ARN for a JSON secret containing client_id, team_id, key_id, and private_key for Kaevo Sign in with Apple
 
+  SentryIssueResolverSecretArn:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Optional Secrets Manager ARN for a JSON secret containing auth_token, organization_slug, and project_slug for exact feedback issue resolution
+
   SocialIdentityLinkCallbackUrl:
     Type: String
     Default: ""
@@ -101,6 +107,7 @@ Conditions:
     - !Condition HasNativeOidc
     - !Condition HasSocialIdentityUserPoolId
     - !Not [!Equals [!Ref AppleIdentityProviderSecretArn, ""]]
+  HasSentryIssueResolver: !Not [!Equals [!Ref SentryIssueResolverSecretArn, ""]]
   HasSocialIdentityProvider: !Or
     - !Condition HasGoogleIdentityProvider
     - !Condition HasAppleIdentityProvider
@@ -141,6 +148,15 @@ Resources:
         "POST /v1/app-sessions/refresh":
           ThrottlingBurstLimit: 10
           ThrottlingRateLimit: 2
+        "POST /v1/subscriptions/app-store/sync":
+          ThrottlingBurstLimit: 10
+          ThrottlingRateLimit: 2
+        "POST /v1/app-store-server-notifications/production":
+          ThrottlingBurstLimit: 20
+          ThrottlingRateLimit: 5
+        "POST /v1/app-store-server-notifications/sandbox":
+          ThrottlingBurstLimit: 20
+          ThrottlingRateLimit: 5
         "POST /v2/identity/enroll-owner":
           ThrottlingBurstLimit: 3
           ThrottlingRateLimit: 1
@@ -242,6 +258,27 @@ Resources:
       KeySchema:
         - AttributeName: profile_id
           KeyType: HASH
+
+  KaevoAppStoreTransactionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-app-store-transactions
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: original_transaction_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: original_transaction_id
+          KeyType: HASH
+      Tags:
+        - Key: KaevoDataClass
+          Value: subscription-authority
 
   KaevoAppSessionsTable:
     Type: AWS::DynamoDB::Table
@@ -1879,6 +1916,7 @@ Resources:
           COGNITO_USER_POOL_ID: !Ref KaevoUserPool
           GOOGLE_IDENTITY_PROVIDER_SECRET_ARN: !If [HasGoogleIdentityProvider, !Ref GoogleIdentityProviderSecretArn, ""]
           APPLE_IDENTITY_PROVIDER_SECRET_ARN: !If [HasAppleIdentityProvider, !Ref AppleIdentityProviderSecretArn, ""]
+          SENTRY_ISSUE_RESOLVER_SECRET_ARN: !If [HasSentryIssueResolver, !Ref SentryIssueResolverSecretArn, ""]
           SOCIAL_IDENTITY_LINK_CALLBACK_URL: !Ref SocialIdentityLinkCallbackUrl
           # This is an explicit deployment input rather than a reference to
           # KaevoCloudHttpApi. Referencing the API from a function that the API
@@ -2019,6 +2057,14 @@ Resources:
                   - !If [HasGoogleIdentityProvider, !Ref GoogleIdentityProviderSecretArn, !Ref AWS::NoValue]
                   - !If [HasAppleIdentityProvider, !Ref AppleIdentityProviderSecretArn, !Ref AWS::NoValue]
               - !Ref AWS::NoValue
+            - !If
+              - HasSentryIssueResolver
+              - Sid: ReadSentryIssueResolverCredential
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref SentryIssueResolverSecretArn
+              - !Ref AWS::NoValue
         - Statement:
             - Sid: ReadAndStoreBoundedRemoteResponses
               Effect: Allow
@@ -2070,6 +2116,13 @@ Resources:
             ApiId: !Ref KaevoCloudHttpApi
             Path: /v1/bug-reports
             Method: GET
+
+        BugReportVerification:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KaevoCloudHttpApi
+            Path: /v1/bug-reports/verification
+            Method: POST
 
         HouseholdProgressWrite:
           Type: HttpApi
@@ -2379,6 +2432,7 @@ Resources:
           COGNITO_USER_POOL_ID: !Ref KaevoUserPool
           GOOGLE_IDENTITY_PROVIDER_SECRET_ARN: !If [HasGoogleIdentityProvider, !Ref GoogleIdentityProviderSecretArn, ""]
           APPLE_IDENTITY_PROVIDER_SECRET_ARN: !If [HasAppleIdentityProvider, !Ref AppleIdentityProviderSecretArn, ""]
+          SENTRY_ISSUE_RESOLVER_SECRET_ARN: !If [HasSentryIssueResolver, !Ref SentryIssueResolverSecretArn, ""]
           SOCIAL_IDENTITY_LINK_CALLBACK_URL: !Ref SocialIdentityLinkCallbackUrl
           PUBLIC_API_BASE_URL: !Ref PublicApiBaseUrl
       Events:
@@ -2533,6 +2587,77 @@ Resources:
             Path: /v1/remote-images/{provider}/{itemId}/{imageType}
             Method: GET
 
+  KaevoAppStoreTransactionsAccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub kaevo-cloud-${EnvironmentName}-app-store-transactions
+      Roles:
+        - !Ref KaevoCloudApiFunctionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: KaevoAppStoreTransactionsExactAccess
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+            Resource: !GetAtt KaevoAppStoreTransactionsTable.Arn
+
+  # App Store routes are explicit resources so adding them cannot rewrite the
+  # shared inline HTTP API body and delete independently managed routes.
+  # Production adds the routes before applying their stage throttles.
+  KaevoAppStoreApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+      PayloadFormatVersion: "2.0"
+      IntegrationUri: !Sub
+        - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+        - FunctionArn: !GetAtt KaevoCloudApiFunction.Arn
+
+  KaevoAppStoreSyncInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref KaevoCloudApiFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${KaevoCloudHttpApi}/*/POST/v1/subscriptions/app-store/sync
+
+  KaevoAppStoreNotificationsInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref KaevoCloudApiFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${KaevoCloudHttpApi}/*/POST/v1/app-store-server-notifications/*
+
+  KaevoAppStoreSyncRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v1/subscriptions/app-store/sync
+      Target: !Join ["/", [integrations, !Ref KaevoAppStoreApiIntegration]]
+
+  KaevoAppStoreNotificationsProductionRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v1/app-store-server-notifications/production
+      Target: !Join ["/", [integrations, !Ref KaevoAppStoreApiIntegration]]
+
+  KaevoAppStoreNotificationsSandboxRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v1/app-store-server-notifications/sandbox
+      Target: !Join ["/", [integrations, !Ref KaevoAppStoreApiIntegration]]
+
   # Identity V3 routes deliberately share one API integration and one
   # path-scoped invoke permission.  SAM HttpApi events would synthesize a
   # permission per route, exceeding the main Lambda resource-policy limit.
@@ -2633,6 +2758,22 @@ Resources:
       ApiId: !Ref KaevoCloudHttpApi
       AuthorizationType: NONE
       RouteKey: PUT /v3/identity/profiles/{profileId}/jellyfin-binding
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3PreflightProfileJellyfinBindingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: POST /v3/identity/profiles/{profileId}/jellyfin-binding-operations
+      Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
+
+  KaevoIdentityV3GetProfileJellyfinBindingOperationRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref KaevoCloudHttpApi
+      AuthorizationType: NONE
+      RouteKey: GET /v3/identity/jellyfin-binding-operations/{operationId}
       Target: !Join ["/", [integrations, !Ref KaevoIdentityV3ApiIntegration]]
 
   KaevoIdentityV3SaveProfileSeerrBindingRoute:

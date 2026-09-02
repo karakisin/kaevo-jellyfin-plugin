@@ -34,7 +34,9 @@ EXPECTED_INTEGRATIONS = {
 EXPECTED_AUTHORIZER = "KaevoHouseholdJoinAuthorizer"
 EXPECTED_NEW_ROUTE_KEYS = {
     "GET /v3/identity/home-connector-binding",
+    "GET /v3/identity/jellyfin-binding-operations/{operationId}",
     "POST /v3/identity/bind-home-connector",
+    "POST /v3/identity/profiles/{profileId}/jellyfin-binding-operations",
 }
 EXPECTED_ROUTE_KEYS = {
     "GET /v3/identity/account-deletions/{deletionAttemptId}",
@@ -43,6 +45,7 @@ EXPECTED_ROUTE_KEYS = {
     "GET /v3/identity/household-joins/onboarding-status",
     "GET /v3/identity/households/profiles",
     "GET /v3/identity/households/ownership-transfer/candidates",
+    "GET /v3/identity/jellyfin-binding-operations/{operationId}",
     "GET /v3/identity/me",
     "GET /v3/identity/profile-mappings",
     "POST /v3/identity/bind-home-connector",
@@ -62,6 +65,7 @@ EXPECTED_ROUTE_KEYS = {
     "POST /v3/identity/profiles",
     "POST /v3/identity/profiles/{profileId}/bindings",
     "POST /v3/identity/profiles/{profileId}/deletion",
+    "POST /v3/identity/profiles/{profileId}/jellyfin-binding-operations",
     "POST /v3/identity/profiles/{profileId}/switch-pin/verify",
     "POST /v3/identity/households/ownership-transfer",
     "PUT /v3/identity/profiles/{profileId}/jellyfin-binding",
@@ -119,10 +123,10 @@ def affected_resources(deployed: dict, candidate: dict) -> tuple[dict, dict]:
     routes, found_keys, integration_refs = selected_routes(deployed)
     candidate_routes, candidate_keys, candidate_integration_refs = selected_routes(candidate)
 
-    expected_deployed = EXPECTED_ROUTE_KEYS - EXPECTED_NEW_ROUTE_KEYS
-    if found_keys != expected_deployed:
-        missing = sorted(expected_deployed - found_keys)
-        extra = sorted(found_keys - expected_deployed)
+    required_deployed = EXPECTED_ROUTE_KEYS - EXPECTED_NEW_ROUTE_KEYS
+    if not required_deployed.issubset(found_keys) or not found_keys.issubset(EXPECTED_ROUTE_KEYS):
+        missing = sorted(required_deployed - found_keys)
+        extra = sorted(found_keys - EXPECTED_ROUTE_KEYS)
         raise ValueError(
             f"deployed affected route set differs; missing={missing}, extra={extra}"
         )
@@ -160,7 +164,11 @@ def affected_resources(deployed: dict, candidate: dict) -> tuple[dict, dict]:
         if route_key not in EXPECTED_NEW_ROUTE_KEYS:
             continue
         if name in resources:
-            raise ValueError(f"new candidate route already exists in deployed template: {name}")
+            if resources[name] != resource:
+                raise ValueError(
+                    f"new candidate route differs from deployed template: {name}"
+                )
+            continue
         restored[name] = deepcopy(resource)
     if {
         resource.get("Properties", {}).get("RouteKey")

@@ -510,6 +510,8 @@ def test_template_declares_additive_account_foundation_storage_and_route():
     assert "RouteKey: POST /v3/identity/migrate-household-membership" in template
     assert "RouteKey: PUT /v3/identity/profiles/{profileId}/watching-targets" in template
     assert "RouteKey: PUT /v3/identity/profiles/{profileId}/jellyfin-binding" in template
+    assert "RouteKey: POST /v3/identity/profiles/{profileId}/jellyfin-binding-operations" in template
+    assert "RouteKey: GET /v3/identity/jellyfin-binding-operations/{operationId}" in template
     assert "RouteKey: PUT /v3/identity/profiles/{profileId}/seerr-binding" in template
     assert "RouteKey: POST /v3/identity/profiles/{profileId}/deletion" in template
     assert "ACCOUNTS_TABLE: !Ref KaevoAccountsTable" in template
@@ -1842,6 +1844,7 @@ def test_owner_recovers_exact_parent_managed_kid_as_switch_and_view_target(monke
         "switch_protection": "not_configured",
         "cloud_access_enabled": False,
         "parental_controls": kid_controls,
+        "jellyfin_binding_status": "not_linked",
     }]
     assert handler._authorized_parent_managed_profile_access(
         principal={"principal_id": "principal-owner", "profile_ids": ["profile-kid"]},
@@ -1855,10 +1858,18 @@ def test_owner_recovers_exact_parent_managed_kid_as_switch_and_view_target(monke
         source_profile=owner_profile,
         household_id="household-1",
     )[0]["cloud_access_enabled"] is False
+    assert handler._authorized_switch_target_access(
+        source_profile=owner_profile,
+        household_id="household-1",
+    )[0]["jellyfin_binding_status"] == "not_linked"
     assert handler._authorized_viewing_profile_access(
         source_profile=owner_profile,
         household_id="household-1",
     )[0]["cloud_access_enabled"] is False
+    assert handler._authorized_viewing_profile_access(
+        source_profile=owner_profile,
+        household_id="household-1",
+    )[0]["jellyfin_binding_status"] == "not_linked"
 
 
 def test_owner_roster_reads_back_parent_managed_kid_access_without_membership_or_seat(monkeypatch):
@@ -1992,10 +2003,11 @@ def test_watching_targets_are_owner_only_and_resolve_exact_same_household_ids(mo
         "display_name": "Exact Viewer",
         "access_level": "view",
         "status": "active",
-        "cloud_access_enabled": True,
-        "parental_controls": None,
-        "switch_protection": "not_configured",
-    }
+            "cloud_access_enabled": True,
+            "parental_controls": None,
+            "switch_protection": "not_configured",
+            "jellyfin_binding_status": "not_linked",
+        }
 
     _tables, _transaction_client, _member_session = install_normalized_profile_context(
         monkeypatch,

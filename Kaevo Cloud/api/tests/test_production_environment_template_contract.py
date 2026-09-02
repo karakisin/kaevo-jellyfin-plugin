@@ -159,7 +159,24 @@ def test_main_api_dynamodb_permissions_are_consolidated_without_broadening_resou
     assert "dynamodb:ConditionCheckItem" in crud["Action"]
     assert "dynamodb:TransactWriteItems" not in crud["Action"]
     assert len(crud["Resource"]) == 44
+    assert {"Fn::GetAtt": "KaevoAppStoreTransactionsTable.Arn"} not in crud["Resource"]
+    assert {"Fn::Sub": "${KaevoAppStoreTransactionsTable.Arn}/index/*"} not in crud["Resource"]
     assert all("*" not in str(resource) or "/index/*" in str(resource) for resource in crud["Resource"])
+
+    app_store_policy = template()["Resources"]["KaevoAppStoreTransactionsAccessPolicy"]
+    statement = app_store_policy["Properties"]["PolicyDocument"]["Statement"]
+    assert statement == [
+        {
+            "Sid": "KaevoAppStoreTransactionsExactAccess",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+            ],
+            "Resource": {"Fn::GetAtt": "KaevoAppStoreTransactionsTable.Arn"},
+        }
+    ]
 
 
 def test_optional_social_secret_permission_disappears_as_a_complete_statement():
@@ -174,6 +191,37 @@ def test_optional_social_secret_permission_disappears_as_a_complete_statement():
 
     assert conditional[1]["Sid"] == "ReadConfiguredSocialIdentityProviderCredentials"
     assert conditional[1]["Action"] == ["secretsmanager:GetSecretValue"]
+    assert conditional[2] == {"Ref": "AWS::NoValue"}
+
+
+def test_sentry_issue_resolver_credential_is_optional_and_secret_scoped():
+    data = template()
+    assert data["Parameters"]["SentryIssueResolverSecretArn"]["NoEcho"] is True
+    assert data["Conditions"]["HasSentryIssueResolver"] == {
+        "Fn::Not": [{"Fn::Equals": [{"Ref": "SentryIssueResolverSecretArn"}, ""]}]
+    }
+
+    function = data["Resources"]["KaevoCloudApiFunction"]["Properties"]
+    assert function["Environment"]["Variables"]["SENTRY_ISSUE_RESOLVER_SECRET_ARN"] == {
+        "Fn::If": [
+            "HasSentryIssueResolver",
+            {"Ref": "SentryIssueResolverSecretArn"},
+            "",
+        ]
+    }
+    conditional = next(
+        statement["Fn::If"]
+        for policy in function["Policies"]
+        for statement in policy.get("Statement", [])
+        if "Fn::If" in statement
+        and statement["Fn::If"][0] == "HasSentryIssueResolver"
+    )
+    assert conditional[1] == {
+        "Sid": "ReadSentryIssueResolverCredential",
+        "Effect": "Allow",
+        "Action": ["secretsmanager:GetSecretValue"],
+        "Resource": {"Ref": "SentryIssueResolverSecretArn"},
+    }
     assert conditional[2] == {"Ref": "AWS::NoValue"}
 
 

@@ -74,3 +74,34 @@ def test_preparer_fails_closed_when_runtime_ownership_changes(field, value, reas
 
     with pytest.raises(MODULE.ScopeError, match=reason):
         MODULE.prepare_template(deployed, code_bucket="bucket", code_key="key")
+
+
+def test_preparer_fails_closed_when_inline_api_depends_on_function_arn():
+    deployed = deployed_template()
+    deployed["Resources"][MODULE.HTTP_API] = {
+        "Type": "AWS::ApiGatewayV2::Api",
+        "Properties": {
+            "Body": {
+                "components": {
+                    "x-amazon-apigateway-integrations": {
+                        "api": {
+                            "payloadFormatVersion": "2.0",
+                            "uri": {
+                                "Fn::Sub": [
+                                    "lambda/${FunctionArn}",
+                                    {
+                                        "FunctionArn": {
+                                            "Fn::GetAtt": [MODULE.API_FUNCTION, "Arn"]
+                                        }
+                                    },
+                                ]
+                            },
+                        }
+                    }
+                }
+            }
+        },
+    }
+
+    with pytest.raises(MODULE.ScopeError, match="would rewrite separately managed routes"):
+        MODULE.prepare_template(deployed, code_bucket="bucket", code_key="key")

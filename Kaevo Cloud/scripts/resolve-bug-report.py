@@ -28,6 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference", required=True)
     parser.add_argument("--resolution", required=True)
     parser.add_argument("--probable-cause", required=True)
+    parser.add_argument("--user-action", required=True)
+    parser.add_argument("--fixed-in-version", required=True)
     parser.add_argument("--region", default=None)
     return parser.parse_args()
 
@@ -39,8 +41,15 @@ def main() -> None:
         raise SystemExit("reference must match KV- followed by 8 hexadecimal characters")
     if not args.profile_id.strip():
         raise SystemExit("profile-id is required")
-    if not args.resolution.strip() or not args.probable_cause.strip():
-        raise SystemExit("resolution and probable-cause are required")
+    if (
+        not args.resolution.strip()
+        or not args.probable_cause.strip()
+        or not args.user_action.strip()
+        or not args.fixed_in_version.strip()
+    ):
+        raise SystemExit(
+            "resolution, probable-cause, user-action, and fixed-in-version are required"
+        )
 
     event_id = str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -59,6 +68,8 @@ def main() -> None:
             "status": "resolved",
             "resolution": args.resolution.strip(),
             "probable_cause": args.probable_cause.strip(),
+            "user_action": args.user_action.strip(),
+            "fixed_in_version": args.fixed_in_version.strip(),
         }, separators=(",", ":")),
         "expires_at": int(time.time()) + (2 * 365 * 24 * 60 * 60),
     }

@@ -17,12 +17,24 @@ from typing import Any
 
 
 API_FUNCTION = "KaevoCloudApiFunction"
+HTTP_API = "KaevoCloudHttpApi"
 EXPECTED_HANDLER = "handler.lambda_handler"
 EXPECTED_RUNTIME = "python3.12"
 
 
 class ScopeError(RuntimeError):
     """Raised when the live stack cannot be changed without guessing."""
+
+
+def _contains_api_function_arn(value: Any) -> bool:
+    if isinstance(value, dict):
+        get_att = value.get("Fn::GetAtt")
+        if get_att == [API_FUNCTION, "Arn"]:
+            return True
+        return any(_contains_api_function_arn(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_api_function_arn(item) for item in value)
+    return False
 
 
 def prepare_template(
@@ -33,6 +45,14 @@ def prepare_template(
     resources = deployed.get("Resources")
     if not isinstance(resources, dict):
         raise ScopeError("deployed template is missing Resources")
+    http_api = resources.get(HTTP_API)
+    if isinstance(http_api, dict) and _contains_api_function_arn(
+        http_api.get("Properties", {}).get("Body")
+    ):
+        raise ScopeError(
+            "inline HTTP API dynamically depends on the Production API function; "
+            "a CloudFormation code update would rewrite separately managed routes"
+        )
     function = resources.get(API_FUNCTION)
     if not isinstance(function, dict) or function.get("Type") != "AWS::Lambda::Function":
         raise ScopeError("deployed Production API function is missing")

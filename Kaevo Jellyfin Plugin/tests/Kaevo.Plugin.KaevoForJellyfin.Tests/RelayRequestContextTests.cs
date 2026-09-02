@@ -8,6 +8,44 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 
 public sealed class RelayRequestContextTests
 {
+    [Theory]
+    [InlineData("scan", "Default", false)]
+    [InlineData("missing", "FullRefresh", false)]
+    [InlineData("replaceAll", "FullRefresh", true)]
+    public void MetadataRefreshTargetsTheExactWholeItem(
+        string mode,
+        string expectedRefreshMode,
+        bool expectedReplaceAll)
+    {
+        const string itemId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var request = KaevoCloudConnectorService.BuildMetadataRefreshRequest(
+            itemId,
+            mode,
+            replaceImages: true,
+            regenerateTrickplay: false);
+
+        Assert.Equal($"/Items/{itemId}/Refresh", request.Path);
+        Assert.True(request.Query["recursive"].GetBoolean());
+        Assert.Equal(expectedRefreshMode, request.Query["imageRefreshMode"].GetString());
+        Assert.Equal(expectedRefreshMode, request.Query["metadataRefreshMode"].GetString());
+        Assert.True(request.Query["replaceAllImages"].GetBoolean());
+        Assert.False(request.Query["regenerateTrickplay"].GetBoolean());
+        Assert.Equal(expectedReplaceAll, request.Query["replaceAllMetadata"].GetBoolean());
+    }
+
+    [Fact]
+    public void MetadataRefreshRejectsUnknownModes()
+    {
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            KaevoCloudConnectorService.BuildMetadataRefreshRequest(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "unsafe",
+                replaceImages: false,
+                regenerateTrickplay: false));
+
+        Assert.Equal("metadataRefreshModeInvalid", error.Message);
+    }
+
     [Fact]
     public void ProviderDeletionReadbackCountsOnlyTheExactImmutableJellyfinId()
     {

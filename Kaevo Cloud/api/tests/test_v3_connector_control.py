@@ -466,6 +466,88 @@ def test_non_lifecycle_command_cannot_inject_a_provider_binding():
     assert "profile_provider_binding" not in projected
 
 
+def test_watched_command_claim_projects_only_canonical_exact_profile_binding(tables):
+    jellyfin_user_id = "DBB85E8D-D084-4EE0-97A4-C9FD8D358215"
+    tables[0].items[CONNECTOR_ID]["profile_id"] = PROFILE_ID
+    tables[2].items[PROFILE_ID].update({
+        "state": "active",
+        "jellyfin_binding_state": "active",
+        "jellyfin_connector_id": CONNECTOR_ID,
+        "jellyfin_user_id": jellyfin_user_id,
+    })
+    tables[3].items["watched-1"] = {
+        "request_id": "watched-1",
+        "connector_id": CONNECTOR_ID,
+        "profile_id": PROFILE_ID,
+        "status": "pending",
+        "status_created_at": "pending#020#watched-1",
+        "expires_at": control.epoch_now() + 60,
+        "request_json": json.dumps({
+            "provider": "home_server",
+            "method": "COMMAND",
+            "path": "/commands/jellyfin.mark_played",
+            "query": {},
+            "body": {
+                "item_id": "0123456789abcdef0123456789abcdef",
+                "profile_provider_binding": {
+                    "provider": "jellyfin",
+                    "connector_id": "attacker-connector",
+                    "provider_user_id": "ffffffffffffffffffffffffffffffff",
+                },
+            },
+        }),
+    }
+
+    result = control.lambda_handler(
+        signed(
+            "/v3/remote-requests/claim",
+            {"connector_id": CONNECTOR_ID},
+            "connectorcontrolnonce0123456878",
+        ),
+        None,
+    )
+    payload = json.loads(result["body"])
+
+    assert result["statusCode"] == 200
+    assert payload["state"] == "claimed"
+    assert payload["request"]["profile_provider_binding"] == {
+        "provider": "jellyfin",
+        "connector_id": CONNECTOR_ID,
+        "provider_user_id": "dbb85e8dd0844ee097a4c9fd8d358215",
+    }
+
+
+@pytest.mark.parametrize("profile_update", [
+    {"state": "inactive", "jellyfin_binding_state": "active"},
+    {"state": "active", "jellyfin_binding_state": "missing"},
+    {"state": "active", "jellyfin_binding_state": "active", "jellyfin_connector_id": "other-connector"},
+    {"state": "active", "jellyfin_binding_state": "active", "jellyfin_user_id": "not-a-user-id"},
+])
+def test_watched_command_binding_projection_fails_closed(profile_update, tables):
+    profile = tables[2].items[PROFILE_ID]
+    profile.update({
+        "state": "active",
+        "jellyfin_binding_state": "active",
+        "jellyfin_connector_id": CONNECTOR_ID,
+        "jellyfin_user_id": "dbb85e8dd0844ee097a4c9fd8d358215",
+    })
+    profile.update(profile_update)
+    projected = control.public_remote_request({
+        "request_id": "watched-fail-closed-1",
+        "connector_id": CONNECTOR_ID,
+        "profile_id": PROFILE_ID,
+        "status": "in_progress",
+        "request_json": json.dumps({
+            "provider": "home_server",
+            "method": "COMMAND",
+            "path": "/commands/jellyfin.mark_unplayed",
+            "body": {"item_id": "0123456789abcdef0123456789abcdef"},
+        }),
+    })
+
+    assert "profile_provider_binding" not in projected
+
+
 def test_lifecycle_v2_binding_mismatch_fails_closed():
     with pytest.raises(ValueError, match="frozen_provider_binding_invalid"):
         control.public_remote_request({

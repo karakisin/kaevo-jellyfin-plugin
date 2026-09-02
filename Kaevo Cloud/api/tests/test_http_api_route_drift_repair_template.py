@@ -92,7 +92,7 @@ def test_prepares_exact_detach_and_restore_candidates_without_api_body_changes()
     )
     assert detached["Resources"]["Unrelated"] == {"Type": "AWS::S3::Bucket"}
     assert restored["Resources"]["Unrelated"] == {"Type": "AWS::S3::Bucket"}
-    assert len(MODULE.EXPECTED_ROUTE_KEYS) == 32
+    assert len(MODULE.EXPECTED_ROUTE_KEYS) == 34
     assert "GET /v3/identity/me" in MODULE.EXPECTED_ROUTE_KEYS
     assert "GET /v3/identity/profile-mappings" in MODULE.EXPECTED_ROUTE_KEYS
     assert "POST /v3/identity/account-deletion" in MODULE.EXPECTED_ROUTE_KEYS
@@ -100,8 +100,42 @@ def test_prepares_exact_detach_and_restore_candidates_without_api_body_changes()
         "PUT /v3/identity/profiles/{profileId}/jellyfin-binding"
         in MODULE.EXPECTED_ROUTE_KEYS
     )
+    assert (
+        "POST /v3/identity/profiles/{profileId}/jellyfin-binding-operations"
+        in MODULE.EXPECTED_ROUTE_KEYS
+    )
+    assert (
+        "GET /v3/identity/jellyfin-binding-operations/{operationId}"
+        in MODULE.EXPECTED_ROUTE_KEYS
+    )
     assert all(name not in detached["Resources"] for name in removed)
     assert all(name in restored["Resources"] for name in removed)
+    restored_keys = {
+        resource["Properties"]["RouteKey"]
+        for resource in restored["Resources"].values()
+        if resource.get("Type") == "AWS::ApiGatewayV2::Route"
+    }
+    assert restored_keys == MODULE.EXPECTED_ROUTE_KEYS
+
+
+def test_repairs_when_some_new_routes_are_already_in_the_deployed_template():
+    deployed = wrapper(include_new_routes=False)
+    candidate = wrapper(include_new_routes=True)
+    deployed_resources = deployed["TemplateBody"]["Resources"]
+    candidate_resources = candidate["TemplateBody"]["Resources"]
+    existing_new_routes = [
+        name
+        for name, resource in candidate_resources.items()
+        if resource.get("Type") == "AWS::ApiGatewayV2::Route"
+        and resource["Properties"]["RouteKey"] in MODULE.EXPECTED_NEW_ROUTE_KEYS
+    ][:2]
+    for name in existing_new_routes:
+        deployed_resources[name] = candidate_resources[name]
+
+    detached, restored, removed = MODULE.prepare(deployed, candidate)
+
+    assert all(name in removed for name in existing_new_routes)
+    assert all(name not in detached["Resources"] for name in removed)
     restored_keys = {
         resource["Properties"]["RouteKey"]
         for resource in restored["Resources"].values()

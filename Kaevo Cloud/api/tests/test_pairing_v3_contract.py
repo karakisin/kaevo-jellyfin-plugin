@@ -290,6 +290,8 @@ def test_authorization_redemption_is_single_use_and_idempotent(v3_tables):
     body = json.loads(first["body"])
     assert body["code"] == "pairing_redeemed"
     assert len(connectors.items) == 2  # Connector plus server-level plugin binding.
+    redeemed_connector = connectors.items[body["connectorId"]]
+    assert redeemed_connector["updated_at"]
     second = handler.redeem_home_connector_pairing_v3(signed_redemption(authorization, nonce="abcdefghijklmnopqrstuvwxyz012346"))
     assert second["statusCode"] == 200
     assert json.loads(second["body"])["idempotent"] is True
