@@ -25,6 +25,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
     private const int ControlRequestConcurrency = 4;
+    internal const int ConnectorControlProtocolVersion = 2;
+    private const int DisconnectedRecoveryMinimumSeconds = 60;
     // Main snapshots render compact Home/Library cards. Full people and
     // playback media descriptors belong to the exact-item detail and
     // playback-preparation reads; requesting them for every shelf item made
@@ -154,6 +156,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         var delay = TimeSpan.FromSeconds(1);
         var registered = true;
+        DateTimeOffset? nextDisconnectedRecovery = null;
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -164,8 +167,15 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     registered = true;
                 }
 
-                await RunControlLoopAsync(configuration, secrets, cancellationToken).ConfigureAwait(false);
-                delay = TimeSpan.FromSeconds(1);
+                await RunControlLoopAsync(
+                    configuration,
+                    secrets,
+                    () =>
+                    {
+                        delay = TimeSpan.FromSeconds(1);
+                        nextDisconnectedRecovery = null;
+                    },
+                    cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -177,6 +187,31 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 registered = false;
                 _state.Set("connecting", category);
                 _logger.LogWarning("Kaevo Cloud control reconnecting: {Category}", category);
+                nextDisconnectedRecovery ??= DateTimeOffset.UtcNow.Add(
+                    DisconnectedRecoveryDelay(RandomNumberGenerator.GetInt32(0, 16)));
+                if (DateTimeOffset.UtcNow >= nextDisconnectedRecovery.Value)
+                {
+                    try
+                    {
+                        var recovery = await RecoverDisconnectedClaimAsync(
+                            configuration, secrets, cancellationToken).ConfigureAwait(false);
+                        if (recovery is not null)
+                        {
+                            await HandleClaimAsync(configuration, secrets, recovery, cancellationToken).ConfigureAwait(false);
+                        }
+                    }
+                    catch (Exception recoveryException) when (recoveryException is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(
+                            "Kaevo Cloud disconnected recovery deferred: {Category}",
+                            SanitizeError(recoveryException));
+                    }
+                    finally
+                    {
+                        nextDisconnectedRecovery = DateTimeOffset.UtcNow.Add(
+                            DisconnectedRecoveryDelay(RandomNumberGenerator.GetInt32(0, 16)));
+                    }
+                }
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                 delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
             }
@@ -260,7 +295,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1", "download_controls_v1",
                     "playback_tunnel_v1", "direct_play", "hls_remux", "hls_transcode",
                     "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
-                    "local_provider_configuration_v1"
+                    "local_provider_configuration_v1", "connector_control_push_v2"
                 },
                 provider_status = BuildProviderStatus(secrets, configuration, includeOptimizer: false)
             },
@@ -271,13 +306,53 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private async Task RunControlLoopAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
+        Action connected,
         CancellationToken cancellationToken)
     {
-        var heartbeatAt = DateTimeOffset.MinValue;
+        if (!_pairingV3Active)
+        {
+            throw new InvalidOperationException("lifecycle_upgrade_required");
+        }
+        var ticket = await SendCloudAsync<ControlTicketResponse>(
+            configuration,
+            secrets,
+            HttpMethod.Post,
+            $"/v1/home-connectors/{Uri.EscapeDataString(configuration.ConnectorId)}/control-ticket",
+            new
+            {
+                connector_id = configuration.ConnectorId,
+                connector_control_protocol = ConnectorControlProtocolVersion,
+            },
+            cancellationToken).ConfigureAwait(false);
+        if (ticket.ConnectorControlProtocol != ConnectorControlProtocolVersion
+            || ticket.MinimumConnectorControlProtocol > ConnectorControlProtocolVersion
+            || ticket.ExpiresAt <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+            || !Uri.TryCreate(ticket.ControlWebSocketUrl, UriKind.Absolute, out var controlUri)
+            || controlUri.Scheme != "wss"
+            || string.IsNullOrWhiteSpace(ticket.ConnectionTicket))
+        {
+            throw new InvalidOperationException("controlTicketInvalid");
+        }
+
+        using var socket = new ClientWebSocket();
+        socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
+        socket.Options.SetRequestHeader("Authorization", $"Bearer {ticket.ConnectionTicket}");
+        await socket.ConnectAsync(controlUri, cancellationToken).ConfigureAwait(false);
+        connected();
+        using var sendGate = new SemaphoreSlim(1, 1);
+        using var keepaliveCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        await SendControlActionAsync(socket, sendGate, "recover", cancellationToken).ConfigureAwait(false);
+        var keepalive = RunControlKeepaliveAsync(
+            configuration,
+            secrets,
+            socket,
+            sendGate,
+            Math.Clamp(ticket.KeepaliveSeconds, 60, 480),
+            keepaliveCancellation.Token);
         var inFlight = new List<Task>(ControlRequestConcurrency);
         try
         {
-            while (!cancellationToken.IsCancellationRequested)
+            while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
             {
                 for (var index = inFlight.Count - 1; index >= 0; index--)
                 {
@@ -290,39 +365,144 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     inFlight.RemoveAt(index);
                 }
 
-                if (DateTimeOffset.UtcNow >= heartbeatAt)
-                {
-                    await HeartbeatAsync(configuration, secrets, cancellationToken).ConfigureAwait(false);
-                    heartbeatAt = DateTimeOffset.UtcNow.AddSeconds(60);
-                }
-
                 if (inFlight.Count >= ControlRequestConcurrency)
                 {
                     await Task.WhenAny(inFlight).ConfigureAwait(false);
                     continue;
                 }
 
-                var claim = await SendCloudAsync<CloudClaimResponse>(
-                    configuration,
-                    secrets,
-                    HttpMethod.Post,
-                    "/v1/remote-requests/claim",
-                    new { connector_id = configuration.ConnectorId },
-                    cancellationToken).ConfigureAwait(false);
-                if (claim.State != "empty" && claim.Request is not null)
+                var receive = ReceiveControlTextAsync(socket, keepaliveCancellation.Token);
+                var completed = await Task.WhenAny(receive, keepalive).ConfigureAwait(false);
+                if (completed == keepalive)
                 {
-                    inFlight.Add(HandleClaimAsync(configuration, secrets, claim.Request, cancellationToken));
+                    keepaliveCancellation.Cancel();
+                    await IgnoreCancellation(receive).ConfigureAwait(false);
+                    await keepalive.ConfigureAwait(false);
+                }
+                var raw = await receive.ConfigureAwait(false);
+                var message = JsonSerializer.Deserialize<ControlMessage>(raw, JsonOptions)
+                    ?? throw new InvalidOperationException("controlMessageMalformed");
+                if (message.ConnectorControlProtocol < ConnectorControlProtocolVersion)
+                {
                     continue;
                 }
-
-                await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(false);
+                if (message.Type == "pong")
+                {
+                    continue;
+                }
+                if (message.Type != "remote_request_available" || !IsSafeControlRequestId(message.RequestId))
+                {
+                    throw new InvalidOperationException("controlMessageInvalid");
+                }
+                var claim = await ClaimExactAsync(
+                    configuration, secrets, message.RequestId!, cancellationToken).ConfigureAwait(false);
+                if (claim is not null)
+                {
+                    inFlight.Add(HandleClaimAsync(configuration, secrets, claim, cancellationToken));
+                }
             }
         }
         finally
         {
+            keepaliveCancellation.Cancel();
+            await IgnoreCancellation(keepalive).ConfigureAwait(false);
             await IgnoreCancellation(Task.WhenAll(inFlight)).ConfigureAwait(false);
         }
+        if (!cancellationToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException("controlDisconnected");
+        }
     }
+
+    private async Task RunControlKeepaliveAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        ClientWebSocket socket,
+        SemaphoreSlim sendGate,
+        int keepaliveSeconds,
+        CancellationToken cancellationToken)
+    {
+        var pingAt = DateTimeOffset.UtcNow.AddSeconds(keepaliveSeconds);
+        while (!cancellationToken.IsCancellationRequested && socket.State == WebSocketState.Open)
+        {
+            await HeartbeatAsync(configuration, secrets, cancellationToken).ConfigureAwait(false);
+            if (DateTimeOffset.UtcNow >= pingAt)
+            {
+                await SendControlActionAsync(socket, sendGate, "ping", cancellationToken).ConfigureAwait(false);
+                pingAt = DateTimeOffset.UtcNow.AddSeconds(keepaliveSeconds);
+            }
+            await Task.Delay(TimeSpan.FromSeconds(60), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static Task SendControlActionAsync(
+        ClientWebSocket socket,
+        SemaphoreSlim sendGate,
+        string action,
+        CancellationToken cancellationToken)
+        => SendTextAsync(socket, sendGate, JsonSerializer.Serialize(new
+        {
+            action,
+            connector_control_protocol = ConnectorControlProtocolVersion,
+        }, JsonOptions), cancellationToken);
+
+    private async Task<CloudRequest?> ClaimExactAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var claim = await SendCloudAsync<CloudClaimResponse>(
+                configuration,
+                secrets,
+                HttpMethod.Post,
+                $"/v1/remote-requests/{Uri.EscapeDataString(requestId)}/claim",
+                new
+                {
+                    connector_id = configuration.ConnectorId,
+                    connector_control_protocol = ConnectorControlProtocolVersion,
+                },
+                cancellationToken).ConfigureAwait(false);
+            return claim.State == "claimed" ? claim.Request : null;
+        }
+        catch (InvalidOperationException exception) when (exception.Message is
+            "cloudRemoteRequestClaimHttp404" or
+            "cloudRemoteRequestClaimHttp409" or
+            "cloudRemoteRequestClaimHttp410")
+        {
+            return null;
+        }
+    }
+
+    private async Task<CloudRequest?> RecoverDisconnectedClaimAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        CancellationToken cancellationToken)
+    {
+        var claim = await SendCloudAsync<CloudClaimResponse>(
+            configuration,
+            secrets,
+            HttpMethod.Post,
+            "/v1/remote-requests/claim",
+            new
+            {
+                connector_id = configuration.ConnectorId,
+                connector_control_protocol = ConnectorControlProtocolVersion,
+                recovery = true,
+            },
+            cancellationToken).ConfigureAwait(false);
+        return claim.State == "claimed" ? claim.Request : null;
+    }
+
+    internal static TimeSpan DisconnectedRecoveryDelay(int jitterSeconds)
+        => TimeSpan.FromSeconds(DisconnectedRecoveryMinimumSeconds + Math.Clamp(jitterSeconds, 0, 15));
+
+    internal static bool IsSafeControlRequestId(string? requestId)
+        => !string.IsNullOrWhiteSpace(requestId)
+            && requestId.Length <= 128
+            && requestId.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
 
     private async Task HeartbeatAsync(
         PluginConfiguration configuration,
@@ -3466,6 +3646,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var stage = path switch
         {
             "/v1/remote-requests/claim" or "/v3/remote-requests/claim" => "cloudRemoteRequestClaim",
+            _ when path.EndsWith("/claim", StringComparison.Ordinal)
+                && (path.StartsWith("/v1/remote-requests/", StringComparison.Ordinal)
+                    || path.StartsWith("/v3/remote-requests/", StringComparison.Ordinal)) => "cloudRemoteRequestClaim",
             _ when path.EndsWith("/complete", StringComparison.Ordinal)
                 && (path.StartsWith("/v1/remote-requests/", StringComparison.Ordinal)
                     || path.StartsWith("/v3/remote-requests/", StringComparison.Ordinal)) => "cloudRemoteRequestComplete",
@@ -3864,6 +4047,30 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 throw new InvalidOperationException("relayMessageInvalid");
             }
 
+            await output.WriteAsync(buffer.AsMemory(0, result.Count), cancellationToken).ConfigureAwait(false);
+        }
+        while (!result.EndOfMessage);
+        return Encoding.UTF8.GetString(output.ToArray());
+    }
+
+    private static async Task<string> ReceiveControlTextAsync(
+        ClientWebSocket socket,
+        CancellationToken cancellationToken)
+    {
+        var buffer = new byte[16 * 1024];
+        await using var output = new MemoryStream();
+        WebSocketReceiveResult result;
+        do
+        {
+            result = await socket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                throw new InvalidOperationException("controlDisconnected");
+            }
+            if (result.MessageType != WebSocketMessageType.Text || output.Length + result.Count > 16 * 1024)
+            {
+                throw new InvalidOperationException("controlMessageInvalid");
+            }
             await output.WriteAsync(buffer.AsMemory(0, result.Count), cancellationToken).ConfigureAwait(false);
         }
         while (!result.EndOfMessage);

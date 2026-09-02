@@ -14,6 +14,17 @@ The approval must identify this lock or unmistakably identify the locked Request
 
 Unlocking, narrowing, rebaselining, bypassing, deleting, or weakening this document requires the same approval. Approval for one change does not approve later changes.
 
+## Approved migration exception — 2026-09-02
+
+Jefferson Sumagang explicitly and physically approved the exact connector-transport change under this lock in the current AWS cost-migration task. That one approval authorizes only:
+
+- replacing the 250 ms collection-claim loop with signed, short-lived, one-time WebSocket tickets and opaque push notifications;
+- adding connector-control protocol v2, exact request-ID claims, bounded keepalive/reconnect behavior, and a disconnected recovery claim no faster than 60 seconds plus jitter;
+- authenticating legacy callers before returning the minimum-version/upgrade response and tightly throttling the legacy collection route; and
+- the directly corresponding Cloud, plugin, infrastructure, packaging, and contract-test changes.
+
+This exception does not authorize changing request creation, connector ownership, household/profile authority, command semantics, exact provider bindings, conditional state transitions, completion/failure behavior, or the independent Profiles and Family Sync lock. This lock remains **LOCKED** for every other change, and this exception is consumed by the current migration.
+
 ## Locked service contract
 
 The approved baseline includes:

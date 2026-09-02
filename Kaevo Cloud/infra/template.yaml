@@ -175,6 +175,15 @@ Resources:
         "POST /v2/identity/social-links/callback":
           ThrottlingBurstLimit: 10
           ThrottlingRateLimit: 2
+        "POST /v3/home-connectors/{connectorId}/control-ticket":
+          ThrottlingBurstLimit: 10
+          ThrottlingRateLimit: 2
+        "POST /v3/remote-requests/{requestId}/claim":
+          ThrottlingBurstLimit: 40
+          ThrottlingRateLimit: 20
+        "POST /v3/remote-requests/claim":
+          ThrottlingBurstLimit: 4
+          ThrottlingRateLimit: 1
       Auth:
         Authorizers:
           KaevoOwnerAuthorizer:
@@ -873,6 +882,8 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: expires_at
         Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
       GlobalSecondaryIndexes:
         - IndexName: connector_id-status_created_at-index
           KeySchema:

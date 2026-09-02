@@ -7,6 +7,20 @@ internal sealed record CloudClaimResponse(
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("request")] CloudRequest? Request);
 
+internal sealed record ControlTicketResponse(
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("connection_ticket")] string ConnectionTicket,
+    [property: JsonPropertyName("control_websocket_url")] string ControlWebSocketUrl,
+    [property: JsonPropertyName("connector_control_protocol")] int ConnectorControlProtocol,
+    [property: JsonPropertyName("minimum_connector_control_protocol")] int MinimumConnectorControlProtocol,
+    [property: JsonPropertyName("keepalive_seconds")] int KeepaliveSeconds,
+    [property: JsonPropertyName("expires_at")] long ExpiresAt);
+
+internal sealed record ControlMessage(
+    [property: JsonPropertyName("type")] string Type,
+    [property: JsonPropertyName("request_id")] string? RequestId,
+    [property: JsonPropertyName("connector_control_protocol")] int ConnectorControlProtocol);
+
 internal sealed record ConnectorRegistrationResponse(
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("playback")] ConnectorPlaybackConfiguration? Playback);

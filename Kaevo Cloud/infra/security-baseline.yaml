@@ -22,6 +22,14 @@ Parameters:
     Type: String
     Default: kaevo-jellyfin-plugin
     AllowedPattern: '[A-Za-z0-9_.-]+'
+  BudgetAlertEmail:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'
+    Description: Optional email subscriber; leave empty when no address has been explicitly approved.
+
+Conditions:
+  HasBudgetAlertEmail: !Not [!Equals [!Ref BudgetAlertEmail, '']]
 
 Resources:
   GitHubActionsOidcProvider:
@@ -75,16 +83,7 @@ Resources:
               - Sid: KaevoBudgets
                 Effect: Allow
                 Action:
-                  - budgets:CreateBudget
-                  - budgets:DeleteBudget
                   - budgets:ModifyBudget
-                  - budgets:UpdateBudget
-                  - budgets:CreateNotification
-                  - budgets:DeleteNotification
-                  - budgets:UpdateNotification
-                  - budgets:CreateSubscriber
-                  - budgets:DeleteSubscriber
-                  - budgets:UpdateSubscriber
                   - budgets:ViewBudget
                 Resource: '*'
               - Sid: KaevoRolesAndPolicies
@@ -203,6 +202,18 @@ Resources:
                   - lightsail:GetContainerServices
                   - lightsail:RegisterContainerImage
                 Resource: '*'
+              - Sid: UploadVersionedKaevoArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource: arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-*
+              - Sid: WriteVersionedKaevoArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-*/kaevo-migration/*
               - Sid: ReadKaevoDeploymentState
                 Effect: Allow
                 Action:
@@ -243,7 +254,7 @@ Resources:
                   - logs:DescribeLogStreams
                   - logs:FilterLogEvents
                   - logs:GetLogEvents
-                  - s3:GetBucketEncryption
+                  - s3:GetEncryptionConfiguration
                   - s3:GetBucketLocation
                   - s3:GetBucketPolicy
                   - s3:GetBucketPublicAccessBlock
@@ -254,7 +265,78 @@ Resources:
                   - sns:ListTopics
                   - sqs:GetQueueAttributes
                   - sqs:ListQueues
+                  - budgets:ViewBudget
                 Resource: '*'
+
+  BudgetAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: kaevo-cost-alerts
+
+  BudgetAlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref BudgetAlertTopic]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAwsBudgetsPublish
+            Effect: Allow
+            Principal:
+              Service: budgets.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref BudgetAlertTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  BudgetAlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasBudgetAlertEmail
+    Properties:
+      TopicArn: !Ref BudgetAlertTopic
+      Protocol: email
+      Endpoint: !Ref BudgetAlertEmail
+
+  KaevoForecastTwentyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: Kaevo-Monthly-Forecast-20
+        BudgetLimit:
+          Amount: 20
+          Unit: USD
+        BudgetType: COST
+        TimeUnit: MONTHLY
+      NotificationsWithSubscribers:
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: FORECASTED
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref BudgetAlertTopic
+              SubscriptionType: SNS
+
+  KaevoForecastThirtyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: Kaevo-Monthly-Forecast-30
+        BudgetLimit:
+          Amount: 30
+          Unit: USD
+        BudgetType: COST
+        TimeUnit: MONTHLY
+      NotificationsWithSubscribers:
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: FORECASTED
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref BudgetAlertTopic
+              SubscriptionType: SNS
 
   TrailBucket:
     Type: AWS::S3::Bucket
@@ -353,3 +435,5 @@ Outputs:
     Value: !Ref TrailBucket
   GitHubActionsOidcProviderArn:
     Value: !Ref GitHubActionsOidcProvider
+  BudgetAlertTopicArn:
+    Value: !Ref BudgetAlertTopic

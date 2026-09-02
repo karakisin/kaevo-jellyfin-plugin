@@ -354,12 +354,51 @@ def test_concurrent_claim_has_one_authoritative_winner_and_no_duplicate(tables):
     }
     results = []
     def run(index):
-        results.append(control.lambda_handler(signed("/v3/remote-requests/claim", {"connector_id": CONNECTOR_ID}, f"connectorcontrolnonce01234568{index:02d}"), None))
+        results.append(control.lambda_handler(signed("/v3/remote-requests/claim", {
+            "connector_id": CONNECTOR_ID,
+            "connector_control_protocol": 2,
+            "recovery": True,
+        }, f"connectorcontrolnonce01234568{index:02d}"), None))
     threads = [threading.Thread(target=run, args=(index,)) for index in range(2)]
     for thread in threads: thread.start()
     for thread in threads: thread.join()
     assert sorted(json.loads(result["body"])["state"] for result in results) == ["claimed", "empty"]
     assert list(tables[3].items) == ["remote-1"]
+
+
+def test_legacy_poll_authenticates_then_requires_push_protocol(tables):
+    nonce = "connectorcontrolnonce0123456801"
+    result = control.lambda_handler(
+        signed(
+            "/v3/remote-requests/claim",
+            {"connector_id": CONNECTOR_ID},
+            nonce,
+        ),
+        None,
+    )
+
+    assert result["statusCode"] == 426
+    assert result["headers"]["Retry-After"] == "60"
+    assert json.loads(result["body"])["state"] == "upgrade_required"
+    assert len(tables[1].items) == 1
+    assert next(iter(tables[1].items.values()))["record_type"] == "pairing_v3_connector_nonce"
+
+
+def test_push_protocol_cannot_use_legacy_claim_outside_recovery(tables):
+    result = control.lambda_handler(
+        signed(
+            "/v3/remote-requests/claim",
+            {"connector_id": CONNECTOR_ID, "connector_control_protocol": 2},
+            "connectorcontrolnonce0123456802",
+        ),
+        None,
+    )
+
+    assert result["statusCode"] == 400
+    assert json.loads(result["body"]) == {
+        "state": "recovery_claim_required",
+        "retry_after_seconds": 60,
+    }
 
 
 def test_command_claim_preserves_allowlisted_operation_and_parameters(tables):
@@ -376,7 +415,7 @@ def test_command_claim_preserves_allowlisted_operation_and_parameters(tables):
     result = control.lambda_handler(
         signed(
             "/v3/remote-requests/claim",
-            {"connector_id": CONNECTOR_ID},
+            {"connector_id": CONNECTOR_ID, "connector_control_protocol": 2, "recovery": True},
             "connectorcontrolnonce0123456899",
         ),
         None,
@@ -424,7 +463,7 @@ def test_lifecycle_v2_claim_projects_only_the_frozen_exact_provider_binding(tabl
     result = control.lambda_handler(
         signed(
             "/v3/remote-requests/claim",
-            {"connector_id": CONNECTOR_ID},
+            {"connector_id": CONNECTOR_ID, "connector_control_protocol": 2, "recovery": True},
             "connectorcontrolnonce0123456877",
         ),
         None,
@@ -501,7 +540,7 @@ def test_watched_command_claim_projects_only_canonical_exact_profile_binding(tab
     result = control.lambda_handler(
         signed(
             "/v3/remote-requests/claim",
-            {"connector_id": CONNECTOR_ID},
+            {"connector_id": CONNECTOR_ID, "connector_control_protocol": 2, "recovery": True},
             "connectorcontrolnonce0123456878",
         ),
         None,

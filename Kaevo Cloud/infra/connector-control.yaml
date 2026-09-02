@@ -1,0 +1,608 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Kaevo signed WebSocket connector-control transport attached to an existing environment HTTP API.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedValues: [dev, production]
+  HttpApiId:
+    Type: String
+    AllowedPattern: '^[a-z0-9]+$'
+  CodeBucket:
+    Type: String
+  CodeKey:
+    Type: String
+
+Resources:
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub kaevo-cloud-${EnvironmentName}-connector-control-connections
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: record_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: record_key
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub kaevo-cloud-${EnvironmentName}-connector-control
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"
+
+  WebSocketAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/kaevo-cloud-${EnvironmentName}-connector-control
+      RetentionInDays: 30
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: !Ref EnvironmentName
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+      AccessLogSettings:
+        DestinationArn: !GetAtt WebSocketAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","routeKey":"$context.routeKey","status":"$context.status","integrationError":"$context.integrationErrorMessage"}'
+
+  EnvironmentConfigurationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-connector-control-configuration
+      RetentionInDays: 30
+
+  EnvironmentConfigurationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EnableRemoteRequestStreamAndThrottleLegacyRoute
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/kaevo-cloud-${EnvironmentName}-connector-control-configuration:*
+              - Effect: Allow
+                Action: [dynamodb:DescribeTable, dynamodb:UpdateTable]
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-remote-requests
+              - Effect: Allow
+                Action: [apigateway:GET, apigateway:PATCH]
+                Resource: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/${HttpApiId}/stages/${EnvironmentName}
+
+  EnvironmentConfigurationFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: EnvironmentConfigurationLogGroup
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-connector-control-configuration
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: index.handler
+      Role: !GetAtt EnvironmentConfigurationRole.Arn
+      Timeout: 120
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json
+          import time
+          import urllib.request
+          import boto3
+
+          dynamodb = boto3.client("dynamodb")
+          apigateway = boto3.client("apigatewayv2")
+
+          def respond(event, context, status, data=None, reason=None):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": reason or f"See CloudWatch log stream {context.log_stream_name}",
+                  "PhysicalResourceId": event.get("PhysicalResourceId") or f"kaevo-control-{event['ResourceProperties']['EnvironmentName']}",
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "NoEcho": True,
+                  "Data": data or {},
+              }).encode()
+              request = urllib.request.Request(event["ResponseURL"], data=body, method="PUT")
+              request.add_header("content-type", "")
+              request.add_header("content-length", str(len(body)))
+              urllib.request.urlopen(request, timeout=10).read()
+
+          def handler(event, context):
+              try:
+                  properties = event["ResourceProperties"]
+                  if event["RequestType"] == "Delete":
+                      respond(event, context, "SUCCESS", {"Retained": "remote-request stream and safe route throttles"})
+                      return
+                  table_name = f"kaevo-cloud-{properties['EnvironmentName']}-remote-requests"
+                  description = dynamodb.describe_table(TableName=table_name)["Table"]
+                  stream = description.get("StreamSpecification") or {}
+                  if not stream.get("StreamEnabled") or stream.get("StreamViewType") != "NEW_IMAGE":
+                      dynamodb.update_table(
+                          TableName=table_name,
+                          StreamSpecification={"StreamEnabled": True, "StreamViewType": "NEW_IMAGE"},
+                      )
+                  stream_arn = ""
+                  for _ in range(50):
+                      description = dynamodb.describe_table(TableName=table_name)["Table"]
+                      stream_arn = str(description.get("LatestStreamArn") or "")
+                      if description.get("TableStatus") == "ACTIVE" and stream_arn:
+                          break
+                      time.sleep(2)
+                  if not stream_arn:
+                      raise RuntimeError("remote_request_stream_unavailable")
+
+                  stage = apigateway.get_stage(
+                      ApiId=properties["HttpApiId"],
+                      StageName=properties["EnvironmentName"],
+                  )
+                  settings = stage.get("RouteSettings") or {}
+                  settings.update({
+                      "POST /v3/remote-requests/claim": {
+                          "ThrottlingBurstLimit": 4,
+                          "ThrottlingRateLimit": 1.0,
+                      },
+                      "POST /v3/home-connectors/{connectorId}/control-ticket": {
+                          "ThrottlingBurstLimit": 10,
+                          "ThrottlingRateLimit": 2.0,
+                      },
+                      "POST /v3/remote-requests/{requestId}/claim": {
+                          "ThrottlingBurstLimit": 40,
+                          "ThrottlingRateLimit": 20.0,
+                      },
+                  })
+                  apigateway.update_stage(
+                      ApiId=properties["HttpApiId"],
+                      StageName=properties["EnvironmentName"],
+                      RouteSettings=settings,
+                  )
+                  respond(event, context, "SUCCESS", {"StreamArn": stream_arn})
+              except Exception as error:
+                  respond(event, context, "FAILED", reason=f"configuration_failed:{type(error).__name__}")
+
+  EnvironmentConfiguration:
+    Type: Custom::KaevoConnectorControlConfiguration
+    Properties:
+      ServiceToken: !GetAtt EnvironmentConfigurationFunction.Arn
+      EnvironmentName: !Ref EnvironmentName
+      HttpApiId: !Ref HttpApiId
+      ConfigurationVersion: '2'
+
+  TicketLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-connector-control-ticket
+      RetentionInDays: 30
+
+  TicketRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SignedTicketAndExactClaim
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/kaevo-cloud-${EnvironmentName}-connector-control-ticket:*
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-home-connectors
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-identity-profiles
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-app-sessions
+                  - !GetAtt ConnectionsTable.Arn
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-remote-requests
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-binding-operations
+
+  TicketFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: TicketLogGroup
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-connector-control-ticket
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: websocket_control.ticket_handler.lambda_handler
+      Role: !GetAtt TicketRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Environment:
+        Variables:
+          KAEVO_ENV: !Ref EnvironmentName
+          CONNECTIONS_TABLE: !Ref ConnectionsTable
+          HOME_CONNECTORS_TABLE: !Sub kaevo-cloud-${EnvironmentName}-home-connectors
+          REMOTE_REQUESTS_TABLE: !Sub kaevo-cloud-${EnvironmentName}-remote-requests
+          BINDING_OPERATIONS_TABLE: !Sub kaevo-cloud-${EnvironmentName}-binding-operations
+          APP_SESSIONS_TABLE: !Sub kaevo-cloud-${EnvironmentName}-app-sessions
+          IDENTITY_PROFILES_TABLE: !Sub kaevo-cloud-${EnvironmentName}-identity-profiles
+          CONTROL_WEBSOCKET_URL: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${EnvironmentName}
+
+  TicketIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApiId
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt TicketFunction.Arn
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 15000
+
+  TicketRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApiId
+      RouteKey: POST /v3/home-connectors/{connectorId}/control-ticket
+      Target: !Sub integrations/${TicketIntegration}
+
+  ExactClaimRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApiId
+      RouteKey: POST /v3/remote-requests/{requestId}/claim
+      Target: !Sub integrations/${TicketIntegration}
+
+  TicketPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TicketFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApiId}/*/POST/v3/*
+
+  SocketLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-connector-control-socket
+      RetentionInDays: 30
+
+  SocketRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BoundConnectorSocket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/kaevo-cloud-${EnvironmentName}-connector-control-socket:*
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-home-connectors
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem]
+                Resource: !GetAtt ConnectionsTable.Arn
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-remote-requests/index/connector_id-status_created_at-index
+              - Effect: Allow
+                Action: execute-api:ManageConnections
+                Resource: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/${EnvironmentName}/POST/@connections/*
+
+  SocketFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: SocketLogGroup
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-connector-control-socket
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: websocket_control.socket_handler.lambda_handler
+      Role: !GetAtt SocketRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Environment:
+        Variables:
+          KAEVO_ENV: !Ref EnvironmentName
+          CONNECTIONS_TABLE: !Ref ConnectionsTable
+          HOME_CONNECTORS_TABLE: !Sub kaevo-cloud-${EnvironmentName}-home-connectors
+          REMOTE_REQUESTS_TABLE: !Sub kaevo-cloud-${EnvironmentName}-remote-requests
+
+  SocketIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+      IntegrationUri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SocketFunction.Arn}/invocations
+
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      AuthorizationType: NONE
+      Target: !Sub integrations/${SocketIntegration}
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      Target: !Sub integrations/${SocketIntegration}
+
+  PingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: ping
+      Target: !Sub integrations/${SocketIntegration}
+
+  RecoverRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: recover
+      Target: !Sub integrations/${SocketIntegration}
+
+  SocketPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SocketFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*
+
+  NotificationDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub kaevo-cloud-${EnvironmentName}-connector-control-notification-dlq
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  NotificationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/kaevo-cloud-${EnvironmentName}-connector-control-notification
+      RetentionInDays: 30
+
+  NotificationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: OpaquePendingRequestNotification
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/kaevo-cloud-${EnvironmentName}-connector-control-notification:*
+              - Effect: Allow
+                Action: [dynamodb:DescribeStream, dynamodb:GetRecords, dynamodb:GetShardIterator, dynamodb:ListStreams]
+                Resource: !GetAtt EnvironmentConfiguration.StreamArn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/kaevo-cloud-${EnvironmentName}-home-connectors
+                  - !GetAtt ConnectionsTable.Arn
+              - Effect: Allow
+                Action: dynamodb:DeleteItem
+                Resource: !GetAtt ConnectionsTable.Arn
+              - Effect: Allow
+                Action: execute-api:ManageConnections
+                Resource: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/${EnvironmentName}/POST/@connections/*
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt NotificationDeadLetterQueue.Arn
+
+  NotificationFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: NotificationLogGroup
+    Properties:
+      FunctionName: !Sub kaevo-cloud-${EnvironmentName}-connector-control-notification
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: websocket_control.notification_handler.lambda_handler
+      Role: !GetAtt NotificationRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Environment:
+        Variables:
+          KAEVO_ENV: !Ref EnvironmentName
+          CONTROL_WEBSOCKET_URL: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${EnvironmentName}
+          CONNECTIONS_TABLE: !Ref ConnectionsTable
+          HOME_CONNECTORS_TABLE: !Sub kaevo-cloud-${EnvironmentName}-home-connectors
+
+  NotificationMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt EnvironmentConfiguration.StreamArn
+      FunctionName: !Ref NotificationFunction
+      StartingPosition: LATEST
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 1
+      MaximumRecordAgeInSeconds: 3600
+      MaximumRetryAttempts: 5
+      BisectBatchOnFunctionError: true
+      FunctionResponseTypes: [ReportBatchItemFailures]
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt NotificationDeadLetterQueue.Arn
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub kaevo-cloud-${EnvironmentName}-connector-control-alerts
+
+  WebSocket5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub Kaevo-${EnvironmentName}-ConnectorControl-WebSocket-5xx
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref WebSocketApi
+        - Name: Stage
+          Value: !Ref EnvironmentName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  WebSocketConnectionFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub Kaevo-${EnvironmentName}-ConnectorControl-WebSocket-4xx
+      Namespace: AWS/ApiGateway
+      MetricName: 4XXError
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref WebSocketApi
+        - Name: Stage
+          Value: !Ref EnvironmentName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 20
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  NotificationErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub Kaevo-${EnvironmentName}-ConnectorControl-NotificationErrors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref NotificationFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  NotificationDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub Kaevo-${EnvironmentName}-ConnectorControl-DLQ
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt NotificationDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  NotificationDlqAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub Kaevo-${EnvironmentName}-ConnectorControl-DLQAge
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt NotificationDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 300
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  RemoteRequestThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub Kaevo-${EnvironmentName}-RemoteRequests-Throttled
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions:
+        - Name: TableName
+          Value: !Sub kaevo-cloud-${EnvironmentName}-remote-requests
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+Outputs:
+  WebSocketUrl:
+    Value: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${EnvironmentName}
+  ConnectionsTableName:
+    Value: !Ref ConnectionsTable
+  NotificationDeadLetterQueueUrl:
+    Value: !Ref NotificationDeadLetterQueue
+  AlertTopicArn:
+    Value: !Ref AlertTopic

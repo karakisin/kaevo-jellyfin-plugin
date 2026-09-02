@@ -51,6 +51,8 @@ PLAYBACK_RELAY_PUBLIC_URL = os.environ.get("PLAYBACK_RELAY_PUBLIC_URL", "").rstr
 CONNECTOR_ONLINE_WINDOW_SECONDS = 120
 CONNECTOR_NONCE_RETENTION_SECONDS = 24 * 60 * 60
 PLUGIN_TIMESTAMP_SKEW_SECONDS = 60
+CONNECTOR_CONTROL_PROTOCOL_VERSION = 2
+LEGACY_RECOVERY_RETRY_SECONDS = 60
 REMOTE_RESPONSE_COMPRESS_THRESHOLD_BYTES = 180_000
 REMOTE_RESPONSE_MAX_STORED_BYTES = 330_000
 SAFE_FINGERPRINT = re.compile(r"^sha256:[A-Za-z0-9_-]{43}$")
@@ -786,6 +788,25 @@ def claim_remote_request(event):
     connector_id = str(body.get("connector_id") or "").strip()
     if not authenticate_connector(event, connector_id, body):
         return _auth_failure()
+    try:
+        control_protocol = int(body.get("connector_control_protocol") or 0)
+    except (TypeError, ValueError):
+        control_protocol = 0
+    if control_protocol < CONNECTOR_CONTROL_PROTOCOL_VERSION:
+        result = response(
+            426,
+            "upgrade_required",
+            minimum_connector_control_protocol=CONNECTOR_CONTROL_PROTOCOL_VERSION,
+            retry_after_seconds=LEGACY_RECOVERY_RETRY_SECONDS,
+        )
+        result["headers"]["Retry-After"] = str(LEGACY_RECOVERY_RETRY_SECONDS)
+        return result
+    if body.get("recovery") is not True:
+        return response(
+            400,
+            "recovery_claim_required",
+            retry_after_seconds=LEGACY_RECOVERY_RETRY_SECONDS,
+        )
     try:
         items = remote_requests_table.query(
             IndexName="connector_id-status_created_at-index",

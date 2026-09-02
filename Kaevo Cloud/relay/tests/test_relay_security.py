@@ -27,12 +27,60 @@ from kaevo_relay.security import verify_signed_token
 
 
 KEY = "relay-signing-key-with-at-least-thirty-two-characters"
+ORIGIN_KEY = "cloudfront-origin-secret-with-at-least-thirty-two-characters"
+ORIGIN_HEADERS = {"X-Kaevo-Origin-Auth": ORIGIN_KEY}
+
+
+@pytest.fixture(autouse=True)
+def configured_origin_secret(monkeypatch):
+    monkeypatch.setattr(relay_module, "ORIGIN_AUTH_SECRET", ORIGIN_KEY)
 
 
 def token(payload):
     encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()).decode().rstrip("=")
     signature = base64.urlsafe_b64encode(hmac.new(KEY.encode(), encoded.encode(), hashlib.sha256).digest()).decode().rstrip("=")
     return f"{encoded}.{signature}"
+
+
+@pytest.mark.asyncio
+async def test_direct_http_origin_is_denied_and_health_is_minimal():
+    transport = ASGITransport(app=relay_module.app)
+    async with AsyncClient(transport=transport, base_url="https://relay.test") as client:
+        denied = await client.get("/v1/playback/not-a-grant/Videos/not-an-item/stream")
+        health = await client.get("/health")
+
+    assert denied.status_code == 403
+    assert denied.headers["cache-control"] == "no-store"
+    assert health.status_code == 200
+    assert set(health.json()) == {"state", "service", "version"}
+
+
+@pytest.mark.asyncio
+async def test_valid_origin_header_reaches_grant_authorization():
+    transport = ASGITransport(app=relay_module.app)
+    async with AsyncClient(transport=transport, base_url="https://relay.test") as client:
+        response = await client.get(
+            "/v1/playback/not-a-grant/Videos/not-an-item/stream",
+            headers=ORIGIN_HEADERS,
+        )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_direct_connector_websocket_origin_is_denied_before_ticket_validation():
+    class DirectWebSocket:
+        headers = {}
+
+        def __init__(self):
+            self.close_code = None
+
+        async def close(self, code):
+            self.close_code = code
+
+    websocket = DirectWebSocket()
+    await relay_module.connector_socket(websocket, "connector-1")
+    assert websocket.close_code == 4403
 
 
 def playback_payload():
@@ -477,7 +525,8 @@ async def test_playback_streams_media_chunk_without_body_ack(monkeypatch):
     try:
         async with AsyncClient(transport=transport, base_url="https://relay.test") as client:
             response = await client.get(
-                "/v1/playback/grant-token/Videos/0123456789abcdef0123456789abcdef/hls1/main/0.ts"
+                "/v1/playback/grant-token/Videos/0123456789abcdef0123456789abcdef/hls1/main/0.ts",
+                headers=ORIGIN_HEADERS,
             )
     finally:
         reader.cancel()
@@ -532,7 +581,8 @@ async def test_split_grant_route_rewrites_hls_response_for_avfoundation(monkeypa
     transport = ASGITransport(app=relay_module.app)
     async with AsyncClient(transport=transport, base_url="https://relay.test") as client:
         response = await client.get(
-            f"/v1/playback/{split_grant_token(signed)}/Videos/0123456789abcdef0123456789abcdef/master.m3u8"
+            f"/v1/playback/{split_grant_token(signed)}/Videos/0123456789abcdef0123456789abcdef/master.m3u8",
+            headers=ORIGIN_HEADERS,
         )
 
     assert response.status_code == 200
@@ -580,7 +630,8 @@ async def test_repeated_head_playback_requests_release_connector_slots(monkeypat
     async with AsyncClient(transport=transport, base_url="https://relay.test") as client:
         for _ in range(20):
             response = await client.head(
-                "/v1/playback/grant-token/Videos/0123456789abcdef0123456789abcdef/stream?static=true"
+                "/v1/playback/grant-token/Videos/0123456789abcdef0123456789abcdef/stream?static=true",
+                headers=ORIGIN_HEADERS,
             )
             assert response.status_code == 200
             assert channel.pending == {}

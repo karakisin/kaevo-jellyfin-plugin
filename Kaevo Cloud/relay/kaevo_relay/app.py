@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -18,6 +19,8 @@ from .security import verify_signed_token
 
 
 SIGNING_KEY = os.environ.get("PLAYBACK_GRANT_SIGNING_KEY", "")
+ORIGIN_AUTH_SECRET = os.environ.get("KAEVO_ORIGIN_AUTH_SECRET", "")
+ORIGIN_AUTH_HEADER = "x-kaevo-origin-auth"
 MAX_ACTIVE_SECONDS = 12 * 60 * 60
 IDLE_SECONDS = 5 * 60
 MAX_CHUNK_BYTES = 256 * 1024
@@ -41,6 +44,15 @@ SAFE_ITEM_ID = re.compile(r"^[0-9a-f]{32}$")
 SAFE_GRANT_CHUNK = re.compile(r"^[A-Za-z0-9._-]+$")
 SAFE_TRICKPLAY_TILE = re.compile(r"^[0-9]+\.jpg$")
 LOGGER = logging.getLogger("kaevo.relay")
+
+
+def origin_authorized(headers: Any) -> bool:
+    supplied = str(headers.get(ORIGIN_AUTH_HEADER) or "")
+    return (
+        len(ORIGIN_AUTH_SECRET) >= 32
+        and len(supplied) >= 32
+        and hmac.compare_digest(supplied, ORIGIN_AUTH_SECRET)
+    )
 
 
 def bounded_trickplay_claim(value: Any) -> bool:
@@ -468,20 +480,33 @@ family_sync = FamilySyncRegistry()
 app = FastAPI(title="Kaevo Playback Relay", version="0.2.17")
 
 
+@app.middleware("http")
+async def require_cloudfront_origin(request: Request, call_next):
+    if request.url.path == "/health":
+        return await call_next(request)
+    if not origin_authorized(request.headers):
+        return Response(
+            status_code=403,
+            headers={"Cache-Control": "no-store"},
+            content=b"origin authorization required",
+        )
+    return await call_next(request)
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {
         "state": "ok",
         "service": "kaevo-playback-relay",
         "version": "0.2.17",
-        "connectors": len(connectors.channels),
-        "channels": connectors.channel_count,
-        "family_sync_channels": len(family_sync.channels),
     }
 
 
 @app.websocket("/v1/connectors/{connector_id}")
 async def connector_socket(websocket: WebSocket, connector_id: str) -> None:
+    if not origin_authorized(websocket.headers):
+        await websocket.close(code=4403)
+        return
     authorization = websocket.headers.get("authorization") or ""
     ticket = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
     try:
@@ -557,6 +582,9 @@ def validate_family_sync_ticket(ticket: str) -> dict[str, Any]:
 
 @app.websocket("/v1/family-sync")
 async def family_sync_socket(websocket: WebSocket) -> None:
+    if not origin_authorized(websocket.headers):
+        await websocket.close(code=4403)
+        return
     authorization = websocket.headers.get("authorization") or ""
     ticket = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
     try:

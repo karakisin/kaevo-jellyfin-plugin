@@ -1,0 +1,239 @@
+name: Kaevo AWS migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Exact reviewed migration slice to deploy
+        required: true
+        type: choice
+        options:
+          - security-baseline
+          - control-development
+          - relay-canary
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: kaevo-aws-migration-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-reviewed-slice:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact migration revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Configure temporary AWS role credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          aws-region: us-west-2
+          role-to-assume: ${{ vars.KAEVO_AWS_DEPLOYMENT_ROLE_ARN }}
+          role-session-name: kaevo-migration-${{ github.run_id }}
+          mask-aws-account-id: true
+
+      - name: Resolve restricted CloudFormation execution role
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AWS_PAGER=""
+          execution_role=$(aws iam get-role --role-name KaevoCloudFormationExecutionRole --query Role.Arn --output text)
+          echo "::add-mask::${execution_role}"
+          echo "KAEVO_EXECUTION_ROLE=${execution_role}" >> "${GITHUB_ENV}"
+          caller_arn=$(aws sts get-caller-identity --query Arn --output text)
+          [[ "${caller_arn}" == */KaevoDeploymentRole/* ]]
+
+      - name: Preview and apply security baseline
+        if: inputs.target == 'security-baseline'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AWS_PAGER=""
+          stack=kaevo-security-baseline
+          change_set="migration-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          aws cloudformation create-change-set \
+            --stack-name "${stack}" \
+            --change-set-name "${change_set}" \
+            --change-set-type UPDATE \
+            --template-body file://Kaevo\ Cloud/infra/security-baseline.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --role-arn "${KAEVO_EXECUTION_ROLE}" >/dev/null
+          aws cloudformation wait change-set-create-complete --stack-name "${stack}" --change-set-name "${change_set}"
+          changes=$(aws cloudformation describe-change-set --stack-name "${stack}" --change-set-name "${change_set}" --query Changes --output json)
+          echo "${changes}" | jq -r '.[] | [.ResourceChange.Action,.ResourceChange.LogicalResourceId,(.ResourceChange.Replacement // "None")] | @tsv'
+          if echo "${changes}" | jq -e 'any(.[]; .ResourceChange.Action == "Remove" or (.ResourceChange.Replacement == "True" or .ResourceChange.Replacement == "Conditional"))' >/dev/null; then
+            echo "Unsafe removal or replacement rejected" >&2
+            exit 1
+          fi
+          aws cloudformation execute-change-set --stack-name "${stack}" --change-set-name "${change_set}"
+          aws cloudformation wait stack-update-complete --stack-name "${stack}"
+          aws cloudtrail get-trail-status --name kaevo-management-events --query IsLogging --output text | grep -qx True
+          echo "Security baseline, management trail, and forecast budgets verified"
+
+      - name: Build, preview, deploy, and reject-invalid development control channel
+        if: inputs.target == 'control-development'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AWS_PAGER=""
+          python3 -m pip install --quiet 'pytest>=8,<9' boto3 'cryptography>=48,<49'
+          AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-west-2 AWS_EC2_METADATA_DISABLED=true \
+            PYTHONPATH='Kaevo Cloud/api:Kaevo Cloud/api/src' \
+            python3 -m pytest 'Kaevo Cloud/api/tests/test_websocket_control.py' 'Kaevo Cloud/api/tests/test_v3_connector_control.py' -q
+          bash 'Kaevo Cloud/scripts/build-connector-control-artifact.sh' /tmp/kaevo-connector-control.zip
+          artifact_bucket=$(aws cloudformation describe-stacks --stack-name aws-sam-cli-managed-default --query "Stacks[0].Outputs[?OutputKey=='SourceBucket'].OutputValue" --output text)
+          echo "::add-mask::${artifact_bucket}"
+          artifact_key="kaevo-migration/${GITHUB_SHA}/connector-control.zip"
+          aws s3 cp /tmp/kaevo-connector-control.zip "s3://${artifact_bucket}/${artifact_key}" --only-show-errors
+          api_url=$(aws cloudformation describe-stacks --stack-name kaevo-cloud-dev --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+          http_api_id=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.urlparse(sys.argv[1]).hostname.split(".")[0])' "${api_url}")
+          echo "::add-mask::${api_url}"
+          echo "::add-mask::${http_api_id}"
+          stack=kaevo-cloud-dev-connector-control
+          change_set="migration-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          aws cloudformation create-change-set \
+            --stack-name "${stack}" \
+            --change-set-name "${change_set}" \
+            --change-set-type CREATE \
+            --template-body file://Kaevo\ Cloud/infra/connector-control.yaml \
+            --parameters \
+              ParameterKey=EnvironmentName,ParameterValue=dev \
+              ParameterKey=HttpApiId,ParameterValue="${http_api_id}" \
+              ParameterKey=CodeBucket,ParameterValue="${artifact_bucket}" \
+              ParameterKey=CodeKey,ParameterValue="${artifact_key}" \
+            --capabilities CAPABILITY_IAM \
+            --role-arn "${KAEVO_EXECUTION_ROLE}" >/dev/null
+          aws cloudformation wait change-set-create-complete --stack-name "${stack}" --change-set-name "${change_set}"
+          changes=$(aws cloudformation describe-change-set --stack-name "${stack}" --change-set-name "${change_set}" --query Changes --output json)
+          echo "${changes}" | jq -r '.[] | [.ResourceChange.Action,.ResourceChange.LogicalResourceId,(.ResourceChange.Replacement // "None")] | @tsv'
+          if echo "${changes}" | jq -e 'any(.[]; .ResourceChange.Action != "Add")' >/dev/null; then
+            echo "Development control create contains a non-add action" >&2
+            exit 1
+          fi
+          aws cloudformation execute-change-set --stack-name "${stack}" --change-set-name "${change_set}"
+          aws cloudformation wait stack-create-complete --stack-name "${stack}"
+          stream_enabled=$(aws dynamodb describe-table --table-name kaevo-cloud-dev-remote-requests --query 'Table.StreamSpecification.StreamEnabled' --output text)
+          [[ "${stream_enabled}" == "True" ]]
+          websocket_url=$(aws cloudformation describe-stacks --stack-name "${stack}" --query "Stacks[0].Outputs[?OutputKey=='WebSocketUrl'].OutputValue" --output text)
+          echo "::add-mask::${websocket_url}"
+          http_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --request POST --header 'Content-Type: application/json' \
+            --data '{"connector_id":"invalid","connector_control_protocol":2}' \
+            "${api_url}/v3/home-connectors/invalid/control-ticket")
+          [[ "${http_status}" == "401" ]]
+          python3 -m pip install --quiet 'websockets>=14,<16'
+          CONTROL_WEBSOCKET_URL="${websocket_url}" python3 - <<'PY'
+          import asyncio
+          import os
+          import websockets
+
+          async def verify():
+              try:
+                  async with websockets.connect(
+                      os.environ["CONTROL_WEBSOCKET_URL"],
+                      additional_headers={"Authorization": "Bearer invalid"},
+                      open_timeout=10,
+                  ):
+                      raise RuntimeError("invalid ticket was accepted")
+              except websockets.InvalidStatus as error:
+                  if error.response.status_code not in {401, 403}:
+                      raise
+
+          asyncio.run(verify())
+          PY
+          echo "Development WebSocket control stack and invalid-auth rejection verified"
+
+      - name: Build, preview, deploy, and verify Lightsail relay canary
+        if: inputs.target == 'relay-canary'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AWS_PAGER=""
+          stack=kaevo-playback-relay-green
+          service=kaevo-playback-relay-green
+          signing_secret=$(aws cloudformation describe-stack-resource \
+            --stack-name kaevo-playback-relay-beta \
+            --logical-resource-id RelaySigningSecret \
+            --query StackResourceDetail.PhysicalResourceId --output text)
+          echo "::add-mask::${signing_secret}"
+          create_change_set="migration-create-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          aws cloudformation create-change-set \
+            --stack-name "${stack}" \
+            --change-set-name "${create_change_set}" \
+            --change-set-type CREATE \
+            --template-body file://Kaevo\ Cloud/infra/playback-relay-lightsail-canary.yaml \
+            --parameters \
+              ParameterKey=ServiceName,ParameterValue="${service}" \
+              ParameterKey=ContainerImage,ParameterValue= \
+              ParameterKey=RelaySigningSecretArn,ParameterValue="${signing_secret}" \
+              ParameterKey=SourceRevision,ParameterValue="${GITHUB_SHA}" \
+            --capabilities CAPABILITY_IAM \
+            --role-arn "${KAEVO_EXECUTION_ROLE}" >/dev/null
+          aws cloudformation wait change-set-create-complete --stack-name "${stack}" --change-set-name "${create_change_set}"
+          changes=$(aws cloudformation describe-change-set --stack-name "${stack}" --change-set-name "${create_change_set}" --query Changes --output json)
+          echo "${changes}" | jq -r '.[] | [.ResourceChange.Action,.ResourceChange.LogicalResourceId] | @tsv'
+          echo "${changes}" | jq -e 'all(.[]; .ResourceChange.Action == "Add")' >/dev/null
+          aws cloudformation execute-change-set --stack-name "${stack}" --change-set-name "${create_change_set}"
+          aws cloudformation wait stack-create-complete --stack-name "${stack}"
+
+          docker build --platform linux/amd64 --provenance=false \
+            --tag "kaevo-relay:${GITHUB_SHA}" 'Kaevo Cloud/relay'
+          curl --fail --silent --show-error \
+            https://s3.us-west-2.amazonaws.com/lightsailctl/latest/linux-amd64/lightsailctl \
+            --output /usr/local/bin/lightsailctl
+          chmod +x /usr/local/bin/lightsailctl
+          push_result=$(aws lightsail push-container-image \
+            --service-name "${service}" \
+            --label "relay-${GITHUB_SHA:0:12}" \
+            --image "kaevo-relay:${GITHUB_SHA}")
+          image=$(echo "${push_result}" | jq -r '.containerImage.image')
+          [[ "${image}" == :${service}.relay-${GITHUB_SHA:0:12}.* ]]
+          echo "::add-mask::${image}"
+
+          update_change_set="migration-image-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          aws cloudformation create-change-set \
+            --stack-name "${stack}" \
+            --change-set-name "${update_change_set}" \
+            --change-set-type UPDATE \
+            --use-previous-template \
+            --parameters \
+              ParameterKey=ServiceName,UsePreviousValue=true \
+              ParameterKey=ContainerImage,ParameterValue="${image}" \
+              ParameterKey=RelaySigningSecretArn,UsePreviousValue=true \
+              ParameterKey=SourceRevision,UsePreviousValue=true \
+            --capabilities CAPABILITY_IAM \
+            --role-arn "${KAEVO_EXECUTION_ROLE}" >/dev/null
+          aws cloudformation wait change-set-create-complete --stack-name "${stack}" --change-set-name "${update_change_set}"
+          changes=$(aws cloudformation describe-change-set --stack-name "${stack}" --change-set-name "${update_change_set}" --query Changes --output json)
+          echo "${changes}" | jq -r '.[] | [.ResourceChange.Action,.ResourceChange.LogicalResourceId,(.ResourceChange.Replacement // "None")] | @tsv'
+          if echo "${changes}" | jq -e 'any(.[]; .ResourceChange.Action == "Remove" or (.ResourceChange.Replacement == "True" or .ResourceChange.Replacement == "Conditional"))' >/dev/null; then
+            echo "Unsafe relay canary update rejected" >&2
+            exit 1
+          fi
+          aws cloudformation execute-change-set --stack-name "${stack}" --change-set-name "${update_change_set}"
+          aws cloudformation wait stack-update-complete --stack-name "${stack}"
+
+          for _ in $(seq 1 40); do
+            state=$(aws lightsail get-container-services --service-name "${service}" --query 'containerServices[0].currentDeployment.state' --output text)
+            [[ "${state}" == "ACTIVE" ]] && break
+            [[ "${state}" == "FAILED" ]] && exit 1
+            sleep 15
+          done
+          [[ "${state}" == "ACTIVE" ]]
+          service_url=$(aws cloudformation describe-stacks --stack-name "${stack}" --query "Stacks[0].Outputs[?OutputKey=='ServiceUrl'].OutputValue" --output text)
+          relay_url=$(aws cloudformation describe-stacks --stack-name "${stack}" --query "Stacks[0].Outputs[?OutputKey=='RelayPublicUrl'].OutputValue" --output text)
+          echo "::add-mask::${service_url}"
+          echo "::add-mask::${relay_url}"
+          direct_health=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${service_url}/health")
+          direct_protected=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${service_url}/v1/playback/not-a-grant/Videos/not-an-item/stream")
+          edge_health=$(curl --retry 12 --retry-delay 10 --retry-all-errors --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url}/health")
+          edge_protected=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url}/v1/playback/not-a-grant/Videos/not-an-item/stream")
+          [[ "${direct_health}" == "200" ]]
+          [[ "${direct_protected}" == "403" ]]
+          [[ "${edge_health}" == "200" ]]
+          [[ "${edge_protected}" == "401" ]]
+          echo "Lightsail canary is active; HTTPS edge works and direct protected origin access is rejected"

@@ -1,0 +1,318 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Kaevo low-cost playback relay green canary. One Lightsail nano container is
+  exposed through CloudFront and requires a CloudFront-held origin secret.
+
+Parameters:
+  ServiceName:
+    Type: String
+    Default: kaevo-playback-relay-green
+    AllowedPattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'
+  ContainerImage:
+    Type: String
+    Default: ''
+    Description: Exact immutable Lightsail image label, for example :kaevo-playback-relay-green.relay.1
+  RelaySigningSecretArn:
+    Type: String
+    Description: Existing Secrets Manager ARN containing the current playback grant signing key
+  SourceRevision:
+    Type: String
+    AllowedPattern: '^[0-9a-f]{40}$'
+    Description: Git commit that produced the immutable relay image
+
+Conditions:
+  HasContainerImage: !Not [!Equals [!Ref ContainerImage, '']]
+
+Resources:
+  RelayOriginAuthSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: kaevo/playback-relay/green-origin-auth
+      Description: CloudFront-to-Lightsail origin authorization value; never sent to viewers.
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+
+  RelayContainerService:
+    Type: AWS::Lightsail::Container
+    Properties:
+      ServiceName: !Ref ServiceName
+      Power: nano
+      Scale: 1
+      IsDisabled: false
+      ContainerServiceDeployment: !If
+        - HasContainerImage
+        - Containers:
+            - ContainerName: relay
+              Image: !Ref ContainerImage
+              Environment:
+                - Variable: PLAYBACK_GRANT_SIGNING_KEY
+                  Value: !Sub '{{resolve:secretsmanager:${RelaySigningSecretArn}:SecretString}}'
+                - Variable: KAEVO_ORIGIN_AUTH_SECRET
+                  Value: !Sub '{{resolve:secretsmanager:${RelayOriginAuthSecret}:SecretString}}'
+              Ports:
+                - Port: '8200'
+                  Protocol: HTTP
+          PublicEndpoint:
+            ContainerName: relay
+            ContainerPort: 8200
+            HealthCheckConfig:
+              HealthyThreshold: 2
+              IntervalSeconds: 20
+              Path: /health
+              SuccessCodes: 200-299
+              TimeoutSeconds: 5
+              UnhealthyThreshold: 3
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: kaevo:component
+          Value: playback-relay-green
+        - Key: kaevo:source-revision
+          Value: !Ref SourceRevision
+
+  RelayNoCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: kaevo-playback-relay-green-no-cache
+        Comment: Never cache playback grants, playlists, or media responses.
+        DefaultTTL: 0
+        MaxTTL: 0
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingBrotli: false
+          EnableAcceptEncodingGzip: false
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  RelayOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: kaevo-playback-relay-green-viewer-request
+        Comment: Forward authorization, range, query, and WebSocket negotiation except Host.
+        CookiesConfig:
+          CookieBehavior: none
+        HeadersConfig:
+          HeaderBehavior: allExcept
+          Headers:
+            - Host
+        QueryStringsConfig:
+          QueryStringBehavior: all
+
+  RelayDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: Kaevo low-cost playback relay green canary
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: lightsail-green
+            DomainName:
+              Fn::Select:
+                - 1
+                - Fn::Split:
+                    - '://'
+                    - !GetAtt RelayContainerService.Url
+            OriginCustomHeaders:
+              - HeaderName: X-Kaevo-Origin-Auth
+                HeaderValue: !Sub '{{resolve:secretsmanager:${RelayOriginAuthSecret}:SecretString}}'
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
+              OriginSSLProtocols: [TLSv1.2]
+        DefaultCacheBehavior:
+          TargetOriginId: lightsail-green
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: false
+          CachePolicyId: !Ref RelayNoCachePolicy
+          OriginRequestPolicyId: !Ref RelayOriginRequestPolicy
+
+  RelayAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: kaevo-playback-relay-green-alerts
+
+  RelayMonitorLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/kaevo-playback-relay-green-monitor
+      RetentionInDays: 30
+
+  RelayMonitorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SparseRelayHealthAndBandwidthMetrics
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/kaevo-playback-relay-green-monitor:*
+              - Effect: Allow
+                Action: [cloudwatch:GetMetricStatistics, cloudwatch:PutMetricData]
+                Resource: '*'
+
+  RelayMonitorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: RelayMonitorLogGroup
+    Properties:
+      FunctionName: kaevo-playback-relay-green-monitor
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: index.handler
+      Role: !GetAtt RelayMonitorRole.Arn
+      Timeout: 20
+      MemorySize: 128
+      Environment:
+        Variables:
+          DISTRIBUTION_ID: !Ref RelayDistribution
+          HEALTH_URL: !Sub https://${RelayDistribution.DomainName}/health
+      Code:
+        ZipFile: |
+          import datetime
+          import json
+          import os
+          import urllib.request
+          import boto3
+
+          source = boto3.client("cloudwatch", region_name="us-east-1")
+          destination = boto3.client("cloudwatch")
+
+          def handler(event, context):
+              now = datetime.datetime.now(datetime.timezone.utc)
+              healthy = 0
+              try:
+                  with urllib.request.urlopen(os.environ["HEALTH_URL"], timeout=8) as response:
+                      body = json.loads(response.read(4096))
+                      healthy = int(response.status == 200 and body.get("state") == "ok")
+              except Exception:
+                  healthy = 0
+              dimensions = [
+                  {"Name": "DistributionId", "Value": os.environ["DISTRIBUTION_ID"]},
+                  {"Name": "Region", "Value": "Global"},
+              ]
+              month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+              bandwidth = source.get_metric_statistics(
+                  Namespace="AWS/CloudFront", MetricName="BytesDownloaded", Dimensions=dimensions,
+                  StartTime=month_start, EndTime=now, Period=3600, Statistics=["Sum"],
+              )
+              errors = source.get_metric_statistics(
+                  Namespace="AWS/CloudFront", MetricName="5xxErrorRate", Dimensions=dimensions,
+                  StartTime=now - datetime.timedelta(minutes=30), EndTime=now,
+                  Period=300, Statistics=["Average"],
+              )
+              destination.put_metric_data(
+                  Namespace="Kaevo/PlaybackGreen",
+                  MetricData=[
+                      {"MetricName": "RelayHealthy", "Value": healthy, "Unit": "Count"},
+                      {"MetricName": "MonthlyCloudFrontBytes", "Value": sum(point.get("Sum", 0) for point in bandwidth.get("Datapoints", [])), "Unit": "Bytes"},
+                      {"MetricName": "Recent5xxErrorRate", "Value": max((point.get("Average", 0) for point in errors.get("Datapoints", [])), default=0), "Unit": "Percent"},
+                  ],
+              )
+              return {"healthy": healthy}
+
+  RelayMonitorSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Sparse health, CloudFront error, and bandwidth monitoring for the low-cost relay.
+      ScheduleExpression: rate(15 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt RelayMonitorFunction.Arn
+          Id: RelayMonitor
+
+  RelayMonitorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref RelayMonitorFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt RelayMonitorSchedule.Arn
+
+  RelayHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Kaevo-Playback-Relay-Green-Health
+      Namespace: Kaevo/PlaybackGreen
+      MetricName: RelayHealthy
+      Statistic: Minimum
+      Period: 900
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref RelayAlertTopic]
+
+  Relay5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Kaevo-Playback-Relay-Green-5xx
+      Namespace: Kaevo/PlaybackGreen
+      MetricName: Recent5xxErrorRate
+      Statistic: Maximum
+      Period: 900
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref RelayAlertTopic]
+
+  RelayBandwidthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Kaevo-Playback-Relay-Green-Bandwidth-Growth
+      Namespace: Kaevo/PlaybackGreen
+      MetricName: MonthlyCloudFrontBytes
+      Statistic: Maximum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 250000000000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref RelayAlertTopic]
+
+Outputs:
+  ServiceName:
+    Value: !Ref RelayContainerService
+  ServiceUrl:
+    Value: !GetAtt RelayContainerService.Url
+  RelayPublicUrl:
+    Value: !Sub https://${RelayDistribution.DomainName}
+  RelayWebSocketUrl:
+    Value: !Sub wss://${RelayDistribution.DomainName}
+  DistributionId:
+    Value: !Ref RelayDistribution
+  OriginAuthSecretArn:
+    Value: !Ref RelayOriginAuthSecret
+  DeployedContainerImage:
+    Value: !Ref ContainerImage
+  AlertTopicArn:
+    Value: !Ref RelayAlertTopic
+  SourceRevision:
+    Value: !Ref SourceRevision
