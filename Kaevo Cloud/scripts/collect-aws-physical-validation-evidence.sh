@@ -101,20 +101,20 @@ service_power=$(aws lightsail get-container-services --region "$REGION" --servic
   --query 'containerServices[0].powerName' --output text)
 service_scale=$(aws lightsail get-container-services --region "$REGION" --service-name "$RELAY_SERVICE" \
   --query 'containerServices[0].scale' --output text)
-[[ "$service_state" == "ACTIVE" && "$service_power" == "nano" && "$service_scale" == "1" ]]
 record green_relay_deployment_state "$service_state"
 record green_relay_power "$service_power"
 record green_relay_scale "$service_scale"
+[[ "$service_state" == "ACTIVE" && "$service_power" == "nano" && "$service_scale" == "1" ]]
 
 direct_health=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${service_url%/}/health")
 direct_protected=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${service_url%/}/v1/playback/not-a-grant/Videos/not-an-item/stream")
 edge_health=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url%/}/health")
 edge_invalid_grant=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url%/}/v1/playback/not-a-grant/Videos/not-an-item/stream")
-[[ "$direct_health" == "200" && "$direct_protected" == "403" && "$edge_health" == "200" && "$edge_invalid_grant" == "401" ]]
 record direct_health_status "$direct_health"
 record direct_protected_status "$direct_protected"
 record cloudfront_health_status "$edge_health"
 record cloudfront_invalid_grant_status "$edge_invalid_grant"
+[[ "$direct_health" == "200" && "$direct_protected" == "403" && "$edge_health" == "200" && "$edge_invalid_grant" == "401" ]]
 
 origin_protocol=$(aws cloudfront get-distribution-config --id "$distribution_id" \
   --query 'DistributionConfig.Origins.Items[0].CustomOriginConfig.OriginProtocolPolicy' --output text)
