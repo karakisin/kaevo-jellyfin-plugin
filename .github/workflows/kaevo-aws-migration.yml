@@ -198,42 +198,37 @@ jobs:
           [[ "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${relay_url}/v1/playback/not-a-grant/Videos/not-an-item/stream")" == "401" ]]
           [[ "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${service_url}/v1/playback/not-a-grant/Videos/not-an-item/stream")" == "403" ]]
 
-          configured_url=$(aws cloudformation describe-stacks --stack-name "${api_stack}" --query "Stacks[0].Parameters[?ParameterKey=='PlaybackRelayPublicUrl'].ParameterValue | [0]" --output text)
-          echo "::add-mask::${configured_url}"
-          if [[ "${configured_url}" != "${relay_url}" ]]; then
-            parameters=$(aws cloudformation describe-stacks --stack-name "${api_stack}" --query 'Stacks[0].Parameters' --output json | \
-              jq --arg relay "${relay_url}" '
-                map(if .ParameterKey == "PlaybackRelayPublicUrl"
-                    then {ParameterKey: .ParameterKey, ParameterValue: $relay}
-                    else {ParameterKey: .ParameterKey, UsePreviousValue: true}
-                    end)')
-            change_set="development-green-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            aws cloudformation create-change-set \
+          # A parameter-only SAM change set currently previews unrelated API
+          # integration modifications. Fail closed on that broad surface and
+          # update only the three development Lambda environment maps needed
+          # for the isolated validation window.
+          for logical_id in \
+            KaevoCloudApiFunction \
+            KaevoCloudRemoteApiFunction \
+            KaevoV3ConnectorControlFunction; do
+            function_name=$(aws cloudformation describe-stack-resource \
               --stack-name "${api_stack}" \
-              --change-set-name "${change_set}" \
-              --change-set-type UPDATE \
-              --use-previous-template \
-              --parameters "${parameters}" \
-              --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-              --role-arn "${KAEVO_EXECUTION_ROLE}" >/dev/null
-            aws cloudformation wait change-set-create-complete --stack-name "${api_stack}" --change-set-name "${change_set}"
-            changes=$(aws cloudformation describe-change-set --stack-name "${api_stack}" --change-set-name "${change_set}" --query Changes --output json)
-            echo "${changes}" | jq -r '.[] | [.ResourceChange.Action,.ResourceChange.LogicalResourceId,(.ResourceChange.Replacement // "None")] | @tsv'
-            echo "${changes}" | jq -e '
-              length > 0 and all(.[].ResourceChange;
-                .Action == "Modify" and
-                (.Replacement // "False") == "False" and
-                (.LogicalResourceId as $id | [
-                  "KaevoCloudApiFunction",
-                  "KaevoCloudRemoteApiFunction",
-                  "KaevoV3ConnectorControlFunction"
-                ] | index($id) != null)
-              )' >/dev/null
-            aws cloudformation execute-change-set --stack-name "${api_stack}" --change-set-name "${change_set}"
-            aws cloudformation wait stack-update-complete --stack-name "${api_stack}"
-          fi
-          configured_url=$(aws cloudformation describe-stacks --stack-name "${api_stack}" --query "Stacks[0].Parameters[?ParameterKey=='PlaybackRelayPublicUrl'].ParameterValue | [0]" --output text)
-          [[ "${configured_url}" == "${relay_url}" ]]
+              --logical-resource-id "${logical_id}" \
+              --query 'StackResourceDetail.PhysicalResourceId' \
+              --output text)
+            configuration=$(aws lambda get-function-configuration --function-name "${function_name}" --output json)
+            current_url=$(jq -r '.Environment.Variables.PLAYBACK_RELAY_PUBLIC_URL // ""' <<<"${configuration}")
+            echo "::add-mask::${current_url}"
+            if [[ "${current_url}" != "${relay_url}" ]]; then
+              environment=$(jq -c --arg relay "${relay_url}" \
+                '.Environment.Variables.PLAYBACK_RELAY_PUBLIC_URL = $relay | {Variables: .Environment.Variables}' \
+                <<<"${configuration}")
+              aws lambda update-function-configuration \
+                --function-name "${function_name}" \
+                --environment "${environment}" >/dev/null
+              aws lambda wait function-updated-v2 --function-name "${function_name}"
+            fi
+            verified_url=$(aws lambda get-function-configuration \
+              --function-name "${function_name}" \
+              --query 'Environment.Variables.PLAYBACK_RELAY_PUBLIC_URL' \
+              --output text)
+            [[ "${verified_url}" == "${relay_url}" ]]
+          done
           production_url=$(aws cloudformation describe-stacks --stack-name kaevo-cloud-production --query "Stacks[0].Parameters[?ParameterKey=='PlaybackRelayPublicUrl'].ParameterValue | [0]" --output text)
           echo "::add-mask::${production_url}"
           [[ "${production_url}" != "${relay_url}" ]]

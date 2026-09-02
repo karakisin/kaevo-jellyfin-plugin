@@ -135,15 +135,23 @@ container_env_keys=$(jq -r '.[].environment | keys[]' <<<"$containers" | sort -u
 record relay_permanent_aws_credentials 0
 record relay_runtime_secret_names 2
 
-dev_relay=$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$API_STACK" \
-  --query "Stacks[0].Parameters[?ParameterKey=='PlaybackRelayPublicUrl'].ParameterValue | [0]" --output text)
+dev_function_matches=0
+for logical_id in KaevoCloudApiFunction KaevoCloudRemoteApiFunction KaevoV3ConnectorControlFunction; do
+  function_name=$(aws cloudformation describe-stack-resource --region "$REGION" \
+    --stack-name "$API_STACK" --logical-resource-id "$logical_id" \
+    --query 'StackResourceDetail.PhysicalResourceId' --output text)
+  dev_relay=$(aws lambda get-function-configuration --region "$REGION" --function-name "$function_name" \
+    --query 'Environment.Variables.PLAYBACK_RELAY_PUBLIC_URL' --output text)
+  echo "::add-mask::${dev_relay}"
+  [[ "$dev_relay" == "$relay_url" ]]
+  dev_function_matches=$((dev_function_matches + 1))
+done
 production_relay=$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$PRODUCTION_API_STACK" \
   --query "Stacks[0].Parameters[?ParameterKey=='PlaybackRelayPublicUrl'].ParameterValue | [0]" --output text)
-echo "::add-mask::${dev_relay}"
 echo "::add-mask::${production_relay}"
-[[ "$dev_relay" == "$relay_url" ]]
 [[ "$production_relay" != "$relay_url" ]]
 record development_playback_target green_lightsail
+record development_functions_verified "$dev_function_matches"
 record production_playback_target unchanged_legacy
 
 route_settings=$(aws apigatewayv2 get-stage --region "$REGION" --api-id "$http_api_id" --stage-name dev \

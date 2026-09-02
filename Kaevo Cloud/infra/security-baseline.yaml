@@ -251,6 +251,10 @@ Resources:
                   - s3:GetObject
                   - s3:PutObject
                 Resource: arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-*/kaevo-migration/*
+              - Sid: UpdateDevelopmentRelayTargets
+                Effect: Allow
+                Action: lambda:UpdateFunctionConfiguration
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:kaevo-cloud-dev-*
               - Sid: ReadKaevoDeploymentState
                 Effect: Allow
                 Action:
