@@ -68,6 +68,22 @@ jobs:
             --stack-name "${stack}" \
             --query 'StackEvents[?ResourceStatusReason!=`null`].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]' \
             --output table
+          aws cloudformation list-stack-resources \
+            --stack-name "${stack}" \
+            --query 'StackResourceSummaries[].[LogicalResourceId,ResourceType,ResourceStatus,PhysicalResourceId]' \
+            --output table
+          aws logs describe-log-groups \
+            --log-group-name-prefix '/aws/' \
+            --query "logGroups[?contains(logGroupName, 'kaevo-cloud-dev-connector-control')].[logGroupName,retentionInDays]" \
+            --output table
+          aws dynamodb describe-table \
+            --table-name kaevo-cloud-dev-connector-control-connections \
+            --query 'Table.[TableName,TableStatus]' \
+            --output table || true
+          aws sqs list-queues \
+            --queue-name-prefix kaevo-cloud-dev-connector-control \
+            --query 'QueueUrls' \
+            --output table
 
       - name: Preview and apply security baseline
         if: inputs.target == 'security-baseline'
