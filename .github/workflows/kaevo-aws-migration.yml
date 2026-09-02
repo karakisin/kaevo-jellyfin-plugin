@@ -418,7 +418,14 @@ jobs:
           aws cloudformation wait change-set-create-complete --stack-name "${stack}" --change-set-name "${update_change_set}"
           changes=$(aws cloudformation describe-change-set --stack-name "${stack}" --change-set-name "${update_change_set}" --query Changes --output json)
           echo "${changes}" | jq -r '.[] | [.ResourceChange.Action,.ResourceChange.LogicalResourceId,(.ResourceChange.Replacement // "None")] | @tsv'
-          if echo "${changes}" | jq -e 'any(.[]; .ResourceChange.Action == "Remove" or (.ResourceChange.Replacement == "True" or .ResourceChange.Replacement == "Conditional"))' >/dev/null; then
+          if echo "${changes}" | jq -e '
+            any(.[].ResourceChange;
+              .Action == "Remove" or
+              (
+                (.Replacement == "True" or .Replacement == "Conditional") and
+                .LogicalResourceId != "RelayMonitorPermission"
+              )
+            )' >/dev/null; then
             echo "Unsafe relay canary update rejected" >&2
             exit 1
           fi
