@@ -136,16 +136,21 @@ record relay_permanent_aws_credentials 0
 record relay_runtime_secret_names 2
 
 dev_function_matches=0
-for logical_id in KaevoCloudApiFunction KaevoCloudRemoteApiFunction KaevoV3ConnectorControlFunction; do
-  function_name=$(aws cloudformation describe-stack-resource --region "$REGION" \
-    --stack-name "$API_STACK" --logical-resource-id "$logical_id" \
-    --query 'StackResourceDetail.PhysicalResourceId' --output text)
+while IFS= read -r function_name; do
+  [[ -z "$function_name" ]] && continue
+  configuration=$(aws lambda get-function-configuration --region "$REGION" --function-name "$function_name" --output json)
+  if ! jq -e '(.Environment.Variables // {}) | has("PLAYBACK_RELAY_PUBLIC_URL")' <<<"$configuration" >/dev/null; then
+    continue
+  fi
   dev_relay=$(aws lambda get-function-configuration --region "$REGION" --function-name "$function_name" \
     --query 'Environment.Variables.PLAYBACK_RELAY_PUBLIC_URL' --output text)
   echo "::add-mask::${dev_relay}"
   [[ "$dev_relay" == "$relay_url" ]]
   dev_function_matches=$((dev_function_matches + 1))
-done
+done < <(aws cloudformation list-stack-resources --region "$REGION" --stack-name "$API_STACK" \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].PhysicalResourceId" \
+  --output text | tr '\t' '\n')
+[[ "$dev_function_matches" -ge 2 ]]
 production_relay=$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$PRODUCTION_API_STACK" \
   --query "Stacks[0].Parameters[?ParameterKey=='PlaybackRelayPublicUrl'].ParameterValue | [0]" --output text)
 echo "::add-mask::${production_relay}"

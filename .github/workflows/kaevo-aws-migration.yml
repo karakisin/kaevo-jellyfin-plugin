@@ -202,16 +202,14 @@ jobs:
           # integration modifications. Fail closed on that broad surface and
           # update only the three development Lambda environment maps needed
           # for the isolated validation window.
-          for logical_id in \
-            KaevoCloudApiFunction \
-            KaevoCloudRemoteApiFunction \
-            KaevoV3ConnectorControlFunction; do
-            function_name=$(aws cloudformation describe-stack-resource \
-              --stack-name "${api_stack}" \
-              --logical-resource-id "${logical_id}" \
-              --query 'StackResourceDetail.PhysicalResourceId' \
-              --output text)
+          matched_functions=0
+          while IFS= read -r function_name; do
+            [[ -z "${function_name}" ]] && continue
             configuration=$(aws lambda get-function-configuration --function-name "${function_name}" --output json)
+            if ! jq -e '(.Environment.Variables // {}) | has("PLAYBACK_RELAY_PUBLIC_URL")' <<<"${configuration}" >/dev/null; then
+              continue
+            fi
+            matched_functions=$((matched_functions + 1))
             current_url=$(jq -r '.Environment.Variables.PLAYBACK_RELAY_PUBLIC_URL // ""' <<<"${configuration}")
             echo "::add-mask::${current_url}"
             if [[ "${current_url}" != "${relay_url}" ]]; then
@@ -228,7 +226,11 @@ jobs:
               --query 'Environment.Variables.PLAYBACK_RELAY_PUBLIC_URL' \
               --output text)
             [[ "${verified_url}" == "${relay_url}" ]]
-          done
+          done < <(aws cloudformation list-stack-resources \
+            --stack-name "${api_stack}" \
+            --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].PhysicalResourceId" \
+            --output text | tr '\t' '\n')
+          [[ "${matched_functions}" -ge 2 ]]
           production_url=$(aws cloudformation describe-stacks --stack-name kaevo-cloud-production --query "Stacks[0].Parameters[?ParameterKey=='PlaybackRelayPublicUrl'].ParameterValue | [0]" --output text)
           echo "::add-mask::${production_url}"
           [[ "${production_url}" != "${relay_url}" ]]
