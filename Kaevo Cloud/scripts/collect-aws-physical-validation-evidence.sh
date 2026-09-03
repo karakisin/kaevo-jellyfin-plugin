@@ -98,7 +98,7 @@ done
 service_state=$(aws lightsail get-container-services --region "$REGION" --service-name "$RELAY_SERVICE" \
   --query 'containerServices[0].currentDeployment.state' --output text)
 service_power=$(aws lightsail get-container-services --region "$REGION" --service-name "$RELAY_SERVICE" \
-  --query 'containerServices[0].powerName' --output text)
+  --query 'containerServices[0].power' --output text)
 service_scale=$(aws lightsail get-container-services --region "$REGION" --service-name "$RELAY_SERVICE" \
   --query 'containerServices[0].scale' --output text)
 record green_relay_deployment_state "$service_state"
