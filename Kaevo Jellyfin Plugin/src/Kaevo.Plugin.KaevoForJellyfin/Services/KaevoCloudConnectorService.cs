@@ -114,6 +114,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 }
 
                 var secrets = await EnsurePairedAsync(configuration, stoppingToken).ConfigureAwait(false);
+                if (NormalizeStaleRelayConfigurationBeforeRegistration(configuration))
+                {
+                    KaevoPlugin.Instance?.SaveConfiguration();
+                }
                 ValidateConfiguration(configuration, _pairingV3Active);
                 if (string.IsNullOrWhiteSpace(secrets.JellyfinApiKey))
                 {
@@ -3691,6 +3695,30 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             throw new InvalidOperationException("cloudProfileMissing");
         }
+    }
+
+    /// <summary>
+    /// A registration response is the authority for the playback relay route.
+    /// Older or interrupted installs can persist the enablement bit without a
+    /// usable URL; fail closed for playback so that state cannot prevent the
+    /// connector from registering and receiving the current signed route.
+    /// </summary>
+    internal static bool NormalizeStaleRelayConfigurationBeforeRegistration(PluginConfiguration configuration)
+    {
+        if (!configuration.RemotePlaybackEnabled)
+        {
+            return false;
+        }
+
+        if (Uri.TryCreate(configuration.RelayWebSocketUrl, UriKind.Absolute, out var relay)
+            && relay.Scheme == "wss")
+        {
+            return false;
+        }
+
+        configuration.RemotePlaybackEnabled = false;
+        configuration.RelayWebSocketUrl = string.Empty;
+        return true;
     }
 
     private static Uri BuildLocalUri(

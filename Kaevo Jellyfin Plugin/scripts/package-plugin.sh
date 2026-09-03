@@ -47,7 +47,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Private AWS migration canary: connector-control protocol 2 WebSocket delivery, exact request claims, bounded disconnected recovery, and no connected idle polling.",
+  "changelog": "Adds a copyable signed one-time Pairing V3 link and fail-closed recovery from stale relay state before authoritative Cloud registration.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",

@@ -42,7 +42,12 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("#KaevoRepairPairing", page, StringComparison.Ordinal);
         Assert.Contains("background:rgba(8,10,13,.74) !important", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoRepairPairing:focus-visible", page, StringComparison.Ordinal);
-        Assert.Contains("Scan this signed Pairing V3 QR in Kaevo.", page, StringComparison.Ordinal);
+        Assert.Contains("Scan the QR or copy its one-time link for manual entry in Kaevo.", page, StringComparison.Ordinal);
+        Assert.Contains("id=\"KaevoCopyPairingLink\"", page, StringComparison.Ordinal);
+        Assert.Contains("Pairing Link Copied", page, StringComparison.Ordinal);
+        Assert.Contains("ticket.PairingUri || ticket.pairingUri", page, StringComparison.Ordinal);
+        Assert.Contains("clearPairingLink();", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("textContent = pairingUri", page, StringComparison.Ordinal);
         Assert.Contains("KaevoPairingCountdown", page, StringComparison.Ordinal);
         Assert.Contains("Here’s your one-time code", page, StringComparison.Ordinal);
         Assert.Contains("class=\"kaevo-card\"", page, StringComparison.Ordinal);

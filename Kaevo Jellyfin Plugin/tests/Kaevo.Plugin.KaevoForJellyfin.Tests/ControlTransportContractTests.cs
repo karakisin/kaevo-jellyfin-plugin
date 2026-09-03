@@ -1,4 +1,5 @@
 using System.Net;
+using Kaevo.Plugin.KaevoForJellyfin.Configuration;
 using Kaevo.Plugin.KaevoForJellyfin.Services;
 using Xunit;
 
@@ -6,6 +7,34 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 
 public sealed class ControlTransportContractTests
 {
+    [Fact]
+    public void StaleRelayStateCannotBlockAuthoritativeRegistrationRefresh()
+    {
+        var configuration = new PluginConfiguration
+        {
+            RemotePlaybackEnabled = true,
+            RelayWebSocketUrl = string.Empty,
+        };
+
+        Assert.True(KaevoCloudConnectorService.NormalizeStaleRelayConfigurationBeforeRegistration(configuration));
+        Assert.False(configuration.RemotePlaybackEnabled);
+        Assert.Equal(string.Empty, configuration.RelayWebSocketUrl);
+    }
+
+    [Fact]
+    public void ValidRelayStateIsPreservedUntilAuthoritativeRegistrationRefresh()
+    {
+        var configuration = new PluginConfiguration
+        {
+            RemotePlaybackEnabled = true,
+            RelayWebSocketUrl = "wss://relay.example.test",
+        };
+
+        Assert.False(KaevoCloudConnectorService.NormalizeStaleRelayConfigurationBeforeRegistration(configuration));
+        Assert.True(configuration.RemotePlaybackEnabled);
+        Assert.Equal("wss://relay.example.test", configuration.RelayWebSocketUrl);
+    }
+
     [Fact]
     public void PushProtocolUsesExactSignedClaimRoute()
     {

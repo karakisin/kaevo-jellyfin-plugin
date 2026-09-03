@@ -1,6 +1,6 @@
 # Kaevo AWS Cost and Architecture Migration
 
-Status: isolated development is routed to the low-cost relay and the private protocol-2 plugin canary is packaged; physical acceptance is in progress and remains the production gate. Production traffic and the legacy ECS/ALB relay have not been changed.
+Status: isolated development is routed to the low-cost relay; private plugin 0.3.24 is paired over protocol 2 and its control connector is online after physical manual-link acceptance. Requests and playback acceptance remain production gates. Production traffic and the legacy ECS/ALB relay have not been changed.
 
 ## Executive summary
 
@@ -92,7 +92,8 @@ Automated suites:
 
 - WebSocket/control and compatibility: 37 tests.
 - Relay security/media semantics: 32 tests.
-- Full Jellyfin plugin suite: 305 tests.
+- Full Jellyfin plugin suite: 312 tests.
+- Focused iOS Pairing V3 suite: 26 tests, including manual entry through the signed-ticket parser and explicit expiry classification.
 - SAM lint: security baseline, connector control, and Lightsail relay templates.
 - Development cloud validation: encrypted on-demand connection table with TTL; source request stream active; invalid ticket rejected; invalid WebSocket rejected; legacy route resolves to the authenticated compatibility handler; unauthenticated legacy claim rejected.
 - Relay cloud validation: Lightsail deployment `ACTIVE`; direct health 200; direct protected route 403; CloudFront health 200; CloudFront protected route reaches grant authentication and returns 401 for an invalid grant.
@@ -111,19 +112,21 @@ Preparation completed through GitHub OIDC using migration branch head `3a532ae`.
 - Detailed metrics are enabled for the exact request claim, control-ticket, legacy compatibility, and WebSocket routes. Structured access logging is active without authorization data.
 - Root access keys are zero, root MFA is enabled, temporary bootstrap delete permissions are absent from `KaevoDeploymentRole`, and the 15-minute baseline log scan found zero sensitive-field matches.
 - Baseline window `2026-09-02T23:50:53Z`–`2026-09-03T00:05:53Z`: all HTTP claim/control and WebSocket route counts were zero; WebSocket 4xx/5xx were zero; the green CloudFront distribution recorded 13 requests and 4,370 downloaded bytes from automated health/security checks.
-- Private plugin canary: version `0.3.21.0`, selected after the isolated server was observed running public version `0.3.20.0`; target ABI `10.11.0.0`; 305/305 tests passed. ZIP SHA-256: `f23c79ee33291b7127d49e2c74abecc31562b20f629ce3140a70155f4a59baf9`. Isolated-install tar SHA-256: `03a872d323efb77a6589c30e10957c4a8148dc000857f5470e852248eacf7313`.
+- Private plugin canary: version `0.3.24.0`; target ABI `10.11.0.0`; 312/312 tests passed. It adds the copyable signed one-time pairing link and fail-closed recovery when stale relay enablement has no valid URL before authoritative registration. DLL SHA-256: `1d2da08690edbdae015f0b08121484e60c8908b7c90cc895bd07f36d5f27205b`. ZIP SHA-256: `32a487c3ca985da7b1f21cc124c82012f2c3dea4ba34d587b3d6ba295b8cde4c`; Jellyfin catalog MD5: `7528076a0bfdb7d4df5b43239ad400d3`.
 - Signed iOS development build: Kaevo `4.3 (160)`, bundle `com.sumagang.kaevo`, Development backend/channel, Apple Development team profile valid through `2027-08-03`, app binary SHA-256 `776c9c587ab5bc617eb6f4edac08c6c681d0c54f16e5727475a55b79e7edb14f`. Deep strict signature verification passed. On `2026-09-02`, the exact build was installed on the paired physical iPhone SE running iOS 26.5, and the installed-app inventory reconfirmed version `4.3` and bundle version `160`. The app was not launched, and the primary iPhone 14 Pro Max was not used.
 - Redacted evidence: `/Volumes/HomeLab/AppData/Kaevo Pairing V3/BuildArtifacts/AWSMigrationPhysicalValidation/evidence-33698072484/kaevo-physical-validation-evidence.txt`.
-- Private plugin ZIP: `/Volumes/HomeLab/AppData/Kaevo Pairing V3/BuildArtifacts/AWSMigrationPhysicalValidation/Kaevo.Plugin.KaevoForJellyfin.zip`.
-- Isolated-install plugin tar: `/Volumes/HomeLab/KaevoReview/Media/.kaevo-validation/Kaevo.Plugin.KaevoForJellyfin-0.3.21.0.tar.gz`. The superseded `0.3.18.0` artifacts were preserved under `superseded/` and must not be installed.
+- Private plugin ZIP: `/Volumes/HomeLab/AppData/Kaevo Pairing V3/BuildArtifacts/AWSMigrationPhysicalValidation/private-plugin-repository/Kaevo.Plugin.KaevoForJellyfin-0.3.24.0.zip`.
+- The older isolated-install plugin tar and superseded artifacts remain preserved for rollback; they must not replace the active 0.3.24 canary.
+- Physical Owner fallback acceptance: on the designated iPhone SE running iOS 26.5, the UI test opened `Kaevo Home & Cloud`, selected `Use Pairing QR or Link`, opened `Enter Pairing Link`, submitted the signed one-time link, reviewed the matching isolated server, explicitly selected `Connect This Jellyfin Server`, observed `Jellyfin connected`, and completed with zero test failures. The primary iPhone 14 Pro Max was not used.
+- Post-install isolated health: Jellyfin `10.11.11`, Kaevo `0.3.24`, Pairing V3 state `paired`, protocol `kaevo-pairing-v3`, reauthentication not required, connector state `online`, and a heartbeat present after the observed restart. Playback relay status was still `reconnecting` with zero connected channels, so playback acceptance is not claimed.
 - Preserved signed app archive: `/Volumes/HomeLab/AppData/Kaevo Pairing V3/BuildArtifacts/AWSMigrationPhysicalValidation/Kaevo-4.3-160-Development.app.zip`, SHA-256 `61cb461f91d1f887e123fea83228abf1bd1c16257c17d99c0bb805dbc5e119ac`; extraction and deep signature re-verification passed.
 
 Physical observations are recorded only after the operator reports or the session directly observes them:
 
 | Group | Scope | Status | Evidence |
 |---|---|---|---|
-| 1 | Plugin 0.3.21 installation, isolated server identity, protocol 2 connection | In progress | Browser-confirmed isolated server `Kaevo Apple Review` on Jellyfin 10.11.11 with Kaevo 0.3.20.0 active; replacement 0.3.21.0 canary passed 305/305 tests and is staged; Kaevo 4.3 (160) installed on the isolated iPhone SE without launch; manual install and physical observations remain pending |
-| 2 | Five-minute idle, request delivery, exactly-once execution | Pending | Blocked on Group 1 |
+| 1 | Plugin 0.3.24 installation, isolated server identity, protocol 2 connection | Passed | The isolated server remained `Kaevo Apple Review` on Jellyfin 10.11.11; 0.3.24 installed and survived an observed restart; manual-link pairing completed on the physical iPhone SE; protected status reported `paired`, protocol 2, connector `online`, heartbeat present, and no reauthentication requirement |
+| 2 | Five-minute idle, request delivery, exactly-once execution | Pending | Ready for isolated Requests/Download Details validation |
 | 3 | Wi-Fi, Jellyfin/plugin restart, app background/foreground recovery | Pending | Blocked on Group 2 |
 | 4 | Direct play, HLS/transcode, seek, pause/resume, long playback | Pending | Blocked on Group 3 |
 | 5 | Relay restart, origin outage/recovery, optional concurrency, final secret scan | Pending | Blocked on Group 4 |
@@ -198,11 +201,16 @@ The migration changes below are measured from commit `34b15dc`, which preserved 
 - `Kaevo Cloud/relay/uv.lock`
 - `Kaevo Cloud/scripts/build-connector-control-artifact.sh`
 - `Kaevo Cloud/scripts/collect-aws-physical-validation-evidence.sh`
+- `Kaevo Jellyfin Plugin/docs/PAIRING_V3_PLUGIN.md`
 - `Kaevo Jellyfin Plugin/scripts/package-plugin.sh`
+- `Kaevo Jellyfin Plugin/src/Kaevo.Plugin.KaevoForJellyfin/Api/KaevoController.cs`
+- `Kaevo Jellyfin Plugin/src/Kaevo.Plugin.KaevoForJellyfin/Configuration/configPage.html`
 - `Kaevo Jellyfin Plugin/src/Kaevo.Plugin.KaevoForJellyfin/Kaevo.Plugin.KaevoForJellyfin.csproj`
+- `Kaevo Jellyfin Plugin/src/Kaevo.Plugin.KaevoForJellyfin/Models/KaevoModels.cs`
 - `Kaevo Jellyfin Plugin/src/Kaevo.Plugin.KaevoForJellyfin/Services/KaevoCloudConnectorService.cs`
 - `Kaevo Jellyfin Plugin/src/Kaevo.Plugin.KaevoForJellyfin/Services/KaevoCloudContracts.cs`
 - `Kaevo Jellyfin Plugin/tests/Kaevo.Plugin.KaevoForJellyfin.Tests/ControlTransportContractTests.cs`
+- `Kaevo Jellyfin Plugin/tests/Kaevo.Plugin.KaevoForJellyfin.Tests/PluginConfigurationPageTests.cs`
 
 ## AWS resource inventory
 

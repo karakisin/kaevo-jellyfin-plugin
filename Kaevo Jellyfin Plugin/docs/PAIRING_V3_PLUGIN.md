@@ -27,8 +27,12 @@ release the reservation. Consumed tickets are never reopened.
 
 ## V3 flow
 
-`POST /kaevo/v3/pairing/start` is elevated. It emits a QR URI whose signed
-canonical payload carries the ticket secret only to the QR recipient.
+`POST /kaevo/v3/pairing/start` is elevated. It emits a signed one-time pairing
+URI plus its QR rendering. The elevated Jellyfin page may copy that same URI
+for manual entry when a camera cannot be used; it never displays, logs, or
+persists the URI. Both entry methods feed the identical iOS parser and explicit
+Owner confirmation path. The signed canonical payload carries the ticket
+secret only to the QR or copied-link recipient.
 `POST /kaevo/v3/pairing/challenges` is anonymous and binds the challenge to a
 canonical pairing attempt and SHA-256 hash of the Pairing Authorization. The
 extra hash is required by the approved challenge transcript; the authorization
