@@ -260,21 +260,21 @@ jobs:
           with zipfile.ZipFile(path) as archive:
               meta = json.loads(archive.read("meta.json"))
               names = set(archive.namelist())
-          assert meta["version"] == "0.3.18.0"
+          assert meta["version"] == "0.3.21.0"
           assert names == {
               "BouncyCastle.Cryptography.dll",
               "Kaevo.Plugin.KaevoForJellyfin.dll",
               "QRCoder.dll",
               "meta.json",
           }
-          print("Private plugin canary 0.3.18.0 packaged with exact contents")
+          print("Private plugin canary 0.3.21.0 packaged with exact contents")
           PY
 
       - name: Upload the private protocol-2 plugin canary
         if: inputs.target == 'prepare-physical-validation'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: kaevo-plugin-0.3.18-protocol-2-${{ github.sha }}
+          name: kaevo-plugin-0.3.21-protocol-2-${{ github.sha }}
           path: Kaevo Jellyfin Plugin/artifacts/package/Kaevo.Plugin.KaevoForJellyfin.zip
           if-no-files-found: error
           retention-days: 7
