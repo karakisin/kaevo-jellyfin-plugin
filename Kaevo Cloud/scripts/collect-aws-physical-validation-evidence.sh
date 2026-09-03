@@ -184,7 +184,11 @@ aws cloudformation get-template --region "$REGION" --stack-name kaevo-security-b
   --template-stage Original --query TemplateBody --output text >"$security_template_path"
 temporary_delete_permission_count=$(grep -Ec \
   'iam:(PutRolePolicy|DeleteRolePolicy|CreatePolicyVersion|DeletePolicyVersion)' \
-  "$security_template_path" || true)
+  <(awk '
+    /^  DeploymentRole:/ {in_deployment_role=1}
+    /^  BudgetAlertTopic:/ {in_deployment_role=0}
+    in_deployment_role
+  ' "$security_template_path") || true)
 [[ "$temporary_delete_permission_count" == "0" ]]
 record temporary_bootstrap_delete_permissions "$temporary_delete_permission_count"
 
