@@ -1,6 +1,6 @@
 # Kaevo AWS Cost and Architecture Migration
 
-Status: development control plane and low-cost relay canary deployed and automatically validated; physical playback acceptance remains the production gate. Production traffic and the legacy ECS/ALB relay have not been changed.
+Status: isolated development is routed to the low-cost relay and the private protocol-2 plugin canary is packaged; physical acceptance is in progress and remains the production gate. Production traffic and the legacy ECS/ALB relay have not been changed.
 
 ## Executive summary
 
@@ -91,13 +91,41 @@ No existing secret is eligible for deletion before production cutover because ro
 Automated suites:
 
 - WebSocket/control and compatibility: 37 tests.
-- Relay security/media semantics: 31 tests.
+- Relay security/media semantics: 32 tests.
 - Full Jellyfin plugin suite: 305 tests.
 - SAM lint: security baseline, connector control, and Lightsail relay templates.
 - Development cloud validation: encrypted on-demand connection table with TTL; source request stream active; invalid ticket rejected; invalid WebSocket rejected; legacy route resolves to the authenticated compatibility handler; unauthenticated legacy claim rejected.
 - Relay cloud validation: Lightsail deployment `ACTIVE`; direct health 200; direct protected route 403; CloudFront health 200; CloudFront protected route reaches grant authentication and returns 401 for an invalid grant.
 
 The suites cover ticket expiry/replay/binding isolation, duplicate notifications and claims, stale connections, disconnected recovery, zero polling while connected, compatibility enforcement, secret-free logs, grant rejection, HTTP range responses, HLS paths, WebSocket authentication, origin authentication, and graceful upstream failure. Simulated tests do not substitute for physical iPhone playback.
+
+### Development physical-validation preparation
+
+Preparation completed through GitHub OIDC using migration branch head `3a532ae`. The relevant successful runs are relay deployment `33696082724`, development connector-control deployment `33696460589`, security baseline `33697110350`, development routing/private plugin build `33697435328`, and the final read-only evidence snapshot `33698072484`.
+
+- The green relay is `ACTIVE`, uses Lightsail `nano` power at scale one, returns 200 through both direct health and CloudFront health checks, rejects a direct protected request with 403, and rejects an invalid edge grant with 401.
+- CloudFront redirects viewers to HTTPS, uses an `https-only` origin, and negotiates TLS 1.2 to the origin.
+- The running relay exposes only the two expected runtime secret names and no permanent AWS credential environment names.
+- Two actually deployed development Lambda functions containing `PLAYBACK_RELAY_PUBLIC_URL` were updated and verified against green. A SAM parameter-only change set was not executed because its preview included unrelated API integrations and a conditional permission replacement. The development stack parameter therefore remains intentionally unchanged; a future full development stack update can overwrite this temporary validation routing and must not run during the physical window.
+- Production still points to the legacy relay. The legacy relay stack remains `UPDATE_COMPLETE`; no production cutover or decommission target ran.
+- Detailed metrics are enabled for the exact request claim, control-ticket, legacy compatibility, and WebSocket routes. Structured access logging is active without authorization data.
+- Root access keys are zero, root MFA is enabled, temporary bootstrap delete permissions are absent from `KaevoDeploymentRole`, and the 15-minute baseline log scan found zero sensitive-field matches.
+- Baseline window `2026-09-02T23:50:53Z`–`2026-09-03T00:05:53Z`: all HTTP claim/control and WebSocket route counts were zero; WebSocket 4xx/5xx were zero; the green CloudFront distribution recorded 13 requests and 4,370 downloaded bytes from automated health/security checks.
+- Private plugin canary: version `0.3.18.0`, target ABI `10.11.0.0`, 305/305 tests passed, SHA-256 `6fda5d98c5bbcdfdd58e4c43731704aff05a0649de69baa4580d0afca6a6af5a`.
+- Signed iOS development build: Kaevo `4.3 (160)`, bundle `com.sumagang.kaevo`, Development backend/channel, Apple Development team profile valid through `2027-08-03`, app binary SHA-256 `776c9c587ab5bc617eb6f4edac08c6c681d0c54f16e5727475a55b79e7edb14f`. Deep strict signature verification passed. Installation is pending because the isolated iPhone SE is paired with Developer Mode enabled but remains locked; the primary iPhone 14 Pro Max was not used.
+- Redacted evidence: `/Volumes/HomeLab/AppData/Kaevo Pairing V3/BuildArtifacts/AWSMigrationPhysicalValidation/evidence-33698072484/kaevo-physical-validation-evidence.txt`.
+- Private plugin ZIP: `/Volumes/HomeLab/AppData/Kaevo Pairing V3/BuildArtifacts/AWSMigrationPhysicalValidation/Kaevo.Plugin.KaevoForJellyfin.zip`.
+- Preserved signed app archive: `/Volumes/HomeLab/AppData/Kaevo Pairing V3/BuildArtifacts/AWSMigrationPhysicalValidation/Kaevo-4.3-160-Development.app.zip`, SHA-256 `61cb461f91d1f887e123fea83228abf1bd1c16257c17d99c0bb805dbc5e119ac`; extraction and deep signature re-verification passed.
+
+Physical observations are recorded only after the operator reports or the session directly observes them:
+
+| Group | Scope | Status | Evidence |
+|---|---|---|---|
+| 1 | Plugin 0.3.18 installation, isolated server identity, protocol 2 connection | Pending | Awaiting physical/operator actions |
+| 2 | Five-minute idle, request delivery, exactly-once execution | Pending | Blocked on Group 1 |
+| 3 | Wi-Fi, Jellyfin/plugin restart, app background/foreground recovery | Pending | Blocked on Group 2 |
+| 4 | Direct play, HLS/transcode, seek, pause/resume, long playback | Pending | Blocked on Group 3 |
+| 5 | Relay restart, origin outage/recovery, optional concurrency, final secret scan | Pending | Blocked on Group 4 |
 
 ## Physical canary checklist
 
@@ -164,8 +192,13 @@ The migration changes below are measured from commit `34b15dc`, which preserved 
 - `Kaevo Cloud/infra/security-baseline.yaml`
 - `Kaevo Cloud/infra/template.yaml`
 - `Kaevo Cloud/relay/kaevo_relay/app.py`
+- `Kaevo Cloud/relay/pyproject.toml`
 - `Kaevo Cloud/relay/tests/test_relay_security.py`
+- `Kaevo Cloud/relay/uv.lock`
 - `Kaevo Cloud/scripts/build-connector-control-artifact.sh`
+- `Kaevo Cloud/scripts/collect-aws-physical-validation-evidence.sh`
+- `Kaevo Jellyfin Plugin/scripts/package-plugin.sh`
+- `Kaevo Jellyfin Plugin/src/Kaevo.Plugin.KaevoForJellyfin/Kaevo.Plugin.KaevoForJellyfin.csproj`
 - `Kaevo Jellyfin Plugin/src/Kaevo.Plugin.KaevoForJellyfin/Services/KaevoCloudConnectorService.cs`
 - `Kaevo Jellyfin Plugin/src/Kaevo.Plugin.KaevoForJellyfin/Services/KaevoCloudContracts.cs`
 - `Kaevo Jellyfin Plugin/tests/Kaevo.Plugin.KaevoForJellyfin.Tests/ControlTransportContractTests.cs`
