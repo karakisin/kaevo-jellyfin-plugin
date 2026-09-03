@@ -1,6 +1,6 @@
 # Kaevo AWS Cost and Architecture Migration
 
-Status: isolated development is routed to the low-cost relay; private plugin 0.3.24 is paired over protocol 2 and its control connector is online after physical manual-link acceptance. Requests and playback acceptance remain production gates. Production traffic and the legacy ECS/ALB relay have not been changed.
+Status: isolated development is routed to the low-cost relay; private plugin 0.3.24 is paired over protocol 2 and its control connector is online after physical manual-link acceptance. Requests and playback acceptance remain production gates. Reproducible iOS build 161 is blocked by a pre-existing clean-commit compile defect and the absence of an iOS Git remote. Production traffic and the legacy ECS/ALB relay have not been changed.
 
 ## Executive summary
 
@@ -120,6 +120,17 @@ Preparation completed through GitHub OIDC using migration branch head `3a532ae`.
 - Physical Owner fallback acceptance: on the designated iPhone SE running iOS 26.5, the UI test opened `Kaevo Home & Cloud`, selected `Use Pairing QR or Link`, opened `Enter Pairing Link`, submitted the signed one-time link, reviewed the matching isolated server, explicitly selected `Connect This Jellyfin Server`, observed `Jellyfin connected`, and completed with zero test failures. The primary iPhone 14 Pro Max was not used.
 - Post-install isolated health: Jellyfin `10.11.11`, Kaevo `0.3.24`, Pairing V3 state `paired`, protocol `kaevo-pairing-v3`, reauthentication not required, connector state `online`, and a heartbeat present after the observed restart. Playback relay status was still `reconnecting` with zero connected channels, so playback acceptance is not claimed.
 - Preserved signed app archive: `/Volumes/HomeLab/AppData/Kaevo Pairing V3/BuildArtifacts/AWSMigrationPhysicalValidation/Kaevo-4.3-160-Development.app.zip`, SHA-256 `61cb461f91d1f887e123fea83228abf1bd1c16257c17d99c0bb805dbc5e119ac`; extraction and deep signature re-verification passed.
+
+### 2026-09-03 continuation and reproducibility checkpoint
+
+- A fresh read-only OIDC snapshot run, GitHub Actions run `33792282548`, completed successfully from migration branch `72fdd7a`. All deployment, cutover, and decommission targets were skipped.
+- Snapshot window `2026-09-03T18:28:36Z`–`2026-09-03T18:43:36Z`: the control, green relay, and legacy relay stacks were `UPDATE_COMPLETE`; green was `ACTIVE`, Lightsail `nano`, scale one; direct health returned 200, direct protected access returned 403, CloudFront health returned 200, and an invalid grant returned 401. Sensitive-log matches and permanent relay AWS credential names were zero.
+- The development playback target remained green and the production playback target remained legacy. Green is CloudFront distribution `E20YVNV4X2YVRD` (`d1kflwvshnfrv7.cloudfront.net`) with an `https-only` Lightsail origin. Rollback remains CloudFront distribution `EYVBMBTXQMWO7` (`d2my6r0wbl8u0h.cloudfront.net`) with the preserved legacy ALB origin. Both distributions remained deployed and enabled.
+- During the same 15-minute window, legacy collection claims, exact claims, control tickets, WebSocket connect/disconnect/ping/recover routes, and WebSocket 4xx/5xx each recorded zero requests. The green distribution recorded 88 requests and 32,712 downloaded bytes. This is a clean baseline, not the required five-minute connected-plugin zero-polling acceptance.
+- A fresh read-only check of the isolated server confirmed `Kaevo Apple Review`, Jellyfin `10.11.11`, Kaevo plugin `0.3.24.0` active, and the configuration UI reporting `Kaevo App Connected`. This does not replace protected protocol/heartbeat evidence or physical Requests/playback acceptance.
+- The exact five-file manual-link slice was isolated into clean iOS branch `migration/aws-cost-ios-repro-20260903` at local commit `bfc40f2` (`141` insertions, `25` deletions). `git diff --check` and the credential/path scan passed. No iOS Git remote is configured or discoverable, so this commit has not been pushed.
+- The focused Pairing V3 test command used the clean commit, Xcode 26.6, Debug configuration, and the designated no-retention iOS 26.5 simulator. Compilation failed before any test ran because the clean base references `KaevoLibraryBrowsingSession.scrollOffset` from `KaevoTabRootView.swift`, while the corresponding stored property was never committed to `LibraryScreen.swift`. The result bundle reports two build errors, zero executed tests, and must not be represented as a test failure in the five-file manual-link slice.
+- Build 161 has not been produced, signed, installed, or launched. The next reproducible command can supply `MARKETING_VERSION=4.3` and `CURRENT_PROJECT_VERSION=161` without committing unrelated project-file changes, but it remains blocked until the one-line base compile prerequisite is separately authorized and committed.
 
 Physical observations are recorded only after the operator reports or the session directly observes them:
 
