@@ -9,7 +9,8 @@ public static class KaevoCloudEndpointPolicy
 
     public static bool TryNormalize(string? value, out Uri uri)
     {
-        var environment = NormalizeEnvironment(
+        var environment = ResolveEnvironment(
+            KaevoPlugin.Instance?.Configuration.CloudEnvironment,
             Environment.GetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT"));
         if (Uri.TryCreate(value?.Trim().TrimEnd('/'), UriKind.Absolute, out var parsed)
             && string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
@@ -64,6 +65,20 @@ public static class KaevoCloudEndpointPolicy
             "security-stage" => "security-stage",
             _ => "invalid"
         };
+    }
+
+    internal static string ResolveEnvironment(string? configuredEnvironment, string? processEnvironment)
+    {
+        var configured = configuredEnvironment?.Trim();
+        var process = processEnvironment?.Trim();
+        if (!string.IsNullOrEmpty(configured) && !string.IsNullOrEmpty(process))
+        {
+            var normalizedConfigured = NormalizeEnvironment(configured);
+            var normalizedProcess = NormalizeEnvironment(process);
+            return normalizedConfigured == normalizedProcess ? normalizedConfigured : "invalid";
+        }
+
+        return NormalizeEnvironment(!string.IsNullOrEmpty(configured) ? configured : process);
     }
 
     private static bool HostMatches(string endpoint, string host)

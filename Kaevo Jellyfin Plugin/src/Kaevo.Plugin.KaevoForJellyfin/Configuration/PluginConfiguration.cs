@@ -8,6 +8,11 @@ public sealed class PluginConfiguration : BasePluginConfiguration
 
     public bool CloudConnectorEnabled { get; set; }
 
+    // Explicit deployment binding for isolated validation servers. Empty keeps
+    // the process-level/default production binding. Only the endpoint-policy
+    // allowlist consumes this value; it is not an arbitrary host override.
+    public string CloudEnvironment { get; set; } = string.Empty;
+
     public string CloudBaseUrl { get; set; } = string.Empty;
 
     public string RelayWebSocketUrl { get; set; } = string.Empty;

@@ -91,6 +91,22 @@ public sealed class CloudActivationValidatorTests
         }
     }
 
+    [Theory]
+    [InlineData("development", null, "development")]
+    [InlineData("internal-qa", "dev", "development")]
+    [InlineData("", "security-stage", "security-stage")]
+    [InlineData("development", "production", "invalid")]
+    [InlineData("unexpected", null, "invalid")]
+    public void ExplicitServerBindingAndProcessBindingMustAgree(
+        string configuredEnvironment,
+        string? processEnvironment,
+        string expected)
+    {
+        Assert.Equal(expected, KaevoCloudEndpointPolicy.ResolveEnvironment(
+            configuredEnvironment,
+            processEnvironment));
+    }
+
     [Fact]
     public void MalformedPairingMaterialIsRejected()
     {
