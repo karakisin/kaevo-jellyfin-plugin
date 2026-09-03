@@ -33,17 +33,30 @@ metric_sum() {
   local namespace="$1"
   local metric="$2"
   local region="$3"
-  shift 3
+  local dimensions="$4"
   aws cloudwatch get-metric-statistics \
     --region "$region" \
     --namespace "$namespace" \
     --metric-name "$metric" \
-    --dimensions "$@" \
+    --dimensions "$dimensions" \
     --start-time "$METRIC_START" \
     --end-time "$METRIC_END" \
     --period 60 \
     --statistics Sum \
     --output json | jq -r '[.Datapoints[].Sum] | add // 0'
+}
+
+api_dimensions() {
+  local api_id="$1"
+  local stage="$2"
+  local route="${3:-}"
+  if [[ -n "$route" ]]; then
+    jq -cn --arg api "$api_id" --arg stage "$stage" --arg route "$route" \
+      '[{Name:"ApiId",Value:$api},{Name:"Stage",Value:$stage},{Name:"Route",Value:$route}]'
+  else
+    jq -cn --arg api "$api_id" --arg stage "$stage" \
+      '[{Name:"ApiId",Value:$api},{Name:"Stage",Value:$stage}]'
+  fi
 }
 
 assert_safe_log_file() {
@@ -196,17 +209,19 @@ METRIC_END=$(date -u -d '90 seconds ago' '+%Y-%m-%dT%H:%M:%SZ')
 METRIC_START=$(date -u -d '990 seconds ago' '+%Y-%m-%dT%H:%M:%SZ')
 record metric_window_start "$METRIC_START"
 record metric_window_end "$METRIC_END"
-record http_legacy_collection_claim_count "$(metric_sum AWS/ApiGateway Count "$REGION" Name=ApiId,Value="$http_api_id" Name=Stage,Value=dev Name=Route,Value='POST /v3/remote-requests/claim')"
-record http_exact_claim_count "$(metric_sum AWS/ApiGateway Count "$REGION" Name=ApiId,Value="$http_api_id" Name=Stage,Value=dev Name=Route,Value='POST /v3/remote-requests/{requestId}/claim')"
-record http_control_ticket_count "$(metric_sum AWS/ApiGateway Count "$REGION" Name=ApiId,Value="$http_api_id" Name=Stage,Value=dev Name=Route,Value='POST /v3/home-connectors/{connectorId}/control-ticket')"
-record websocket_connect_count "$(metric_sum AWS/ApiGateway Count "$REGION" Name=ApiId,Value="$websocket_api_id" Name=Stage,Value=dev Name=Route,Value='$connect')"
-record websocket_disconnect_count "$(metric_sum AWS/ApiGateway Count "$REGION" Name=ApiId,Value="$websocket_api_id" Name=Stage,Value=dev Name=Route,Value='$disconnect')"
-record websocket_ping_count "$(metric_sum AWS/ApiGateway Count "$REGION" Name=ApiId,Value="$websocket_api_id" Name=Stage,Value=dev Name=Route,Value=ping)"
-record websocket_recover_count "$(metric_sum AWS/ApiGateway Count "$REGION" Name=ApiId,Value="$websocket_api_id" Name=Stage,Value=dev Name=Route,Value=recover)"
-record websocket_4xx_count "$(metric_sum AWS/ApiGateway 4XXError "$REGION" Name=ApiId,Value="$websocket_api_id" Name=Stage,Value=dev)"
-record websocket_5xx_count "$(metric_sum AWS/ApiGateway 5XXError "$REGION" Name=ApiId,Value="$websocket_api_id" Name=Stage,Value=dev)"
-record cloudfront_request_count "$(metric_sum AWS/CloudFront Requests us-east-1 Name=DistributionId,Value="$distribution_id" Name=Region,Value=Global)"
-record cloudfront_bytes_downloaded "$(metric_sum AWS/CloudFront BytesDownloaded us-east-1 Name=DistributionId,Value="$distribution_id" Name=Region,Value=Global)"
+record http_legacy_collection_claim_count "$(metric_sum AWS/ApiGateway Count "$REGION" "$(api_dimensions "$http_api_id" dev 'POST /v3/remote-requests/claim')")"
+record http_exact_claim_count "$(metric_sum AWS/ApiGateway Count "$REGION" "$(api_dimensions "$http_api_id" dev 'POST /v3/remote-requests/{requestId}/claim')")"
+record http_control_ticket_count "$(metric_sum AWS/ApiGateway Count "$REGION" "$(api_dimensions "$http_api_id" dev 'POST /v3/home-connectors/{connectorId}/control-ticket')")"
+record websocket_connect_count "$(metric_sum AWS/ApiGateway Count "$REGION" "$(api_dimensions "$websocket_api_id" dev '$connect')")"
+record websocket_disconnect_count "$(metric_sum AWS/ApiGateway Count "$REGION" "$(api_dimensions "$websocket_api_id" dev '$disconnect')")"
+record websocket_ping_count "$(metric_sum AWS/ApiGateway Count "$REGION" "$(api_dimensions "$websocket_api_id" dev ping)")"
+record websocket_recover_count "$(metric_sum AWS/ApiGateway Count "$REGION" "$(api_dimensions "$websocket_api_id" dev recover)")"
+record websocket_4xx_count "$(metric_sum AWS/ApiGateway 4XXError "$REGION" "$(api_dimensions "$websocket_api_id" dev)")"
+record websocket_5xx_count "$(metric_sum AWS/ApiGateway 5XXError "$REGION" "$(api_dimensions "$websocket_api_id" dev)")"
+cloudfront_dimensions=$(jq -cn --arg distribution "$distribution_id" \
+  '[{Name:"DistributionId",Value:$distribution},{Name:"Region",Value:"Global"}]')
+record cloudfront_request_count "$(metric_sum AWS/CloudFront Requests us-east-1 "$cloudfront_dimensions")"
+record cloudfront_bytes_downloaded "$(metric_sum AWS/CloudFront BytesDownloaded us-east-1 "$cloudfront_dimensions")"
 
 start_ms=$(python3 -c 'import datetime,sys; print(int(datetime.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")).timestamp()*1000))' "$METRIC_START")
 log_files=()
