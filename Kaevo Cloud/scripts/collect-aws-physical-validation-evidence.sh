@@ -179,13 +179,12 @@ root_mfa=$(aws iam get-account-summary --query 'SummaryMap.AccountMFAEnabled' --
 record root_access_keys "$root_keys"
 record root_mfa_enabled "$root_mfa"
 
-security_template=$(aws cloudformation get-template --region "$REGION" --stack-name kaevo-security-baseline \
-  --template-stage Original --query TemplateBody --output json)
-temporary_delete_permission_count=$(jq '[
-  .Resources.DeploymentRole.Properties.Policies[].PolicyDocument.Statement[].Action
-  | (if type == "array" then .[] else . end)
-  | select(. == "iam:PutRolePolicy" or . == "iam:DeleteRolePolicy" or . == "iam:CreatePolicyVersion" or . == "iam:DeletePolicyVersion")
-] | length' <<<"$security_template")
+security_template_path=/tmp/kaevo-security-baseline-original.yaml
+aws cloudformation get-template --region "$REGION" --stack-name kaevo-security-baseline \
+  --template-stage Original --query TemplateBody --output text >"$security_template_path"
+temporary_delete_permission_count=$(grep -Ec \
+  'iam:(PutRolePolicy|DeleteRolePolicy|CreatePolicyVersion|DeletePolicyVersion)' \
+  "$security_template_path" || true)
 [[ "$temporary_delete_permission_count" == "0" ]]
 record temporary_bootstrap_delete_permissions "$temporary_delete_permission_count"
 
