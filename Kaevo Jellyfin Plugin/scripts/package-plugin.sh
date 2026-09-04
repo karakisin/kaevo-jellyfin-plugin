@@ -47,7 +47,7 @@ cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
 cat > "$PLUGIN_DIR/meta.json" <<EOF
 {
   "category": "General",
-  "changelog": "Adds a copyable signed one-time Pairing V3 link and fail-closed recovery from stale relay state before authoritative Cloud registration.",
+  "changelog": "Restores exact-profile Cloud playback reporting on Jellyfin 10.11 without changing profile authority or playback security.",
   "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
   "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
   "name": "Kaevo",

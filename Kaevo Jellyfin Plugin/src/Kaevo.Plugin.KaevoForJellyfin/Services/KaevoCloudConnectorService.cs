@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -1656,13 +1657,16 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var user = _userManager.GetUserById(Guid.ParseExact(playback.JellyfinUserId, "N"));
+        var user = ResolveJellyfinUserAtRuntime(
+            _userManager,
+            Guid.ParseExact(playback.JellyfinUserId, "N"));
         if (user is null)
         {
             throw new InvalidOperationException("profileJellyfinBindingMissing");
         }
 
-        var session = await _sessionManager.LogSessionActivity(
+        var sessionId = await LogJellyfinSessionActivityAtRuntimeAsync(
+            _sessionManager,
             "Kaevo",
             PluginVersion,
             playback.DeviceId,
@@ -1672,7 +1676,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var playMethod = _transcodeManager.GetTranscodingJob(playback.PlaySessionId) is null
             ? PlayMethod.DirectPlay
             : PlayMethod.Transcode;
-        var info = BuildPlaybackInfo(playback, session.Id, playMethod);
+        var info = BuildPlaybackInfo(playback, sessionId, playMethod);
         switch (info)
         {
             case PlaybackStartInfo start:
@@ -1685,6 +1689,80 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 await _sessionManager.OnPlaybackStopped(stopped).ConfigureAwait(false);
                 break;
         }
+    }
+
+    /// <summary>
+    /// Resolves the exact bound Jellyfin user through the runtime implementation.
+    /// Jellyfin 10.11 moved its User entity to a new assembly/namespace while the
+    /// plugin remains net8-compatible against the 10.10 controller contract. A
+    /// direct interface call therefore carries the retired return-type identity.
+    /// The Guid remains the sole authority; reflection only bridges that binary
+    /// type move and cannot select a different user.
+    /// </summary>
+    internal static object? ResolveJellyfinUserAtRuntime(object userManager, Guid userId)
+    {
+        var method = userManager.GetType().GetMethod(
+            "GetUserById",
+            BindingFlags.Instance | BindingFlags.Public,
+            binder: null,
+            types: [typeof(Guid)],
+            modifiers: null);
+        if (method is null)
+        {
+            throw new InvalidOperationException("jellyfinSessionCompatibilityUnavailable");
+        }
+
+        return method.Invoke(userManager, [userId]);
+    }
+
+    /// <summary>
+    /// Opens the playback-reporting session using the runtime User type resolved
+    /// above. The remaining SessionInfo and playback DTO contracts are stable
+    /// across Jellyfin 10.10 and 10.11 and continue through their typed paths.
+    /// </summary>
+    internal static async Task<string> LogJellyfinSessionActivityAtRuntimeAsync(
+        object sessionManager,
+        string appName,
+        string appVersion,
+        string deviceId,
+        string deviceName,
+        string remoteEndPoint,
+        object user)
+    {
+        var method = sessionManager.GetType()
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .SingleOrDefault(candidate =>
+            {
+                if (!string.Equals(candidate.Name, "LogSessionActivity", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var parameters = candidate.GetParameters();
+                return parameters.Length == 6
+                    && parameters.Take(5).All(parameter => parameter.ParameterType == typeof(string))
+                    && parameters[5].ParameterType.IsInstanceOfType(user);
+            });
+        if (method is null
+            || method.Invoke(
+                sessionManager,
+                [appName, appVersion, deviceId, deviceName, remoteEndPoint, user])
+                is not Task sessionTask)
+        {
+            throw new InvalidOperationException("jellyfinSessionCompatibilityUnavailable");
+        }
+
+        await sessionTask.ConfigureAwait(false);
+        var session = sessionTask.GetType().GetProperty("Result", BindingFlags.Instance | BindingFlags.Public)
+            ?.GetValue(sessionTask);
+        var sessionId = session?.GetType().GetProperty("Id", BindingFlags.Instance | BindingFlags.Public)
+            ?.GetValue(session) as string;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new InvalidOperationException("jellyfinSessionCompatibilityUnavailable");
+        }
+
+        return sessionId;
     }
 
     internal static string RecoverExactProfileJellyfinUserId(

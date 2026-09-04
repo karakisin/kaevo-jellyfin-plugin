@@ -369,6 +369,32 @@ public sealed class RelayRequestContextTests
     }
 
     [Fact]
+    public async Task PlaybackSessionRuntimeBridgePreservesExactUserIdentity()
+    {
+        var userId = Guid.ParseExact("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "N");
+        var userManager = new RuntimeUserManager(userId);
+        var user = KaevoCloudConnectorService.ResolveJellyfinUserAtRuntime(
+            userManager,
+            userId);
+
+        var exactUser = Assert.IsType<RuntimeUser>(user);
+        Assert.Equal(userId, exactUser.Id);
+
+        var sessionManager = new RuntimeSessionManager();
+        var sessionId = await KaevoCloudConnectorService.LogJellyfinSessionActivityAtRuntimeAsync(
+            sessionManager,
+            "Kaevo",
+            "0.3.25",
+            "device-1",
+            "Kaevo iOS",
+            "127.0.0.1",
+            exactUser);
+
+        Assert.Equal("runtime-session", sessionId);
+        Assert.Same(exactUser, sessionManager.ObservedUser);
+    }
+
+    [Fact]
     public void PlaybackNeverFallsBackToConnectorOwnerBinding()
     {
         var configuration = new PluginConfiguration
@@ -489,4 +515,31 @@ public sealed class RelayRequestContextTests
         Assert.True(await context.WaitForBodyAcknowledgementAsync(TimeSpan.FromMilliseconds(100)));
         Assert.False(await context.WaitForBodyAcknowledgementAsync(TimeSpan.FromMilliseconds(20)));
     }
+
+    private sealed record RuntimeUser(Guid Id);
+
+    private sealed class RuntimeUserManager(Guid userId)
+    {
+        public RuntimeUser? GetUserById(Guid requestedUserId)
+            => requestedUserId == userId ? new RuntimeUser(requestedUserId) : null;
+    }
+
+    private sealed class RuntimeSessionManager
+    {
+        public RuntimeUser? ObservedUser { get; private set; }
+
+        public Task<RuntimeSession> LogSessionActivity(
+            string appName,
+            string appVersion,
+            string deviceId,
+            string deviceName,
+            string remoteEndPoint,
+            RuntimeUser user)
+        {
+            ObservedUser = user;
+            return Task.FromResult(new RuntimeSession("runtime-session"));
+        }
+    }
+
+    private sealed record RuntimeSession(string Id);
 }
