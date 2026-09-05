@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.25.0",
+        "changelog": "Adds signed protocol-2 connector-control push for Cloud provider operations and restores exact-profile playback reporting on Jellyfin 10.11 without changing profile authority or playback security.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.25/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "df48330f4504db9407d000b602b04ff0",
+        "timestamp": "2026-09-05T00:25:30Z"
+      },
+      {
         "version": "0.3.20.0",
         "changelog": "Completes clean Pairing V3 setup by provisioning a dedicated local Jellyfin API key for connector registration and heartbeat without sending the key to Kaevo Cloud.",
         "targetAbi": "10.11.0.0",
