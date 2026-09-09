@@ -21,6 +21,13 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
     private static string PluginVersion => KaevoPlugin.BuildVersion;
+    internal static string[] ConnectorCapabilities => new[]
+                {
+                    "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1", "download_controls_v1",
+                    "playback_tunnel_v1", "direct_play", "hls_remux", "hls_transcode",
+                    "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
+                    "local_provider_configuration_v1", "connector_control_push_v2"
+                };
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
@@ -309,13 +316,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 connector_name = "Kaevo Jellyfin Plugin",
                 host_type = "jellyfin_plugin",
                 app_version = PluginVersion,
-                capabilities = new[]
-                {
-                    "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1", "download_controls_v1",
-                    "playback_tunnel_v1", "direct_play", "hls_remux", "hls_transcode",
-                    "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
-                    "local_provider_configuration_v1", "connector_control_push_v2"
-                },
+                capabilities = ConnectorCapabilities,
                 provider_status = BuildProviderStatus(secrets, configuration, includeOptimizer: false)
             },
             cancellationToken).ConfigureAwait(false);
@@ -540,16 +541,26 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             secrets,
             HttpMethod.Post,
             $"/v1/home-connectors/{Uri.EscapeDataString(runtimeConfiguration.ConnectorId)}/heartbeat",
-            new
-            {
-                connector_id = runtimeConfiguration.ConnectorId,
-                profile_id = ProfileIdForCloud(runtimeConfiguration.ProfileId, _pairingV3Active),
-                provider_status = BuildProviderStatus(secrets, runtimeConfiguration, includeOptimizer: true)
-            },
+            HeartbeatBody(runtimeConfiguration.ConnectorId,
+                ProfileIdForCloud(runtimeConfiguration.ProfileId, _pairingV3Active),
+                BuildProviderStatus(secrets, runtimeConfiguration, includeOptimizer: true)),
             cancellationToken).ConfigureAwait(false);
         ApplyPlaybackConfiguration(runtimeConfiguration, response.Playback);
         _state.Set("online", heartbeat: true);
     }
+
+    // Firebase starts with a heartbeat rather than AWS registration. Publish
+    // the running binary's capabilities on that signed request as well.
+    internal static object HeartbeatBody(string connectorId, string profileId, object providerStatus) => new
+    {
+        connector_id = connectorId,
+        profile_id = profileId,
+        connector_name = "Kaevo Jellyfin Plugin",
+        host_type = "jellyfin_plugin",
+        app_version = PluginVersion,
+        capabilities = ConnectorCapabilities,
+        provider_status = providerStatus
+    };
 
     private static void ApplyPlaybackConfiguration(
         PluginConfiguration configuration,
