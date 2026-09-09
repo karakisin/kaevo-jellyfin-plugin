@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.33.0",
+        "changelog": "Add confirmed Pause Cloud Connection with saved pairing and protected admin access. Reuse existing Trickplay metadata during playback preparation. Handoff preparation only: installing does not switch to Firebase or activate its preview.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.33/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "c222e4c3051332042fbaa2cbd71bc211",
+        "timestamp": "2026-09-09T07:05:00Z"
+      },
+      {
         "version": "0.3.32.0",
         "changelog": "Prefer compatible Apple Direct Play and remux before video conversion with regular Kaevo build 158+. Preserve bitrate and codec limits; add explicit protected transcode fallback. Physical playback selection and speed need verification.",
         "targetAbi": "10.11.0.0",
