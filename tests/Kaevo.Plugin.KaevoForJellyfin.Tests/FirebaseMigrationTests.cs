@@ -33,6 +33,19 @@ public sealed class FirebaseMigrationTests : IDisposable
     };
     KaevoFirebaseMigrationJournal Validate(JsonObject payload) => KaevoPairingV3Service.ValidateFirebaseMigration(
         JsonSerializer.SerializeToElement(payload), before, "https://old.example", "old-profile", "{}", User, id=>id==User);
+    public sealed class Jellyfin11Users
+    {
+        public IEnumerable<Guid> GetUsersIds() => new[] { Guid.ParseExact(User,"N") };
+    }
+    [Fact] public void TransferValidatesJellyfin11UserIdsWithoutLegacyUsersProperty()
+    {
+        var manager=new Jellyfin11Users();
+        Assert.Null(manager.GetType().GetProperty("Users"));
+        var result=KaevoPairingV3Service.ValidateFirebaseMigration(JsonSerializer.SerializeToElement(Payload()),
+            before,"https://old.example","old-profile","{}",User,
+            id=>Guid.TryParseExact(id,"N",out var value)&&KaevoJellyfinUserLookup.Exists(manager,value));
+        Assert.Equal(User,result.JellyfinUserId);
+    }
     [Fact] public void ExactTransferPreservesKeyAndPairingProvenance()
     {
         var result=Validate(Payload());

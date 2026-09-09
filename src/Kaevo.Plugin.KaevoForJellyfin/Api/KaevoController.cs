@@ -185,9 +185,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         bool UserExists(string id)
         {
             if (!Guid.TryParseExact(id, "N", out var expected)) return false;
-            // Preserve compatibility with Jellyfin 10.11's moved User type.
-            var users = _userManager.GetType().GetProperty("Users")?.GetValue(_userManager) as IEnumerable;
-            return users?.Cast<object>().Count(u => u.GetType().GetProperty("Id")?.GetValue(u) is Guid actual && actual == expected) == 1;
+            return KaevoJellyfinUserLookup.Exists(_userManager, expected);
         }
         try
         {
