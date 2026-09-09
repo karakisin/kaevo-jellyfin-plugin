@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.27.0",
+        "changelog": "Fixes QR repair when an older paired configuration has the approved development Cloud URL but no saved environment field. Preserves explicit environment restrictions and existing pairing. Firebase activation and Home/playback verification remain pending.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.27/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "0bbb0dac3e00832849f7d0d4a2e89179",
+        "timestamp": "2026-09-09T02:42:21Z"
+      },
+      {
         "version": "0.3.26.0",
         "changelog": "Adds guarded Firebase control and relay support with required dependencies. Existing AWS pairing is retained. Installation does not activate Firebase; migration activation and the reported Home connection failure remain pending verification.",
         "targetAbi": "10.11.0.0",
