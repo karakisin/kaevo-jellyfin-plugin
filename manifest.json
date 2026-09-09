@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.35.0",
+        "changelog": "Fix Firebase preparation on Jellyfin 10.11 by using its supported user-ID lookup. Preserves exact identity checks, pairing and paused state. Does not activate Firebase playback.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.35/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "582a8cd10d04ba7c2122ffbaa00c1253",
+        "timestamp": "2026-09-09T20:13:00Z"
+      },
+      {
         "version": "0.3.34.0",
         "changelog": "Add recoverable, administrator-only Firebase connection preparation while paused, with exact approved household and key checks. Improve Pause/Resume contrast. Installation preserves pairing and does not enable Firebase playback.",
         "targetAbi": "10.11.0.0",
