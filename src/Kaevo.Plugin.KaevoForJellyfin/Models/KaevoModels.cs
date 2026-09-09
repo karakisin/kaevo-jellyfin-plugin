@@ -90,7 +90,8 @@ public sealed record KaevoPairingV3StartResponse(
     string Protocol,
     DateTimeOffset ExpiresAtUtc,
     string PairingUri,
-    string QrPngBase64);
+    string QrPngBase64,
+    string MonitorId = "");
 
 /// <summary>
 /// Deliberately minimal local-administrator status. It confirms only whether
@@ -100,7 +101,9 @@ public sealed record KaevoPairingV3StartResponse(
 public sealed record KaevoPairingV3StatusResponse(
     string State,
     string Protocol,
-    bool RequiresReauthentication);
+    bool RequiresReauthentication,
+    string? MonitorId = null,
+    string? TicketState = null);
 
 /// <summary>
 /// A minimal acknowledgement for reactivating an already-paired V3 connector.

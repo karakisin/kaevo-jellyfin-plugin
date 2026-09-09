@@ -139,8 +139,10 @@ public sealed class KaevoPairingV3Service
     /// successful state neither proves Cloud reachability nor reveals a
     /// connector identifier, ticket, authorization, or user/server binding.
     /// </summary>
-    internal async Task<KaevoPairingV3StatusResponse> GetLocalStatusAsync(CancellationToken cancellationToken = default)
+    internal async Task<KaevoPairingV3StatusResponse> GetLocalStatusAsync(CancellationToken cancellationToken = default, string? monitorId = null)
     {
+        if (monitorId is not null && (monitorId.Length != 64 || monitorId.Any(c => !char.IsAsciiHexDigit(c))))
+            monitorId = null;
         if (!_enabled())
         {
             return new KaevoPairingV3StatusResponse("disabled", KaevoPairingV3Crypto.Protocol, false);
@@ -152,12 +154,26 @@ public sealed class KaevoPairingV3Service
             var paired = connector is not null
                 && connector.Status == "active"
                 && connector.ProtocolVersion == KaevoPairingV3Crypto.Protocol;
+            // Monitor only the exact admin-created ticket, never the older
+            // active connector which remains paired while a repair is pending.
+            var ticket = monitorId is { Length: 64 }
+                ? state.Tickets.Values.FirstOrDefault(value => MonitorId(value.TicketId) == monitorId)
+                : null;
+            var ticketState = ticket is null ? "unknown"
+                : ticket.State == "consumed"
+                    ? paired && connector!.LastPairingAttemptId == ticket.PairingAttemptId
+                        ? "completed" : "superseded"
+                : ticket.State == "reserved" ? "pending"
+                : ticket.ExpiresAtUtc <= DateTimeOffset.UtcNow ? "expired" : "waiting";
             return new KaevoPairingV3StatusResponse(
                 paired ? "paired" : "not_paired",
                 KaevoPairingV3Crypto.Protocol,
-                false);
+                false, monitorId, monitorId is null ? null : ticketState);
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    internal static string MonitorId(string ticketId)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ticketId))).ToLowerInvariant();
 
     internal async Task<KaevoPairingV3Start> StartAsync(string serverId, string serverName, string localEndpoint, string setupUserId, CancellationToken cancellationToken = default)
     {

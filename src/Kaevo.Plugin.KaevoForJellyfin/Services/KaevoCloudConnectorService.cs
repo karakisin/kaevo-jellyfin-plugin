@@ -575,6 +575,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         CloudRequest request,
         CancellationToken cancellationToken)
     {
+        var stage = "prepare";
         try
         {
             // Re-read the saved configuration for every command as well as
@@ -588,9 +589,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             // so health checks, searches, and mutations all use the same current
             // provider configuration without requiring a Jellyfin restart.
             var currentSecrets = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false) ?? secrets;
+            stage = "execute";
             var result = request.Method == "GET"
                 ? await ExecuteReadAsync(runtimeConfiguration, currentSecrets, request, cancellationToken).ConfigureAwait(false)
                 : await ExecuteCommandAsync(runtimeConfiguration, currentSecrets, request, cancellationToken).ConfigureAwait(false);
+            stage = "deliver";
             await SendCloudAsync<JsonElement>(
                 runtimeConfiguration,
                 secrets,
@@ -601,6 +604,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
         catch (Exception exception)
         {
+            // Fixed categories only: never log request data, credentials,
+            // provider bodies, exception messages or stack traces.
+            if (request.Method == "GET" && request.Path == "/kaevo/internal/main-snapshot")
+                _logger.LogWarning("Kaevo Home snapshot failed Stage={Stage} Category={Category}", stage, FailureCategory(exception));
             await SendCloudAsync<JsonElement>(
                 configuration,
                 secrets,
@@ -4246,6 +4253,17 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
         }
     }
+
+    internal static string FailureCategory(Exception exception) => exception switch
+    {
+        JsonException => "invalid_json",
+        HttpRequestException => "http_transport",
+        OperationCanceledException => "cancelled_or_timeout",
+        System.Security.Cryptography.CryptographicException => "local_secret_decryption",
+        IOException => "local_storage_or_stream",
+        InvalidOperationException => "invalid_operation",
+        _ => "unexpected"
+    };
 
     private static string SanitizeError(Exception exception)
         => exception is InvalidOperationException && SafeErrorRegex().IsMatch(exception.Message)

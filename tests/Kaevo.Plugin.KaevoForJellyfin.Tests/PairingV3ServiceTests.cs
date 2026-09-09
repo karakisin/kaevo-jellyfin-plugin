@@ -85,6 +85,30 @@ public sealed class PairingV3ServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task AdminMonitorConfirmsExactCompletedTicketNotAnExistingPairing()
+    {
+        var service = Service(new FakeCloud { Result = new("pairing_redeemed", "connector-1") });
+        var start = await service.StartAsync("server-v3-01", "Jellyfin", "http://127.0.0.1:8096", "user-1");
+        var monitor = KaevoPairingV3Service.MonitorId(start.TicketId);
+        Assert.Equal("waiting", (await service.GetLocalStatusAsync(monitorId: monitor)).TicketState);
+        var token = Authorization(start, "user-1");
+        var challenge = await service.ChallengeAsync(start.TicketId, Attempt, KaevoPairingV3Crypto.HashText(token), Correlation);
+        await service.CompleteAsync(new Uri("https://cloud.example"), ValidCompletion(start, challenge, token));
+        Assert.Equal("completed", (await service.GetLocalStatusAsync(monitorId: monitor)).TicketState);
+        var repair = await service.StartAsync("server-v3-01", "Jellyfin", "http://127.0.0.1:8096", "user-1");
+        var waiting = await service.GetLocalStatusAsync(monitorId: KaevoPairingV3Service.MonitorId(repair.TicketId));
+        Assert.Equal("paired", waiting.State);
+        Assert.Equal("waiting", waiting.TicketState);
+        await Store().MutateAsync(state => {
+            state.Tickets[repair.TicketId] = state.Tickets[repair.TicketId] with { State = "reserved" };
+            return 0;
+        });
+        Assert.Equal("pending", (await service.GetLocalStatusAsync(monitorId: KaevoPairingV3Service.MonitorId(repair.TicketId))).TicketState);
+        Assert.Equal("unknown", (await service.GetLocalStatusAsync(monitorId: new string('a', 64))).TicketState);
+        Assert.DoesNotContain(start.TicketId, JsonSerializer.Serialize(waiting));
+    }
+
+    [Fact]
     public async Task LocalStatusReportsOnlyPairedStateWithoutConnectorOrBindingMaterial()
     {
         var service = Service(new FakeCloud());

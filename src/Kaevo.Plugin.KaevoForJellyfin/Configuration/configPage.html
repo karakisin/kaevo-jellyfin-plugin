@@ -394,6 +394,8 @@
                 providers: [],
                 providerSavedSettings: {},
                 pairingCountdownTimer: null,
+                pairingMonitorTimer: null,
+                pairingMonitorId: null,
                 savedSettings: null,
                 pairingV3Enabled: false,
                 pairingV3Connected: false,
@@ -536,6 +538,63 @@
                     ? 'Kaevo App Connected'
                     : 'Not Connected';
                 renderPairingMode();
+            }
+
+            function stopPairingMonitor() {
+                if (KaevoConfig.pairingMonitorTimer) clearTimeout(KaevoConfig.pairingMonitorTimer);
+                KaevoConfig.pairingMonitorTimer = null;
+                KaevoConfig.pairingMonitorId = null;
+            }
+
+            function monitorPairingTicket(monitorId) {
+                stopPairingMonitor();
+                if (!/^[a-f0-9]{64}$/.test(monitorId || '')) return;
+                KaevoConfig.pairingMonitorId = monitorId;
+                var deadline = Date.now() + 5 * 60 * 1000;
+                function poll() {
+                    if (KaevoConfig.pairingMonitorId !== monitorId) return;
+                    ApiClient.getJSON(ApiClient.getUrl('kaevo/v3/pairing/status', { monitorId: monitorId })).then(function (status) {
+                        if (KaevoConfig.pairingMonitorId !== monitorId) return;
+                        if ((status.MonitorId || status.monitorId) !== monitorId) return;
+                        var state = status.TicketState || status.ticketState;
+                        if (state === 'completed') {
+                            stopPairingMonitor();
+                            stopPairingCountdown();
+                            clearPairingLink();
+                            document.querySelector('#KaevoPairingQr').removeAttribute('src');
+                            document.querySelector('#KaevoPairingTicket').hidden = true;
+                            renderPairingV3Status(status);
+                            document.querySelector('#CloudSetupMessage').textContent = 'This QR pairing completed successfully. Kaevo App Connected.';
+                        } else if (state === 'expired' || state === 'superseded') {
+                            stopPairingMonitor();
+                            stopPairingCountdown();
+                            clearPairingLink();
+                            document.querySelector('#KaevoPairingTicket').dataset.expired = 'true';
+                            document.querySelector('#KaevoPairingExpiry').textContent = state === 'expired'
+                                ? 'This QR expired without a confirmed pairing. Your existing connection is unchanged.'
+                                : 'A newer pairing replaced this QR. Refresh to see the current connection.';
+                        } else if (state === 'pending') {
+                            stopPairingCountdown();
+                            clearPairingLink();
+                            document.querySelector('#KaevoPairingTicket').dataset.expired = 'true';
+                            document.querySelector('#KaevoPairingExpiry').textContent = 'Confirming this pairing with Kaevo Cloud…';
+                        }
+                    }).catch(function () {
+                        // A failed status read is never evidence of completion.
+                    }).finally(function () {
+                        if (KaevoConfig.pairingMonitorId !== monitorId) return;
+                        if (Date.now() >= deadline) {
+                            stopPairingMonitor();
+                            stopPairingCountdown();
+                            clearPairingLink();
+                            document.querySelector('#KaevoPairingTicket').dataset.expired = 'true';
+                            document.querySelector('#KaevoPairingExpiry').textContent = 'Pairing confirmation could not be read. Refresh to check the connection before creating another QR.';
+                            return;
+                        }
+                        KaevoConfig.pairingMonitorTimer = setTimeout(poll, 2000);
+                    });
+                }
+                poll();
             }
 
             function startPairingCountdown(expiresAt) {
@@ -761,6 +820,8 @@
 
             function createPairingTicket(isRepair) {
                 if (KaevoConfig.pairingV3Enabled && KaevoConfig.pairingV3Connected && !isRepair) return;
+                stopPairingMonitor();
+                stopPairingCountdown();
                 clearPairingLink();
                 Dashboard.showLoadingMsg();
                 var startRequest;
@@ -814,6 +875,12 @@
                         ? 'Create New Pairing V3 QR'
                         : 'Create New Pairing Code';
                     startPairingCountdown(expiresAt);
+                    if (isV3) {
+                        document.querySelector('#CloudSetupMessage').textContent = isRepair
+                            ? 'Waiting for this repair QR. Your existing connection stays active until repair completes.'
+                            : 'Waiting for Kaevo to complete this QR pairing.';
+                        monitorPairingTicket(ticket.MonitorId || ticket.monitorId);
+                    }
                 }).catch(function () {
                     Dashboard.alert('Kaevo could not create a pairing code. Sign in as a Jellyfin administrator and try again.');
                 }).finally(function () {
@@ -840,6 +907,7 @@
             });
 
             document.querySelector('#KaevoConfigPage').addEventListener('pagehide', function () {
+                stopPairingMonitor();
                 stopPairingCountdown();
                 clearPairingLink();
             });

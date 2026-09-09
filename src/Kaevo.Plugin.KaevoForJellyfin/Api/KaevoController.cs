@@ -168,7 +168,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             var start = await _pairingV3.StartAsync(request.JellyfinServerId, request.JellyfinServerName, localEndpoint, request.JellyfinSetupUserId, cancellationToken).ConfigureAwait(false);
             using var data = QRCodeGenerator.GenerateQrCode(start.PairingUri, QRCodeGenerator.ECCLevel.Q);
             var png = new PngByteQRCode(data).GetGraphic(8);
-            return Ok(new KaevoPairingV3StartResponse(start.Protocol, start.ExpiresAtUtc, start.PairingUri, Convert.ToBase64String(png)));
+            return Ok(new KaevoPairingV3StartResponse(start.Protocol, start.ExpiresAtUtc, start.PairingUri, Convert.ToBase64String(png), KaevoPairingV3Service.MonitorId(start.TicketId)));
         }
         catch (KaevoPairingV3Exception exception) { return V3Error(exception, StatusForV3(exception.Code)); }
         catch (Exception) { return V3Error(new KaevoPairingV3Exception("unexpected_internal_error"), 500); }
@@ -176,11 +176,11 @@ public sealed class KaevoController : ControllerBase, IActionFilter
 
     [Authorize(Policy = "RequiresElevation")]
     [HttpGet("v3/pairing/status")]
-    public async Task<ActionResult<KaevoPairingV3StatusResponse>> GetPairingV3Status(CancellationToken cancellationToken)
+    public async Task<ActionResult<KaevoPairingV3StatusResponse>> GetPairingV3Status(CancellationToken cancellationToken, [FromQuery] string? monitorId = null)
     {
         try
         {
-            return Ok(await _pairingV3.GetLocalStatusAsync(cancellationToken).ConfigureAwait(false));
+            return Ok(await _pairingV3.GetLocalStatusAsync(cancellationToken, monitorId).ConfigureAwait(false));
         }
         catch (Exception)
         {
