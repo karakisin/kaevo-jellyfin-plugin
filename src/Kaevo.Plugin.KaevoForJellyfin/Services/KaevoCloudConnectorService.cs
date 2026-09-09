@@ -26,7 +26,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1", "download_controls_v1",
                     "playback_tunnel_v1", "direct_play", "hls_remux", "hls_transcode",
                     "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
-                    "local_provider_configuration_v1", "connector_control_push_v2"
+                    "local_provider_configuration_v1", "connector_control_push_v2", "profile_artwork_v1"
                 };
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
@@ -786,7 +786,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 throw new InvalidOperationException("remoteArtworkDisabled");
             }
 
-            return await ReadArtworkAsync(configuration, secrets, request.Query, cancellationToken).ConfigureAwait(false);
+            return await ReadArtworkAsync(configuration, secrets, request.ProfileId, request.Query, cancellationToken).ConfigureAwait(false);
         }
 
         if (request.Path == "/kaevo/internal/main-snapshot")
@@ -3188,6 +3188,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private async Task<CommandResult> ReadArtworkAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
+        string? cloudProfileId,
         IReadOnlyDictionary<string, JsonElement>? query,
         CancellationToken cancellationToken)
     {
@@ -3197,6 +3198,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             throw new InvalidOperationException("remoteArtworkRequestInvalid");
         }
+
+        var userId = RequireBoundJellyfinUserId(configuration, cloudProfileId, "profileJellyfinBindingMissing");
+        var access = await SendLocalAsync(configuration, secrets, HttpMethod.Get,
+            $"/Users/{userId}/Items/{itemId}", null, null, cancellationToken).ConfigureAwait(false);
+        if (access.Status != 200 || !access.Payload.TryGetProperty("Id", out var allowedItem)
+            || !string.Equals(allowedItem.GetString(), itemId, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("remoteArtworkItemUnavailable");
+        var byteLimit = KaevoFirebaseRuntime.IsSelected(configuration) ? 250_000 : RemoteArtworkMaximumBytes;
 
         var requestedWidth = Math.Clamp(QueryInt(query, "max_width", 600), 1, RemoteArtworkMaximumDimension);
         var requestedHeight = Math.Clamp(QueryInt(query, "max_height", 900), 1, RemoteArtworkMaximumDimension);
@@ -3230,7 +3239,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 throw new InvalidOperationException("remoteArtworkContentTypeInvalid");
             }
 
-            var bytes = await ReadBoundedAsync(response.Content, RemoteArtworkMaximumBytes, cancellationToken).ConfigureAwait(false);
+            var bytes = await ReadBoundedAsync(response.Content, byteLimit, cancellationToken).ConfigureAwait(false);
             if (bytes.Truncated)
             {
                 continue;
