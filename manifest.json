@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.36.0",
+        "changelog": "Advertise media and control capabilities in the signed Firebase startup heartbeat. Fixes missing capability registration after migration; keeps existing pairing and profile security. Physical Home/playback verification follows installation.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.36/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "306250148d5987361385dc965c0f5978",
+        "timestamp": "2026-09-09T21:00:00Z"
+      },
+      {
         "version": "0.3.35.0",
         "changelog": "Fix Firebase preparation on Jellyfin 10.11 by using its supported user-ID lookup. Preserves exact identity checks, pairing and paused state. Does not activate Firebase playback.",
         "targetAbi": "10.11.0.0",
