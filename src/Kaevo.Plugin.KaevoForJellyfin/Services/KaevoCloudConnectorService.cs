@@ -628,10 +628,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     /// their existing persistent binding and compare-and-swap protections.
     /// </summary>
     internal static bool UsesAuthoritativeMediaScope(CloudRequest request)
-        => request.Provider == "jellyfin" && (request.Method == "GET"
-            || (request.Method == "COMMAND"
+        => (request.Provider == "jellyfin" && request.Method == "GET")
+            || (request.Provider is "home_server" or "jellyfin"
+                && request.Method == "COMMAND"
                 && request.Operation == "jellyfin.prepare_playback"
-                && request.Path == "/commands/jellyfin.prepare_playback"));
+                && request.Path == "/commands/jellyfin.prepare_playback");
 
     internal static PluginConfiguration ConfigurationForAuthoritativeMediaRequest(
         PluginConfiguration configuration, CloudRequest request)

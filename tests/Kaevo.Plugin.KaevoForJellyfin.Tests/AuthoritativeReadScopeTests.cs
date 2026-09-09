@@ -52,12 +52,14 @@ public sealed class AuthoritativeReadScopeTests
         Assert.False(KaevoProfileJellyfinBindingStore.TryResolve(second, "profile_current", out _));
         Assert.Equal("", saved.ProfileJellyfinBindingsJson);
     }
-    [Fact]
-    public void PlaybackPreparationUsesCurrentClaimWithoutOverwritingSavedOwner()
+    [Theory]
+    [InlineData("home_server")]
+    [InlineData("jellyfin")]
+    public void PlaybackPreparationUsesCurrentClaimWithoutOverwritingSavedOwner(string provider)
     {
         var original = JsonSerializer.Serialize(new Dictionary<string,string> { ["profile_deleted"] = User });
         var saved = new PluginConfiguration { ConnectorId = "connector-1", ProfileJellyfinBindingsJson = original };
-        var request = Request() with { Method = "COMMAND", Operation = "jellyfin.prepare_playback", Path = "/commands/jellyfin.prepare_playback" };
+        var request = Request(provider: provider) with { Method = "COMMAND", Operation = "jellyfin.prepare_playback", Path = "/commands/jellyfin.prepare_playback" };
         var scoped = KaevoCloudConnectorService.ConfigurationForAuthoritativeMediaRequest(saved, request);
         Assert.True(KaevoProfileJellyfinBindingStore.TryResolve(scoped, "profile_current", out var user));
         Assert.Equal(User, user);
@@ -74,5 +76,31 @@ public sealed class AuthoritativeReadScopeTests
         var request = Request() with { Method = "COMMAND", Operation = operation, Path = path };
         Assert.False(KaevoCloudConnectorService.UsesAuthoritativeMediaScope(request));
         Assert.Throws<InvalidOperationException>(() => KaevoCloudConnectorService.ConfigurationForAuthoritativeMediaRequest(new() { ConnectorId = "connector-1" }, request));
+    }
+    [Theory]
+    [InlineData("home_server", "GET", "/kaevo/internal/main-snapshot")]
+    [InlineData("seerr", "COMMAND", "/commands/jellyfin.prepare_playback")]
+    public void TransportProviderDoesNotBroadenUnrelatedRequests(string provider, string method, string path)
+    {
+        var request = Request(provider: provider) with { Method = method, Operation = "jellyfin.prepare_playback", Path = path };
+        Assert.False(KaevoCloudConnectorService.UsesAuthoritativeMediaScope(request));
+    }
+    [Fact]
+    public void SerializedHomeServerClaimSelectsCanonicalPlaybackUser()
+    {
+        var request = JsonSerializer.Deserialize<CloudRequest>("""
+            {"request_id":"playback-1","profile_id":"profile_current","provider":"home_server",
+             "method":"COMMAND","path":"/commands/jellyfin.prepare_playback",
+             "operation":"jellyfin.prepare_playback","parameters":{"max_bitrate":40000000},
+             "profile_provider_binding":{"provider":"jellyfin","connector_id":"connector-1",
+                "provider_user_id":"11111111111111111111111111111111"}}
+            """)!;
+        var saved = new PluginConfiguration { ConnectorId = "connector-1",
+            ProfileJellyfinBindingsJson = "{\"profile_deleted\":\"11111111111111111111111111111111\"}" };
+        Assert.True(KaevoCloudConnectorService.UsesAuthoritativeMediaScope(request));
+        var scoped = KaevoCloudConnectorService.ConfigurationForAuthoritativeMediaRequest(saved, request);
+        Assert.True(KaevoProfileJellyfinBindingStore.TryResolve(scoped, request.ProfileId, out var user));
+        Assert.Equal(User, user);
+        Assert.Contains("profile_deleted", saved.ProfileJellyfinBindingsJson);
     }
 }
