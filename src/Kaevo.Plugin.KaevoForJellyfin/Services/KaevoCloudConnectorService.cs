@@ -583,8 +583,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             // the same live TwoWayProfileDeletionEnabled value that Cloud
             // showed to the user during preflight.
             var runtimeConfiguration = RuntimeConfiguration(configuration);
-            if (request.Method == "GET" && request.Provider == "jellyfin" && request.ProfileProviderBinding is not null)
-                runtimeConfiguration = ConfigurationForAuthoritativeRead(runtimeConfiguration, request);
+            if (UsesAuthoritativeMediaScope(request) && request.ProfileProviderBinding is not null)
+                runtimeConfiguration = ConfigurationForAuthoritativeMediaRequest(runtimeConfiguration, request);
             else
                 ApplyAuthoritativeProfileProviderBinding(runtimeConfiguration, request);
             // Provider settings can be saved while the long-running connector is
@@ -623,15 +623,21 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
     /// <summary>
     /// An authenticated connector claim carries Cloud's current exact profile
-    /// edge. Use it only for that read, without rewriting durable local profile
-    /// ownership (which may retain deleted predecessors). Commands still use
+    /// edge. Use it only for that media read or playback preparation, without rewriting durable local profile
+    /// ownership (which may retain deleted predecessors). Other commands still use
     /// their existing persistent binding and compare-and-swap protections.
     /// </summary>
-    internal static PluginConfiguration ConfigurationForAuthoritativeRead(
+    internal static bool UsesAuthoritativeMediaScope(CloudRequest request)
+        => request.Provider == "jellyfin" && (request.Method == "GET"
+            || (request.Method == "COMMAND"
+                && request.Operation == "jellyfin.prepare_playback"
+                && request.Path == "/commands/jellyfin.prepare_playback"));
+
+    internal static PluginConfiguration ConfigurationForAuthoritativeMediaRequest(
         PluginConfiguration configuration, CloudRequest request)
     {
         var binding = request.ProfileProviderBinding;
-        if (request.Method != "GET" || request.Provider != "jellyfin" || binding is null
+        if (!UsesAuthoritativeMediaScope(request) || binding is null
             || binding.Provider != "jellyfin"
             || !string.Equals(binding.ConnectorId, configuration.ConnectorId, StringComparison.Ordinal)
             || !KaevoProfileJellyfinBindingStore.TryBind(

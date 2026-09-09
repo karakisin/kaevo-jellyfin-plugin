@@ -19,7 +19,7 @@ public sealed class AuthoritativeReadScopeTests
             RemoteMetadataEnabled = false, LocalJellyfinBaseUrl = "http://127.0.0.1:8096" };
         Assert.Throws<InvalidOperationException>(() => KaevoCloudConnectorService.AuthoritativeProfileProviderBindingUpdate(
             saved.ConnectorId, original, "", "", Request()));
-        var scoped = KaevoCloudConnectorService.ConfigurationForAuthoritativeRead(saved, Request());
+        var scoped = KaevoCloudConnectorService.ConfigurationForAuthoritativeMediaRequest(saved, Request());
         Assert.NotSame(saved, scoped);
         Assert.Equal(original, saved.ProfileJellyfinBindingsJson);
         Assert.True(KaevoProfileJellyfinBindingStore.TryResolve(scoped, "profile_current", out var user));
@@ -37,7 +37,7 @@ public sealed class AuthoritativeReadScopeTests
     public void RejectsWrongAuthorityScope(string method, string provider, string connector, string user)
     {
         var saved = new PluginConfiguration { ConnectorId = "connector-1" };
-        Assert.Throws<InvalidOperationException>(() => KaevoCloudConnectorService.ConfigurationForAuthoritativeRead(saved, Request(method, provider, connector, user)));
+        Assert.Throws<InvalidOperationException>(() => KaevoCloudConnectorService.ConfigurationForAuthoritativeMediaRequest(saved, Request(method, provider, connector, user)));
         Assert.Equal("", saved.ProfileJellyfinBindingsJson);
     }
 
@@ -45,11 +45,34 @@ public sealed class AuthoritativeReadScopeTests
     public void ConcurrentProfileReadsRemainIndependent()
     {
         var saved = new PluginConfiguration { ConnectorId = "connector-1" };
-        var first = KaevoCloudConnectorService.ConfigurationForAuthoritativeRead(saved, Request());
-        var second = KaevoCloudConnectorService.ConfigurationForAuthoritativeRead(saved, Request(user: "22222222222222222222222222222222") with { ProfileId = "profile_other" });
+        var first = KaevoCloudConnectorService.ConfigurationForAuthoritativeMediaRequest(saved, Request());
+        var second = KaevoCloudConnectorService.ConfigurationForAuthoritativeMediaRequest(saved, Request(user: "22222222222222222222222222222222") with { ProfileId = "profile_other" });
         Assert.True(KaevoProfileJellyfinBindingStore.TryResolve(first, "profile_current", out var firstUser));
         Assert.Equal(User, firstUser);
         Assert.False(KaevoProfileJellyfinBindingStore.TryResolve(second, "profile_current", out _));
         Assert.Equal("", saved.ProfileJellyfinBindingsJson);
+    }
+    [Fact]
+    public void PlaybackPreparationUsesCurrentClaimWithoutOverwritingSavedOwner()
+    {
+        var original = JsonSerializer.Serialize(new Dictionary<string,string> { ["profile_deleted"] = User });
+        var saved = new PluginConfiguration { ConnectorId = "connector-1", ProfileJellyfinBindingsJson = original };
+        var request = Request() with { Method = "COMMAND", Operation = "jellyfin.prepare_playback", Path = "/commands/jellyfin.prepare_playback" };
+        var scoped = KaevoCloudConnectorService.ConfigurationForAuthoritativeMediaRequest(saved, request);
+        Assert.True(KaevoProfileJellyfinBindingStore.TryResolve(scoped, "profile_current", out var user));
+        Assert.Equal(User, user);
+        Assert.Equal(original, saved.ProfileJellyfinBindingsJson);
+        Assert.Throws<InvalidOperationException>(() => KaevoCloudConnectorService.ConfigurationForAuthoritativeMediaRequest(saved, request with { ProfileProviderBinding = null }));
+    }
+
+    [Theory]
+    [InlineData("jellyfin.mark_played", "/commands/jellyfin.mark_played")]
+    [InlineData("jellyfin.delete_exact_bound_user", "/commands/jellyfin.delete_exact_bound_user")]
+    [InlineData("jellyfin.prepare_playback", "/commands/jellyfin.delete_item")]
+    public void OtherCommandsCannotBorrowPlaybackScope(string operation, string path)
+    {
+        var request = Request() with { Method = "COMMAND", Operation = operation, Path = path };
+        Assert.False(KaevoCloudConnectorService.UsesAuthoritativeMediaScope(request));
+        Assert.Throws<InvalidOperationException>(() => KaevoCloudConnectorService.ConfigurationForAuthoritativeMediaRequest(new() { ConnectorId = "connector-1" }, request));
     }
 }
