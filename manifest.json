@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.37.0",
+        "changelog": "Connect bounded Firebase artwork with an exact profile and item access check. Keep existing pairing. Physical artwork and playback verification follows installation.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.37/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "a32e9e811f0d752665595d497855247f",
+        "timestamp": "2026-09-09T21:20:00Z"
+      },
+      {
         "version": "0.3.36.0",
         "changelog": "Advertise media and control capabilities in the signed Firebase startup heartbeat. Fixes missing capability registration after migration; keeps existing pairing and profile security. Physical Home/playback verification follows installation.",
         "targetAbi": "10.11.0.0",
