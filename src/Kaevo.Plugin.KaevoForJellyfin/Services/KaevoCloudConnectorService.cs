@@ -2977,19 +2977,24 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var compatibilityPlayer = parameters.TryGetValue("compatibility_player", out var compatibility)
             && compatibility.ValueKind is JsonValueKind.True or JsonValueKind.False
             && compatibility.GetBoolean();
+        var preferDirectPlay = parameters.TryGetValue("prefer_direct_play", out var nativePreference)
+            && nativePreference.ValueKind == JsonValueKind.True;
+        var forceTranscode = parameters.TryGetValue("force_transcode", out var transcodePreference)
+            && transcodePreference.ValueKind == JsonValueKind.True;
         var body = new
         {
             UserId = jellyfinUserId,
             AudioStreamIndex = audioStreamIndex,
             SubtitleStreamIndex = subtitleStreamIndex,
             MaxStreamingBitrate = maxBitrate,
-            EnableDirectPlay = false,
-            EnableDirectStream = true,
+            EnableDirectPlay = preferDirectPlay && !forceTranscode
+                && audioStreamIndex is null && subtitleStreamIndex is null,
+            EnableDirectStream = !forceTranscode,
             EnableTranscoding = true,
-            AllowVideoStreamCopy = true,
-            AllowAudioStreamCopy = false,
+            AllowVideoStreamCopy = !forceTranscode,
+            AllowAudioStreamCopy = preferDirectPlay && !forceTranscode,
             EnableAutoStreamCopy = false,
-            DeviceProfile = KaevoPlaybackProfilePolicy.BuildAppleHlsDeviceProfile(maxBitrate)
+            DeviceProfile = KaevoPlaybackProfilePolicy.BuildAppleHlsDeviceProfile(maxBitrate, preferDirectPlay)
         };
         var playbackInfoQuery = new List<string>
         {
@@ -3040,8 +3045,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             throw new InvalidOperationException("playbackIdentifiersMissing");
         }
 
-        var remux = source.TryGetProperty("SupportsDirectStream", out var streamValue) && streamValue.GetBoolean();
-        var mode = compatibilityPlayer ? "direct_play" : remux ? "remux" : "transcode";
+        var mode = KaevoPlaybackProfilePolicy.SelectMode(
+            source, preferDirectPlay, forceTranscode, compatibilityPlayer);
         var tracks = KaevoPlaybackTrackCatalog.FromMediaSource(source);
         var mediaSegmentsRequested = parameters.TryGetValue("media_segments_enabled", out var mediaSegmentsValue)
             && mediaSegmentsValue.ValueKind is JsonValueKind.True or JsonValueKind.False
