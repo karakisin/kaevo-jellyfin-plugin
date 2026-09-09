@@ -583,7 +583,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             // the same live TwoWayProfileDeletionEnabled value that Cloud
             // showed to the user during preflight.
             var runtimeConfiguration = RuntimeConfiguration(configuration);
-            ApplyAuthoritativeProfileProviderBinding(runtimeConfiguration, request);
+            if (request.Method == "GET" && request.Provider == "jellyfin" && request.ProfileProviderBinding is not null)
+                runtimeConfiguration = ConfigurationForAuthoritativeRead(runtimeConfiguration, request);
+            else
+                ApplyAuthoritativeProfileProviderBinding(runtimeConfiguration, request);
             // Provider settings can be saved while the long-running connector is
             // already online. Re-read the owner-only secret file for every claim
             // so health checks, searches, and mutations all use the same current
@@ -616,6 +619,25 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 new { connector_id = configuration.ConnectorId, message = SanitizeError(exception), details = new { } },
                 cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// An authenticated connector claim carries Cloud's current exact profile
+    /// edge. Use it only for that read, without rewriting durable local profile
+    /// ownership (which may retain deleted predecessors). Commands still use
+    /// their existing persistent binding and compare-and-swap protections.
+    /// </summary>
+    internal static PluginConfiguration ConfigurationForAuthoritativeRead(
+        PluginConfiguration configuration, CloudRequest request)
+    {
+        var binding = request.ProfileProviderBinding;
+        if (request.Method != "GET" || request.Provider != "jellyfin" || binding is null
+            || binding.Provider != "jellyfin"
+            || !string.Equals(binding.ConnectorId, configuration.ConnectorId, StringComparison.Ordinal)
+            || !KaevoProfileJellyfinBindingStore.TryBind(
+                string.Empty, request.ProfileId, binding.ProviderUserId, out var exactBinding))
+            throw new InvalidOperationException("profileProviderBindingInvalid");
+        return configuration.ForAuthoritativeProfileRead(exactBinding);
     }
 
     internal static void ApplyAuthoritativeProfileProviderBinding(

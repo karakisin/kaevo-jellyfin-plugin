@@ -4,6 +4,13 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Configuration;
 
 public sealed class PluginConfiguration : BasePluginConfiguration
 {
+    internal PluginConfiguration ForAuthoritativeProfileRead(string exactBinding)
+    {
+        var scoped = (PluginConfiguration)MemberwiseClone();
+        scoped.ProfileJellyfinBindingsJson = exactBinding;
+        return scoped;
+    }
+
     public int SnapshotItemLimit { get; set; } = 50;
 
     public bool CloudConnectorEnabled { get; set; }

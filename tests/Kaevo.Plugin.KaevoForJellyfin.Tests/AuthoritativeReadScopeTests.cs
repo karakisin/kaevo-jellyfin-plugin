@@ -1,0 +1,55 @@
+using System.Text.Json;
+using Kaevo.Plugin.KaevoForJellyfin.Configuration;
+using Kaevo.Plugin.KaevoForJellyfin.Services;
+using Xunit;
+
+namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
+public sealed class AuthoritativeReadScopeTests
+{
+    private const string User = "11111111111111111111111111111111";
+    private static CloudRequest Request(string method = "GET", string provider = "jellyfin", string connector = "connector-1", string user = User)
+        => new("request-1", method, provider, "/kaevo/internal/main-snapshot", null, null, null,
+            "profile_current", new("jellyfin", connector, user));
+
+    [Fact]
+    public void CurrentClaimCanReadWithoutReassigningStaleSavedOwnership()
+    {
+        var original = JsonSerializer.Serialize(new Dictionary<string,string> { ["profile_deleted"] = User });
+        var saved = new PluginConfiguration { ConnectorId = "connector-1", ProfileJellyfinBindingsJson = original,
+            RemoteMetadataEnabled = false, LocalJellyfinBaseUrl = "http://127.0.0.1:8096" };
+        Assert.Throws<InvalidOperationException>(() => KaevoCloudConnectorService.AuthoritativeProfileProviderBindingUpdate(
+            saved.ConnectorId, original, "", "", Request()));
+        var scoped = KaevoCloudConnectorService.ConfigurationForAuthoritativeRead(saved, Request());
+        Assert.NotSame(saved, scoped);
+        Assert.Equal(original, saved.ProfileJellyfinBindingsJson);
+        Assert.True(KaevoProfileJellyfinBindingStore.TryResolve(scoped, "profile_current", out var user));
+        Assert.Equal(User, user);
+        Assert.False(KaevoProfileJellyfinBindingStore.TryResolve(scoped, "profile_deleted", out _));
+        Assert.False(scoped.RemoteMetadataEnabled);
+        Assert.Equal(saved.LocalJellyfinBaseUrl, scoped.LocalJellyfinBaseUrl);
+    }
+
+    [Theory]
+    [InlineData("COMMAND", "jellyfin", "connector-1", User)]
+    [InlineData("GET", "seerr", "connector-1", User)]
+    [InlineData("GET", "jellyfin", "other-connector", User)]
+    [InlineData("GET", "jellyfin", "connector-1", "invalid")]
+    public void RejectsWrongAuthorityScope(string method, string provider, string connector, string user)
+    {
+        var saved = new PluginConfiguration { ConnectorId = "connector-1" };
+        Assert.Throws<InvalidOperationException>(() => KaevoCloudConnectorService.ConfigurationForAuthoritativeRead(saved, Request(method, provider, connector, user)));
+        Assert.Equal("", saved.ProfileJellyfinBindingsJson);
+    }
+
+    [Fact]
+    public void ConcurrentProfileReadsRemainIndependent()
+    {
+        var saved = new PluginConfiguration { ConnectorId = "connector-1" };
+        var first = KaevoCloudConnectorService.ConfigurationForAuthoritativeRead(saved, Request());
+        var second = KaevoCloudConnectorService.ConfigurationForAuthoritativeRead(saved, Request(user: "22222222222222222222222222222222") with { ProfileId = "profile_other" });
+        Assert.True(KaevoProfileJellyfinBindingStore.TryResolve(first, "profile_current", out var firstUser));
+        Assert.Equal(User, firstUser);
+        Assert.False(KaevoProfileJellyfinBindingStore.TryResolve(second, "profile_current", out _));
+        Assert.Equal("", saved.ProfileJellyfinBindingsJson);
+    }
+}
