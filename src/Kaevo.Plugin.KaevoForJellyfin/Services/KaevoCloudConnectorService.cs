@@ -2,12 +2,17 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
+using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Kaevo.Plugin.KaevoForJellyfin.Configuration;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.Session;
+using MediaBrowser.Model.Session;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -15,55 +20,80 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 public sealed partial class KaevoCloudConnectorService : BackgroundService
 {
-    private const string PluginVersion = "0.2.82";
+    private static string PluginVersion => KaevoPlugin.BuildVersion;
+    internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
     private const int ControlRequestConcurrency = 4;
+    internal const int ConnectorControlProtocolVersion = 2;
+    private const int DisconnectedRecoveryMinimumSeconds = 60;
+    // Main snapshots render compact Home/Library cards. Full people and
+    // playback media descriptors belong to the exact-item detail and
+    // playback-preparation reads; requesting them for every shelf item made
+    // one observed 181-item snapshot 2.31 MB and delayed provider readback by
+    // 17 seconds.
+    internal const string MainSnapshotItemFields =
+        "Overview,Genres,Studios,ProviderIds,PrimaryImageAspectRatio";
     private static readonly object ProfileBindingSync = new();
     private static readonly HashSet<string> SupportedLocalProviders = new(StringComparer.OrdinalIgnoreCase)
     {
-        "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr", "sabnzbd", "qbittorrent"
+        "sonarr", "radarr", "seerr", "sabnzbd", "qbittorrent"
     };
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly HashSet<string> SafeMetadataQuery = new(StringComparer.OrdinalIgnoreCase)
     {
         "ParentId", "Recursive", "StartIndex", "Limit", "Fields", "EnableUserData", "EnableImages",
         "ImageTypeLimit", "EnableImageTypes", "IncludeItemTypes", "UserId", "seasonId", "isMissing",
-        "adjacentTo", "startItemId"
+        "adjacentTo", "startItemId", "SearchTerm"
     };
 
     private readonly KaevoSecretStore _secretStore;
+    private readonly KaevoJellyfinApiKeyProvisioner _jellyfinApiKeyProvisioner;
     private readonly KaevoCloudState _state;
     private readonly ILibraryManager _libraryManager;
+    private readonly IUserManager _userManager;
+    private readonly ISessionManager _sessionManager;
+    private readonly ITranscodeManager _transcodeManager;
     private readonly KaevoOptimizerCoordinator _optimizer;
     private readonly ILogger<KaevoCloudConnectorService> _logger;
     private readonly KaevoProviderTransport _providerTransport;
     private readonly KaevoConnectorLifecycleStore _lifecycleStore;
     private readonly KaevoConnectorLifecycleClient _lifecycleClient;
     private readonly KaevoPairingV3Service _pairingV3;
+    private readonly KaevoSeerrIdentityProvisioningService _seerrIdentityProvisioning;
     private volatile bool _pairingV3Active;
     private readonly HttpClient _jellyfin = new() { Timeout = TimeSpan.FromSeconds(45) };
 
     public KaevoCloudConnectorService(
         KaevoSecretStore secretStore,
+        KaevoJellyfinApiKeyProvisioner jellyfinApiKeyProvisioner,
         KaevoCloudState state,
         ILibraryManager libraryManager,
+        IUserManager userManager,
+        ISessionManager sessionManager,
+        ITranscodeManager transcodeManager,
         KaevoOptimizerCoordinator optimizer,
         KaevoProviderTransport providerTransport,
         KaevoConnectorLifecycleStore lifecycleStore,
         KaevoConnectorLifecycleClient lifecycleClient,
         KaevoPairingV3Service pairingV3,
+        KaevoSeerrIdentityProvisioningService seerrIdentityProvisioning,
         ILogger<KaevoCloudConnectorService> logger)
     {
         _secretStore = secretStore;
+        _jellyfinApiKeyProvisioner = jellyfinApiKeyProvisioner;
         _state = state;
         _libraryManager = libraryManager;
+        _userManager = userManager;
+        _sessionManager = sessionManager;
+        _transcodeManager = transcodeManager;
         _optimizer = optimizer;
         _providerTransport = providerTransport;
         _lifecycleStore = lifecycleStore;
         _lifecycleClient = lifecycleClient;
         _pairingV3 = pairingV3;
+        _seerrIdentityProvisioning = seerrIdentityProvisioning;
         _logger = logger;
     }
 
@@ -85,6 +115,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 }
 
                 var secrets = await EnsurePairedAsync(configuration, stoppingToken).ConfigureAwait(false);
+                if (NormalizeStaleRelayConfigurationBeforeRegistration(configuration))
+                {
+                    KaevoPlugin.Instance?.SaveConfiguration();
+                }
                 ValidateConfiguration(configuration, _pairingV3Active);
                 if (string.IsNullOrWhiteSpace(secrets.JellyfinApiKey))
                 {
@@ -92,6 +126,19 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 }
 
                 _state.Set("connecting");
+                if (KaevoFirebaseRuntime.IsSelected(configuration))
+                {
+                    if (!_pairingV3Active) throw new InvalidOperationException("lifecycle_upgrade_required");
+                    using var firebaseOwner = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, configurationChanged);
+                    // The target heartbeat verifies the source fence, drained
+                    // handoff and exact playback readiness before any listener.
+                    // A denied/uncertain target never falls back to AWS.
+                    await HeartbeatAsync(configuration, secrets, firebaseOwner.Token).ConfigureAwait(false);
+                    await RunFirebaseControlSupervisorAsync(configuration, secrets,
+                        KaevoFirebaseRuntime.AuthenticationApiKey, firebaseOwner.Token).ConfigureAwait(false);
+                    delay = TimeSpan.FromSeconds(1);
+                    continue;
+                }
                 await RegisterAsync(configuration, secrets, stoppingToken).ConfigureAwait(false);
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, configurationChanged);
                 var control = RunControlSupervisorAsync(configuration, secrets, linked.Token);
@@ -127,6 +174,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         var delay = TimeSpan.FromSeconds(1);
         var registered = true;
+        DateTimeOffset? nextDisconnectedRecovery = null;
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -137,8 +185,15 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     registered = true;
                 }
 
-                await RunControlLoopAsync(configuration, secrets, cancellationToken).ConfigureAwait(false);
-                delay = TimeSpan.FromSeconds(1);
+                await RunControlLoopAsync(
+                    configuration,
+                    secrets,
+                    () =>
+                    {
+                        delay = TimeSpan.FromSeconds(1);
+                        nextDisconnectedRecovery = null;
+                    },
+                    cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -150,6 +205,31 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 registered = false;
                 _state.Set("connecting", category);
                 _logger.LogWarning("Kaevo Cloud control reconnecting: {Category}", category);
+                nextDisconnectedRecovery ??= DateTimeOffset.UtcNow.Add(
+                    DisconnectedRecoveryDelay(RandomNumberGenerator.GetInt32(0, 16)));
+                if (DateTimeOffset.UtcNow >= nextDisconnectedRecovery.Value)
+                {
+                    try
+                    {
+                        var recovery = await RecoverDisconnectedClaimAsync(
+                            configuration, secrets, cancellationToken).ConfigureAwait(false);
+                        if (recovery is not null)
+                        {
+                            await HandleClaimAsync(configuration, secrets, recovery, cancellationToken).ConfigureAwait(false);
+                        }
+                    }
+                    catch (Exception recoveryException) when (recoveryException is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(
+                            "Kaevo Cloud disconnected recovery deferred: {Category}",
+                            SanitizeError(recoveryException));
+                    }
+                    finally
+                    {
+                        nextDisconnectedRecovery = DateTimeOffset.UtcNow.Add(
+                            DisconnectedRecoveryDelay(RandomNumberGenerator.GetInt32(0, 16)));
+                    }
+                }
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                 delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
             }
@@ -169,11 +249,20 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         if (!string.IsNullOrWhiteSpace(pairingV3ConnectorId))
         {
             _pairingV3Active = true;
+            if (string.IsNullOrWhiteSpace(jellyfinCredential))
+            {
+                jellyfinCredential = await _jellyfinApiKeyProvisioner.EnsureAsync(cancellationToken).ConfigureAwait(false);
+            }
             configuration.ConnectorId = pairingV3ConnectorId;
             configuration.PairingCode = string.Empty;
             var pairingV3Secrets = existing is null
                 ? new KaevoConnectorSecrets(string.Empty, string.Empty, jellyfinCredential)
                 : existing with { ConnectorToken = string.Empty, PlaybackGrantKey = string.Empty, JellyfinApiKey = jellyfinCredential };
+            if (string.IsNullOrWhiteSpace(environmentApiKey)
+                && !string.Equals(existing?.JellyfinApiKey, jellyfinCredential, StringComparison.Ordinal))
+            {
+                await _secretStore.WriteAsync(pairingV3Secrets, cancellationToken).ConfigureAwait(false);
+            }
             KaevoPlugin.Instance?.SaveConfiguration();
             return pairingV3Secrets;
         }
@@ -221,10 +310,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 app_version = PluginVersion,
                 capabilities = new[]
                 {
-                    "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1",
+                    "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1", "download_controls_v1",
                     "playback_tunnel_v1", "direct_play", "hls_remux", "hls_transcode",
                     "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
-                    "local_provider_configuration_v1"
+                    "local_provider_configuration_v1", "connector_control_push_v2"
                 },
                 provider_status = BuildProviderStatus(secrets, configuration, includeOptimizer: false)
             },
@@ -235,13 +324,53 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private async Task RunControlLoopAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
+        Action connected,
         CancellationToken cancellationToken)
     {
-        var heartbeatAt = DateTimeOffset.MinValue;
+        if (!_pairingV3Active)
+        {
+            throw new InvalidOperationException("lifecycle_upgrade_required");
+        }
+        var ticket = await SendCloudAsync<ControlTicketResponse>(
+            configuration,
+            secrets,
+            HttpMethod.Post,
+            $"/v1/home-connectors/{Uri.EscapeDataString(configuration.ConnectorId)}/control-ticket",
+            new
+            {
+                connector_id = configuration.ConnectorId,
+                connector_control_protocol = ConnectorControlProtocolVersion,
+            },
+            cancellationToken).ConfigureAwait(false);
+        if (ticket.ConnectorControlProtocol != ConnectorControlProtocolVersion
+            || ticket.MinimumConnectorControlProtocol > ConnectorControlProtocolVersion
+            || ticket.ExpiresAt <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+            || !Uri.TryCreate(ticket.ControlWebSocketUrl, UriKind.Absolute, out var controlUri)
+            || controlUri.Scheme != "wss"
+            || string.IsNullOrWhiteSpace(ticket.ConnectionTicket))
+        {
+            throw new InvalidOperationException("controlTicketInvalid");
+        }
+
+        using var socket = new ClientWebSocket();
+        socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
+        socket.Options.SetRequestHeader("Authorization", $"Bearer {ticket.ConnectionTicket}");
+        await socket.ConnectAsync(controlUri, cancellationToken).ConfigureAwait(false);
+        connected();
+        using var sendGate = new SemaphoreSlim(1, 1);
+        using var keepaliveCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        await SendControlActionAsync(socket, sendGate, "recover", cancellationToken).ConfigureAwait(false);
+        var keepalive = RunControlKeepaliveAsync(
+            configuration,
+            secrets,
+            socket,
+            sendGate,
+            Math.Clamp(ticket.KeepaliveSeconds, 60, 480),
+            keepaliveCancellation.Token);
         var inFlight = new List<Task>(ControlRequestConcurrency);
         try
         {
-            while (!cancellationToken.IsCancellationRequested)
+            while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
             {
                 for (var index = inFlight.Count - 1; index >= 0; index--)
                 {
@@ -254,58 +383,170 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     inFlight.RemoveAt(index);
                 }
 
-                if (DateTimeOffset.UtcNow >= heartbeatAt)
-                {
-                    await HeartbeatAsync(configuration, secrets, cancellationToken).ConfigureAwait(false);
-                    heartbeatAt = DateTimeOffset.UtcNow.AddSeconds(60);
-                }
-
                 if (inFlight.Count >= ControlRequestConcurrency)
                 {
                     await Task.WhenAny(inFlight).ConfigureAwait(false);
                     continue;
                 }
 
-                var claim = await SendCloudAsync<CloudClaimResponse>(
-                    configuration,
-                    secrets,
-                    HttpMethod.Post,
-                    "/v1/remote-requests/claim",
-                    new { connector_id = configuration.ConnectorId },
-                    cancellationToken).ConfigureAwait(false);
-                if (claim.State != "empty" && claim.Request is not null)
+                var receive = ReceiveControlTextAsync(socket, keepaliveCancellation.Token);
+                var completed = await Task.WhenAny(receive, keepalive).ConfigureAwait(false);
+                if (completed == keepalive)
                 {
-                    inFlight.Add(HandleClaimAsync(configuration, secrets, claim.Request, cancellationToken));
+                    keepaliveCancellation.Cancel();
+                    await IgnoreCancellation(receive).ConfigureAwait(false);
+                    await keepalive.ConfigureAwait(false);
+                }
+                var raw = await receive.ConfigureAwait(false);
+                var message = JsonSerializer.Deserialize<ControlMessage>(raw, JsonOptions)
+                    ?? throw new InvalidOperationException("controlMessageMalformed");
+                if (message.ConnectorControlProtocol < ConnectorControlProtocolVersion)
+                {
                     continue;
                 }
-
-                await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(false);
+                if (message.Type == "pong")
+                {
+                    continue;
+                }
+                if (message.Type != "remote_request_available" || !IsSafeControlRequestId(message.RequestId))
+                {
+                    throw new InvalidOperationException("controlMessageInvalid");
+                }
+                var claim = await ClaimExactAsync(
+                    configuration, secrets, message.RequestId!, cancellationToken).ConfigureAwait(false);
+                if (claim is not null)
+                {
+                    inFlight.Add(HandleClaimAsync(configuration, secrets, claim, cancellationToken));
+                }
             }
         }
         finally
         {
+            keepaliveCancellation.Cancel();
+            await IgnoreCancellation(keepalive).ConfigureAwait(false);
             await IgnoreCancellation(Task.WhenAll(inFlight)).ConfigureAwait(false);
         }
+        if (!cancellationToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException("controlDisconnected");
+        }
     }
+
+    private async Task RunControlKeepaliveAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        ClientWebSocket socket,
+        SemaphoreSlim sendGate,
+        int keepaliveSeconds,
+        CancellationToken cancellationToken)
+    {
+        var pingAt = DateTimeOffset.UtcNow.AddSeconds(keepaliveSeconds);
+        while (!cancellationToken.IsCancellationRequested && socket.State == WebSocketState.Open)
+        {
+            await HeartbeatAsync(configuration, secrets, cancellationToken).ConfigureAwait(false);
+            if (DateTimeOffset.UtcNow >= pingAt)
+            {
+                await SendControlActionAsync(socket, sendGate, "ping", cancellationToken).ConfigureAwait(false);
+                pingAt = DateTimeOffset.UtcNow.AddSeconds(keepaliveSeconds);
+            }
+            await Task.Delay(TimeSpan.FromSeconds(60), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static Task SendControlActionAsync(
+        ClientWebSocket socket,
+        SemaphoreSlim sendGate,
+        string action,
+        CancellationToken cancellationToken)
+        => SendTextAsync(socket, sendGate, JsonSerializer.Serialize(new
+        {
+            action,
+            connector_control_protocol = ConnectorControlProtocolVersion,
+        }, JsonOptions), cancellationToken);
+
+    private async Task<CloudRequest?> ClaimExactAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var claim = await SendCloudAsync<CloudClaimResponse>(
+                configuration,
+                secrets,
+                HttpMethod.Post,
+                $"/v1/remote-requests/{Uri.EscapeDataString(requestId)}/claim",
+                new
+                {
+                    connector_id = configuration.ConnectorId,
+                    connector_control_protocol = ConnectorControlProtocolVersion,
+                },
+                cancellationToken).ConfigureAwait(false);
+            return claim.State == "claimed" ? claim.Request : null;
+        }
+        catch (InvalidOperationException exception) when (exception.Message is
+            "cloudRemoteRequestClaimHttp404" or
+            "cloudRemoteRequestClaimHttp409" or
+            "cloudRemoteRequestClaimHttp410")
+        {
+            return null;
+        }
+    }
+
+    private async Task<CloudRequest?> RecoverDisconnectedClaimAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        CancellationToken cancellationToken)
+    {
+        var claim = await SendCloudAsync<CloudClaimResponse>(
+            configuration,
+            secrets,
+            HttpMethod.Post,
+            "/v1/remote-requests/claim",
+            new
+            {
+                connector_id = configuration.ConnectorId,
+                connector_control_protocol = ConnectorControlProtocolVersion,
+                recovery = true,
+            },
+            cancellationToken).ConfigureAwait(false);
+        return claim.State == "claimed" ? claim.Request : null;
+    }
+
+    internal static TimeSpan DisconnectedRecoveryDelay(int jitterSeconds)
+        => TimeSpan.FromSeconds(DisconnectedRecoveryMinimumSeconds + Math.Clamp(jitterSeconds, 0, 15));
+
+    internal static bool IsSafeControlRequestId(string? requestId)
+        => !string.IsNullOrWhiteSpace(requestId)
+            && requestId.Length <= 128
+            && requestId.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
 
     private async Task HeartbeatAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
         CancellationToken cancellationToken)
     {
+        // Jellyfin's generic plugin-configuration endpoint replaces the
+        // Configuration instance when an administrator saves this page. The
+        // long-running connector still owns the instance captured when it
+        // connected, so always project capabilities from the current saved
+        // instance. This keeps the signed heartbeat and destructive-command
+        // policy aligned without requiring a Jellyfin restart.
+        var runtimeConfiguration = RuntimeConfiguration(configuration);
         var response = await SendCloudAsync<ConnectorRegistrationResponse>(
-            configuration,
+            runtimeConfiguration,
             secrets,
             HttpMethod.Post,
-            $"/v1/home-connectors/{Uri.EscapeDataString(configuration.ConnectorId)}/heartbeat",
+            $"/v1/home-connectors/{Uri.EscapeDataString(runtimeConfiguration.ConnectorId)}/heartbeat",
             new
             {
-                connector_id = configuration.ConnectorId,
-                profile_id = ProfileIdForCloud(configuration.ProfileId, _pairingV3Active),
-                provider_status = BuildProviderStatus(secrets, configuration, includeOptimizer: true)
+                connector_id = runtimeConfiguration.ConnectorId,
+                profile_id = ProfileIdForCloud(runtimeConfiguration.ProfileId, _pairingV3Active),
+                provider_status = BuildProviderStatus(secrets, runtimeConfiguration, includeOptimizer: true)
             },
             cancellationToken).ConfigureAwait(false);
-        ApplyPlaybackConfiguration(configuration, response.Playback);
+        ApplyPlaybackConfiguration(runtimeConfiguration, response.Playback);
         _state.Set("online", heartbeat: true);
     }
 
@@ -336,21 +577,26 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         try
         {
-            ApplyAuthoritativeProfileProviderBinding(configuration, request);
+            // Re-read the saved configuration for every command as well as
+            // every heartbeat. In particular, account deletion must enforce
+            // the same live TwoWayProfileDeletionEnabled value that Cloud
+            // showed to the user during preflight.
+            var runtimeConfiguration = RuntimeConfiguration(configuration);
+            ApplyAuthoritativeProfileProviderBinding(runtimeConfiguration, request);
             // Provider settings can be saved while the long-running connector is
             // already online. Re-read the owner-only secret file for every claim
             // so health checks, searches, and mutations all use the same current
             // provider configuration without requiring a Jellyfin restart.
             var currentSecrets = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false) ?? secrets;
             var result = request.Method == "GET"
-                ? await ExecuteReadAsync(configuration, currentSecrets, request, cancellationToken).ConfigureAwait(false)
-                : await ExecuteCommandAsync(configuration, currentSecrets, request, cancellationToken).ConfigureAwait(false);
+                ? await ExecuteReadAsync(runtimeConfiguration, currentSecrets, request, cancellationToken).ConfigureAwait(false)
+                : await ExecuteCommandAsync(runtimeConfiguration, currentSecrets, request, cancellationToken).ConfigureAwait(false);
             await SendCloudAsync<JsonElement>(
-                configuration,
+                runtimeConfiguration,
                 secrets,
                 HttpMethod.Post,
                 $"/v1/remote-requests/{Uri.EscapeDataString(request.RequestId)}/complete",
-                new { connector_id = configuration.ConnectorId, http_status = result.Status, response = result.Payload, truncated = result.Truncated },
+                new { connector_id = runtimeConfiguration.ConnectorId, http_status = result.Status, response = result.Payload, truncated = result.Truncated },
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception)
@@ -455,13 +701,34 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 throw new InvalidOperationException("remoteProviderRouteNotAllowed");
             }
 
-            return await SendProviderReadAsync(
+            var hasIdentityBatch = TryGetArrIdentityBatch(
+                request.Provider,
+                request.Path,
+                request.Query,
+                out var identityField,
+                out var identityValues);
+            var providerResult = await SendProviderReadAsync(
                 configuration,
                 secrets,
                 request.Provider,
                 request.Path,
-                request.Query,
+                hasIdentityBatch ? null : request.Query,
                 cancellationToken).ConfigureAwait(false);
+            if (hasIdentityBatch)
+            {
+                providerResult = providerResult with
+                {
+                    Payload = FilterArrCatalog(providerResult.Payload, identityField, identityValues)
+                };
+            }
+            return request.Provider is "sonarr" or "radarr" && request.Path == "/api/v3/queue"
+                ? await EnrichArrQueueDownloadClientIdsAsync(
+                    configuration,
+                    secrets,
+                    request.Provider,
+                    providerResult,
+                    cancellationToken).ConfigureAwait(false)
+                : providerResult;
         }
 
         if (request.Path == "/kaevo/internal/image")
@@ -477,6 +744,16 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         if (request.Path == "/kaevo/internal/main-snapshot")
         {
             return await ReadMainSnapshotAsync(
+                configuration,
+                secrets,
+                request.ProfileId,
+                request.Query,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (request.Path == "/kaevo/internal/guest-scope")
+        {
+            return await ReadGuestScopeAsync(
                 configuration,
                 secrets,
                 request.ProfileId,
@@ -501,6 +778,17 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         var operation = request.Operation ?? request.Path.Replace("/commands/", string.Empty, StringComparison.Ordinal);
         var parameters = request.Parameters ?? new Dictionary<string, JsonElement>();
+        if (IsAccountLifecycleV2Operation(operation))
+        {
+            return await ExecuteAccountLifecycleV2CommandAsync(
+                configuration,
+                secrets,
+                request,
+                operation,
+                parameters,
+                cancellationToken).ConfigureAwait(false);
+        }
+
         if (operation == "jellyfin.inspect_profile_binding_owner")
         {
             var jellyfinUserId = RequireString(
@@ -603,6 +891,246 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             {
                 provider = "jellyfin",
                 provider_user_id = jellyfinUserId
+            });
+        }
+
+        if (operation == "seerr.delete_exact_bound_user")
+        {
+            KaevoTwoWayProfileDeletionPolicy.Require(configuration);
+            var jellyfinUserId = RequireBoundJellyfinUserId(
+                configuration,
+                request,
+                "profileJellyfinBindingMissing");
+            var requestedJellyfinUserId = RequireString(
+                parameters,
+                "jellyfin_user_id",
+                "providerIdentityInvalid");
+            if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                    requestedJellyfinUserId,
+                    out var normalizedRequestedUserId)
+                || !string.Equals(jellyfinUserId, normalizedRequestedUserId, StringComparison.Ordinal)
+                || !parameters.TryGetValue("seerr_user_id", out var seerrIDValue)
+                || !seerrIDValue.TryGetInt32(out var seerrUserId)
+                || seerrUserId <= 0)
+            {
+                throw new InvalidOperationException("providerIdentityMismatch");
+            }
+
+            var deletion = await _seerrIdentityProvisioning.DeleteExactJellyfinUserAsync(
+                secrets,
+                jellyfinUserId,
+                seerrUserId,
+                cancellationToken).ConfigureAwait(false);
+            if (deletion.State is not ("deleted" or "absent"))
+            {
+                throw new InvalidOperationException(deletion.State);
+            }
+            return CompleteCommand(request, operation, new
+            {
+                provider = "seerr",
+                state = deletion.State,
+                jellyfin_user_id = jellyfinUserId,
+                seerr_user_id = seerrUserId,
+                absence_confirmed = true
+            });
+        }
+
+        if (operation == "seerr.delete_orphaned_jellyfin_user")
+        {
+            KaevoTwoWayProfileDeletionPolicy.Require(configuration);
+            var requestedJellyfinUserId = RequireString(
+                parameters,
+                "jellyfin_user_id",
+                "providerIdentityInvalid");
+            if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                    requestedJellyfinUserId,
+                    out var jellyfinUserId)
+                || !parameters.TryGetValue("seerr_user_id", out var seerrIDValue)
+                || !seerrIDValue.TryGetInt32(out var seerrUserId)
+                || seerrUserId <= 0)
+            {
+                throw new InvalidOperationException("providerIdentityMismatch");
+            }
+
+            // Orphan repair is deliberately narrower than normal account
+            // deletion: the immutable Jellyfin identity must be authoritatively
+            // absent before the exact Seerr/Jellyfin pair can be removed.
+            var users = await SendLocalAsync(
+                configuration, secrets, HttpMethod.Get, "/Users", null, null, cancellationToken).ConfigureAwait(false);
+            if (ExactJellyfinUserOccurrences(users.Payload, jellyfinUserId) != 0)
+            {
+                throw new InvalidOperationException("jellyfinUserStillPresent");
+            }
+
+            var deletion = await _seerrIdentityProvisioning.DeleteExactJellyfinUserAsync(
+                secrets,
+                jellyfinUserId,
+                seerrUserId,
+                cancellationToken).ConfigureAwait(false);
+            if (deletion.State is not ("deleted" or "absent"))
+            {
+                throw new InvalidOperationException(deletion.State);
+            }
+            return CompleteCommand(request, operation, new
+            {
+                provider = "seerr",
+                state = deletion.State,
+                jellyfin_user_id = jellyfinUserId,
+                seerr_user_id = seerrUserId,
+                jellyfin_absence_confirmed = true,
+                absence_confirmed = true
+            });
+        }
+
+        if (operation == "jellyfin.delete_exact_bound_user")
+        {
+            KaevoTwoWayProfileDeletionPolicy.Require(configuration);
+            var jellyfinUserId = RequireBoundJellyfinUserId(
+                configuration,
+                request,
+                "profileJellyfinBindingMissing");
+            var requestedJellyfinUserId = RequireString(
+                parameters,
+                "jellyfin_user_id",
+                "providerIdentityInvalid");
+            if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                    requestedJellyfinUserId,
+                    out var normalizedRequestedUserId)
+                || !string.Equals(jellyfinUserId, normalizedRequestedUserId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("providerIdentityMismatch");
+            }
+
+            var usersBefore = await SendLocalAsync(
+                configuration, secrets, HttpMethod.Get, "/Users", null, null, cancellationToken).ConfigureAwait(false);
+            var exactBefore = ExactJellyfinUserOccurrences(usersBefore.Payload, jellyfinUserId);
+            if (exactBefore > 1)
+            {
+                throw new InvalidOperationException("jellyfinUserAmbiguous");
+            }
+            if (exactBefore == 1)
+            {
+                await SendLocalAsync(
+                    configuration,
+                    secrets,
+                    HttpMethod.Delete,
+                    $"/Users/{Uri.EscapeDataString(jellyfinUserId)}",
+                    null,
+                    null,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            var usersAfter = await SendLocalAsync(
+                configuration, secrets, HttpMethod.Get, "/Users", null, null, cancellationToken).ConfigureAwait(false);
+            if (ExactJellyfinUserOccurrences(usersAfter.Payload, jellyfinUserId) != 0)
+            {
+                throw new InvalidOperationException("jellyfinDeleteUnconfirmed");
+            }
+
+            lock (ProfileBindingSync)
+            {
+                if (!KaevoProfileJellyfinBindingStore.TryUnbind(
+                        configuration,
+                        request.ProfileId,
+                        jellyfinUserId))
+                {
+                    throw new InvalidOperationException("profileJellyfinBindingConflict");
+                }
+                KaevoPlugin.Instance?.SaveConfiguration();
+            }
+            return CompleteCommand(request, operation, new
+            {
+                provider = "jellyfin",
+                state = exactBefore == 0 ? "absent" : "deleted",
+                jellyfin_user_id = jellyfinUserId,
+                absence_confirmed = true
+            });
+        }
+
+        if (operation == "jellyfin.delete_pending_exact_user")
+        {
+            KaevoTwoWayProfileDeletionPolicy.Require(configuration);
+            var requestedJellyfinUserId = RequireString(
+                parameters,
+                "jellyfin_user_id",
+                "providerIdentityInvalid");
+            if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                    requestedJellyfinUserId,
+                    out var jellyfinUserId))
+            {
+                throw new InvalidOperationException("providerIdentityMismatch");
+            }
+
+            var ownerLookup = KaevoProfileJellyfinBindingStore.FindExactOwner(
+                configuration.ProfileJellyfinBindingsJson,
+                jellyfinUserId,
+                out var sourceProfileId);
+            if (ownerLookup is KaevoProfileJellyfinBindingOwnerLookupResult.BindingStoreInvalid)
+            {
+                throw new InvalidOperationException("binding_store_invalid");
+            }
+            if (ownerLookup is KaevoProfileJellyfinBindingOwnerLookupResult.Ambiguous)
+            {
+                throw new InvalidOperationException("profileJellyfinBindingOwnerAmbiguous");
+            }
+            if (ownerLookup is KaevoProfileJellyfinBindingOwnerLookupResult.Found
+                && !string.Equals(sourceProfileId, request.ProfileId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("profileJellyfinBindingOwnerChanged");
+            }
+
+            var usersBefore = await SendLocalAsync(
+                configuration, secrets, HttpMethod.Get, "/Users", null, null, cancellationToken).ConfigureAwait(false);
+            var exactBefore = ExactJellyfinUserOccurrences(usersBefore.Payload, jellyfinUserId);
+            if (exactBefore > 1)
+            {
+                throw new InvalidOperationException("jellyfinUserAmbiguous");
+            }
+            if (ownerLookup is KaevoProfileJellyfinBindingOwnerLookupResult.Missing && exactBefore != 0)
+            {
+                // A present user with no exact binding has lost its authority
+                // edge. Never infer ownership from a name or the pending UI.
+                throw new InvalidOperationException("profileJellyfinBindingMissing");
+            }
+            if (exactBefore == 1)
+            {
+                await SendLocalAsync(
+                    configuration,
+                    secrets,
+                    HttpMethod.Delete,
+                    $"/Users/{Uri.EscapeDataString(jellyfinUserId)}",
+                    null,
+                    null,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            var usersAfter = await SendLocalAsync(
+                configuration, secrets, HttpMethod.Get, "/Users", null, null, cancellationToken).ConfigureAwait(false);
+            if (ExactJellyfinUserOccurrences(usersAfter.Payload, jellyfinUserId) != 0)
+            {
+                throw new InvalidOperationException("jellyfinDeleteUnconfirmed");
+            }
+
+            if (ownerLookup is KaevoProfileJellyfinBindingOwnerLookupResult.Found)
+            {
+                lock (ProfileBindingSync)
+                {
+                    if (!KaevoProfileJellyfinBindingStore.TryUnbind(
+                            configuration,
+                            request.ProfileId,
+                            jellyfinUserId))
+                    {
+                        throw new InvalidOperationException("profileJellyfinBindingConflict");
+                    }
+                    KaevoPlugin.Instance?.SaveConfiguration();
+                }
+            }
+            return CompleteCommand(request, operation, new
+            {
+                provider = "jellyfin",
+                state = exactBefore == 0 ? "absent" : "deleted",
+                jellyfin_user_id = jellyfinUserId,
+                absence_confirmed = true
             });
         }
 
@@ -789,20 +1317,81 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             return await PreparePlaybackAsync(configuration, secrets, request, parameters, cancellationToken).ConfigureAwait(false);
         }
 
-        if (operation is "jellyfin.mark_played" or "jellyfin.mark_unplayed" or "jellyfin.favorite" or "jellyfin.unfavorite")
+        if (operation is "jellyfin.mark_played" or "jellyfin.mark_unplayed")
         {
             var itemId = RequireItemId(parameters);
             var jellyfinUserId = RequireBoundJellyfinUserId(
                 configuration,
                 request,
                 "profileJellyfinBindingMissing");
-            var (method, suffix) = operation switch
+            var method = operation == "jellyfin.mark_played"
+                ? HttpMethod.Post
+                : HttpMethod.Delete;
+            var readback = await SendLocalAsync(
+                configuration,
+                secrets,
+                method,
+                BuildWatchedMutationPath(itemId, jellyfinUserId),
+                null,
+                null,
+                cancellationToken).ConfigureAwait(false);
+            var played = ReadWatchedMutationState(readback.Payload, itemId);
+            return new CommandResult(
+                200,
+                BuildWatchedMutationPayload(request, operation, itemId, played),
+                false);
+        }
+
+        if (operation == "jellyfin.refresh_metadata")
+        {
+            if (!configuration.RemoteMetadataEnabled || !configuration.RemoteWritesEnabled)
             {
-                "jellyfin.mark_played" => (HttpMethod.Post, "UserPlayedItems"),
-                "jellyfin.mark_unplayed" => (HttpMethod.Delete, "UserPlayedItems"),
-                "jellyfin.favorite" => (HttpMethod.Post, "UserFavoriteItems"),
-                _ => (HttpMethod.Delete, "UserFavoriteItems")
-            };
+                throw new InvalidOperationException("remoteMetadataRefreshDisabled");
+            }
+
+            var itemId = RequireItemId(parameters);
+            var mode = RequireString(parameters, "mode", "metadataRefreshModeInvalid");
+            var replaceImages = RequireBoolean(
+                parameters,
+                "replace_images",
+                "metadataRefreshReplaceImagesInvalid");
+            var regenerateTrickplay = RequireBoolean(
+                parameters,
+                "regenerate_trickplay",
+                "metadataRefreshTrickplayInvalid");
+            var refreshRequest = BuildMetadataRefreshRequest(
+                itemId,
+                mode,
+                replaceImages,
+                regenerateTrickplay);
+            await SendLocalAsync(
+                configuration,
+                secrets,
+                HttpMethod.Post,
+                refreshRequest.Path,
+                refreshRequest.Query,
+                null,
+                cancellationToken).ConfigureAwait(false);
+            return CompleteCommand(request, operation, new
+            {
+                item_id = itemId,
+                queued = true,
+                mode,
+                replace_images = replaceImages,
+                regenerate_trickplay = regenerateTrickplay
+            });
+        }
+
+        if (operation is "jellyfin.favorite" or "jellyfin.unfavorite")
+        {
+            var itemId = RequireItemId(parameters);
+            var jellyfinUserId = RequireBoundJellyfinUserId(
+                configuration,
+                request,
+                "profileJellyfinBindingMissing");
+            var (method, suffix) = operation == "jellyfin.favorite"
+                ? (HttpMethod.Post, "UserFavoriteItems")
+                : (HttpMethod.Delete, "UserFavoriteItems");
             var path = $"/{suffix}/{itemId}?userId={Uri.EscapeDataString(jellyfinUserId)}";
             await SendLocalAsync(configuration, secrets, method, path, null, null, cancellationToken).ConfigureAwait(false);
             return new CommandResult(200, JsonSerializer.SerializeToElement(new
@@ -846,30 +1435,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 throw new InvalidOperationException("remotePlaybackDisabled");
             }
 
-            var itemId = RequireItemId(parameters);
-            var mediaSourceId = RequireString(parameters, "media_source_id", 128);
-            var playSessionId = RequireString(parameters, "play_session_id", 128);
-            var positionTicks = parameters.TryGetValue("position_ticks", out var ticksElement)
-                && ticksElement.TryGetInt64(out var ticks) && ticks >= 0 ? ticks : 0;
-            var isPaused = parameters.TryGetValue("is_paused", out var pausedElement)
-                && (pausedElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
-                && pausedElement.GetBoolean();
-            var endpoint = operation switch
+            var playback = BuildBoundPlaybackRequest(configuration, request, operation, parameters);
+            await ReportBoundPlaybackAsync(playback, cancellationToken).ConfigureAwait(false);
+            return CompleteCommand(request, operation, new
             {
-                "jellyfin.playback_started" => "/Sessions/Playing",
-                "jellyfin.playback_progress" => "/Sessions/Playing/Progress",
-                _ => "/Sessions/Playing/Stopped"
-            };
-            await SendLocalAsync(configuration, secrets, HttpMethod.Post, endpoint, null, new
-            {
-                ItemId = itemId,
-                MediaSourceId = mediaSourceId,
-                PlaySessionId = playSessionId,
-                PositionTicks = positionTicks,
-                IsPaused = isPaused,
-                CanSeek = true
-            }, cancellationToken).ConfigureAwait(false);
-            return CompleteCommand(request, operation, new { item_id = itemId, position_ticks = positionTicks, applied = true });
+                item_id = playback.ItemId.ToString("N"),
+                position_ticks = playback.PositionTicks,
+                applied = true
+            });
         }
 
         if (operation == "provider.health")
@@ -877,6 +1450,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             var providerName = RequireProviderName(parameters);
             var health = await ReadProviderHealthAsync(secrets, providerName, cancellationToken).ConfigureAwait(false);
             return CompleteCommand(request, operation, health);
+        }
+
+        if (operation == "downloaders.set_queue_state")
+        {
+            var result = await SetExactQueueDownloadStateAsync(configuration, secrets, parameters, cancellationToken)
+                .ConfigureAwait(false);
+            return CompleteCommand(request, operation, result);
         }
 
         if (operation == "seerr.create_request")
@@ -894,13 +1474,29 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             var is4K = parameters.TryGetValue("is_4k", out var fourKElement)
                 && (fourKElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
                 && fourKElement.GetBoolean();
-            var created = await SendSeerrJsonAsync(secrets, HttpMethod.Post, "/api/v1/request", new
+            // Cloud derives this authority from the protected profile session.
+            // Members always carry an exact immutable Seerr user id. The
+            // canonical household Owner may instead use the Seerr identity
+            // already authenticated by this connector; no duplicate provider
+            // account is created and the device cannot select this mode.
+            var requesterUserId = ResolveSeerrCreateRequesterUserId(parameters);
+            var requestBody = new Dictionary<string, object?>
             {
-                mediaType,
-                mediaId,
-                seasons,
-                is4k = is4K
-            }, cancellationToken).ConfigureAwait(false);
+                ["mediaType"] = mediaType,
+                ["mediaId"] = mediaId,
+                ["seasons"] = seasons,
+                ["is4k"] = is4K
+            };
+            if (requesterUserId is not null)
+            {
+                requestBody["userId"] = requesterUserId.Value;
+            }
+            var created = await SendSeerrJsonAsync(
+                secrets,
+                HttpMethod.Post,
+                "/api/v1/request",
+                requestBody,
+                cancellationToken).ConfigureAwait(false);
             return CompleteCommand(request, operation, created);
         }
 
@@ -994,6 +1590,194 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         throw new InvalidOperationException("remoteCommandNotAllowed");
     }
 
+    internal static BoundPlaybackRequest BuildBoundPlaybackRequest(
+        PluginConfiguration configuration,
+        CloudRequest request,
+        string operation,
+        IReadOnlyDictionary<string, JsonElement> parameters)
+    {
+        var jellyfinUserId = RequireBoundJellyfinUserId(
+            configuration,
+            request,
+            "profileJellyfinBindingMissing");
+        var itemId = Guid.ParseExact(RequireItemId(parameters), "N");
+        var mediaSourceId = RequireString(parameters, "media_source_id", 128);
+        var playSessionId = RequireString(parameters, "play_session_id", 128);
+        var positionTicks = parameters.TryGetValue("position_ticks", out var ticksElement)
+            && ticksElement.TryGetInt64(out var ticks) && ticks >= 0 ? ticks : 0;
+        var isPaused = parameters.TryGetValue("is_paused", out var pausedElement)
+            && (pausedElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            && pausedElement.GetBoolean();
+        if (operation is not ("jellyfin.playback_started" or "jellyfin.playback_progress" or "jellyfin.playback_stopped"))
+        {
+            throw new InvalidOperationException("remoteCommandNotAllowed");
+        }
+
+        var sessionKey = Encoding.UTF8.GetBytes($"{jellyfinUserId}:{playSessionId}");
+        var deviceId = Convert.ToHexString(SHA256.HashData(sessionKey)).ToLowerInvariant();
+        return new BoundPlaybackRequest(
+            operation,
+            jellyfinUserId,
+            deviceId,
+            itemId,
+            mediaSourceId,
+            playSessionId,
+            positionTicks,
+            isPaused);
+    }
+
+    internal static object BuildPlaybackInfo(
+        BoundPlaybackRequest playback,
+        string sessionId,
+        PlayMethod playMethod)
+        => playback.Operation switch
+        {
+            "jellyfin.playback_started" => new PlaybackStartInfo
+            {
+                ItemId = playback.ItemId,
+                MediaSourceId = playback.MediaSourceId,
+                PlaySessionId = playback.PlaySessionId,
+                PositionTicks = playback.PositionTicks,
+                IsPaused = playback.IsPaused,
+                CanSeek = true,
+                PlayMethod = playMethod,
+                SessionId = sessionId
+            },
+            "jellyfin.playback_progress" => new PlaybackProgressInfo
+            {
+                ItemId = playback.ItemId,
+                MediaSourceId = playback.MediaSourceId,
+                PlaySessionId = playback.PlaySessionId,
+                PositionTicks = playback.PositionTicks,
+                IsPaused = playback.IsPaused,
+                CanSeek = true,
+                PlayMethod = playMethod,
+                SessionId = sessionId
+            },
+            "jellyfin.playback_stopped" => new PlaybackStopInfo
+            {
+                ItemId = playback.ItemId,
+                MediaSourceId = playback.MediaSourceId,
+                PlaySessionId = playback.PlaySessionId,
+                PositionTicks = playback.PositionTicks,
+                SessionId = sessionId
+            },
+            _ => throw new InvalidOperationException("remoteCommandNotAllowed")
+        };
+
+    private async Task ReportBoundPlaybackAsync(
+        BoundPlaybackRequest playback,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var user = ResolveJellyfinUserAtRuntime(
+            _userManager,
+            Guid.ParseExact(playback.JellyfinUserId, "N"));
+        if (user is null)
+        {
+            throw new InvalidOperationException("profileJellyfinBindingMissing");
+        }
+
+        var sessionId = await LogJellyfinSessionActivityAtRuntimeAsync(
+            _sessionManager,
+            "Kaevo",
+            PluginVersion,
+            playback.DeviceId,
+            "Kaevo iOS",
+            IPAddress.Loopback.ToString(),
+            user).ConfigureAwait(false);
+        var playMethod = _transcodeManager.GetTranscodingJob(playback.PlaySessionId) is null
+            ? PlayMethod.DirectPlay
+            : PlayMethod.Transcode;
+        var info = BuildPlaybackInfo(playback, sessionId, playMethod);
+        switch (info)
+        {
+            case PlaybackStartInfo start:
+                await _sessionManager.OnPlaybackStart(start).ConfigureAwait(false);
+                break;
+            case PlaybackProgressInfo progress:
+                await _sessionManager.OnPlaybackProgress(progress).ConfigureAwait(false);
+                break;
+            case PlaybackStopInfo stopped:
+                await _sessionManager.OnPlaybackStopped(stopped).ConfigureAwait(false);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Resolves the exact bound Jellyfin user through the runtime implementation.
+    /// Jellyfin 10.11 moved its User entity to a new assembly/namespace while the
+    /// plugin remains net8-compatible against the 10.10 controller contract. A
+    /// direct interface call therefore carries the retired return-type identity.
+    /// The Guid remains the sole authority; reflection only bridges that binary
+    /// type move and cannot select a different user.
+    /// </summary>
+    internal static object? ResolveJellyfinUserAtRuntime(object userManager, Guid userId)
+    {
+        var method = userManager.GetType().GetMethod(
+            "GetUserById",
+            BindingFlags.Instance | BindingFlags.Public,
+            binder: null,
+            types: [typeof(Guid)],
+            modifiers: null);
+        if (method is null)
+        {
+            throw new InvalidOperationException("jellyfinSessionCompatibilityUnavailable");
+        }
+
+        return method.Invoke(userManager, [userId]);
+    }
+
+    /// <summary>
+    /// Opens the playback-reporting session using the runtime User type resolved
+    /// above. The remaining SessionInfo and playback DTO contracts are stable
+    /// across Jellyfin 10.10 and 10.11 and continue through their typed paths.
+    /// </summary>
+    internal static async Task<string> LogJellyfinSessionActivityAtRuntimeAsync(
+        object sessionManager,
+        string appName,
+        string appVersion,
+        string deviceId,
+        string deviceName,
+        string remoteEndPoint,
+        object user)
+    {
+        var method = sessionManager.GetType()
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .SingleOrDefault(candidate =>
+            {
+                if (!string.Equals(candidate.Name, "LogSessionActivity", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var parameters = candidate.GetParameters();
+                return parameters.Length == 6
+                    && parameters.Take(5).All(parameter => parameter.ParameterType == typeof(string))
+                    && parameters[5].ParameterType.IsInstanceOfType(user);
+            });
+        if (method is null
+            || method.Invoke(
+                sessionManager,
+                [appName, appVersion, deviceId, deviceName, remoteEndPoint, user])
+                is not Task sessionTask)
+        {
+            throw new InvalidOperationException("jellyfinSessionCompatibilityUnavailable");
+        }
+
+        await sessionTask.ConfigureAwait(false);
+        var session = sessionTask.GetType().GetProperty("Result", BindingFlags.Instance | BindingFlags.Public)
+            ?.GetValue(sessionTask);
+        var sessionId = session?.GetType().GetProperty("Id", BindingFlags.Instance | BindingFlags.Public)
+            ?.GetValue(session) as string;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new InvalidOperationException("jellyfinSessionCompatibilityUnavailable");
+        }
+
+        return sessionId;
+    }
+
     internal static string RecoverExactProfileJellyfinUserId(
         PluginConfiguration configuration,
         CloudRequest request)
@@ -1035,6 +1819,88 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             operation,
             result
         }, JsonOptions), false);
+    }
+
+    internal static int ExactJellyfinUserOccurrences(JsonElement payload, string jellyfinUserId)
+    {
+        if (payload.ValueKind != JsonValueKind.Array
+            || !KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                jellyfinUserId,
+                out var normalizedUserId))
+        {
+            throw new InvalidOperationException("jellyfinUsersReadbackInvalid");
+        }
+
+        var matches = 0;
+        foreach (var user in payload.EnumerateArray())
+        {
+            if (user.ValueKind != JsonValueKind.Object
+                || !TryGetResponseProperty(user, "Id", "id", out var id)
+                || id.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+            if (KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                    id.GetString(),
+                    out var candidate)
+                && string.Equals(candidate, normalizedUserId, StringComparison.Ordinal))
+            {
+                matches++;
+            }
+        }
+        return matches;
+    }
+
+    internal static JsonElement BuildWatchedMutationPayload(
+        CloudRequest request,
+        string operation,
+        string itemId,
+        bool played)
+    {
+        var desiredPlayed = operation == "jellyfin.mark_played";
+        return JsonSerializer.SerializeToElement(new
+        {
+            requestId = request.RequestId,
+            state = "complete",
+            operation,
+            result = new { item_id = itemId, applied = played == desiredPlayed, played }
+        }, JsonOptions);
+    }
+
+    internal static bool WatchedStateFromUserData(bool? played) => played == true;
+
+    internal static string BuildWatchedMutationPath(string itemId, string jellyfinUserId)
+    {
+        return $"/UserPlayedItems/{Uri.EscapeDataString(itemId)}?userId={Uri.EscapeDataString(jellyfinUserId)}";
+    }
+
+    internal static bool ReadWatchedMutationState(JsonElement payload, string expectedItemId)
+    {
+        if (!TryGetResponseProperty(payload, "ItemId", "itemId", out var itemIdValue)
+            || itemIdValue.ValueKind != JsonValueKind.String
+            || !string.Equals(
+                itemIdValue.GetString()?.Replace("-", string.Empty, StringComparison.Ordinal),
+                expectedItemId.Replace("-", string.Empty, StringComparison.Ordinal),
+                StringComparison.OrdinalIgnoreCase)
+            || !TryGetResponseProperty(payload, "Played", "played", out var playedValue)
+            || playedValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            throw new InvalidOperationException("jellyfinWatchedStateReadbackInvalid");
+        }
+
+        return playedValue.GetBoolean();
+    }
+
+    private static bool TryGetResponseProperty(
+        JsonElement payload,
+        string contractName,
+        string webName,
+        out JsonElement value)
+    {
+        value = default;
+        return payload.ValueKind == JsonValueKind.Object
+            && (payload.TryGetProperty(contractName, out value)
+                || payload.TryGetProperty(webName, out value));
     }
 
     private async Task CancelSonarrEpisodesAsync(
@@ -1109,6 +1975,500 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         if (bounded.Truncated) throw new InvalidOperationException("sonarrResponseTooLarge");
         using var document = JsonDocument.Parse(bounded.Data);
         return document.RootElement.Clone();
+    }
+
+    private async Task<JsonElement> SendArrJsonAsync(
+        KaevoConnectorSecrets secrets,
+        string arrKind,
+        HttpMethod method,
+        string path,
+        object? body,
+        CancellationToken cancellationToken)
+    {
+        if (arrKind is not ("sonarr" or "radarr"))
+        {
+            throw new InvalidOperationException("arrKindNotAllowed");
+        }
+
+        var arr = secrets.GetProvider(arrKind);
+        if (arr?.Enabled != true
+            || !Uri.TryCreate(arr.BaseUrl, UriKind.Absolute, out var baseUri)
+            || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps)
+            || string.IsNullOrWhiteSpace(arr.ApiKey))
+        {
+            throw new InvalidOperationException($"{arrKind}NotProvisioned");
+        }
+
+        var uri = new Uri(arr.BaseUrl.TrimEnd('/') + "/" + path.TrimStart('/'), UriKind.Absolute);
+        using var message = new HttpRequestMessage(method, uri);
+        message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        message.Headers.Add("X-Api-Key", arr.ApiKey);
+        if (body is not null)
+        {
+            message.Content = new StringContent(JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json");
+        }
+        using var response = await _providerTransport.SendAsync(arrKind, arr, message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        if ((int)response.StatusCode is >= 300 and < 400)
+        {
+            throw new InvalidOperationException($"{arrKind}RedirectRejected");
+        }
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"{arrKind}Http{(int)response.StatusCode}");
+        }
+        if (response.Content.Headers.ContentLength == 0 || method == HttpMethod.Delete)
+        {
+            return JsonSerializer.SerializeToElement(new { ok = true }, JsonOptions);
+        }
+        var bounded = await ReadBoundedAsync(response.Content, 2_000_000, cancellationToken).ConfigureAwait(false);
+        if (bounded.Truncated) throw new InvalidOperationException($"{arrKind}ResponseTooLarge");
+        using var document = JsonDocument.Parse(bounded.Data);
+        return document.RootElement.Clone();
+    }
+
+    private async Task<object> SetExactQueueDownloadStateAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        IReadOnlyDictionary<string, JsonElement> parameters,
+        CancellationToken cancellationToken)
+    {
+        var arrKind = RequireString(parameters, "arr_kind", 16).ToLowerInvariant();
+        if (arrKind is not ("sonarr" or "radarr"))
+        {
+            throw new InvalidOperationException("arrKindNotAllowed");
+        }
+        var queueId = RequirePositiveInt(parameters, "arr_queue_id");
+        var downloadClientId = RequirePositiveInt(parameters, "arr_download_client_id");
+        var downloadId = RequireString(parameters, "download_id", 128);
+        var targetState = RequireString(parameters, "target_state", 16).ToLowerInvariant();
+        if (targetState is not ("paused" or "running"))
+        {
+            throw new InvalidOperationException("downloadTargetStateInvalid");
+        }
+
+        // Arr exposes queue records through the paged collection endpoint; its
+        // single-record GET route is not available even though DELETE by id is.
+        // Re-read a bounded collection and select only the exact immutable id.
+        var queuePayload = await SendArrJsonAsync(
+            secrets,
+            arrKind,
+            HttpMethod.Get,
+            ExactArrQueueReadPath,
+            null,
+            cancellationToken).ConfigureAwait(false);
+        var queue = FindExactArrQueueRecord(queuePayload, queueId)
+            ?? throw new InvalidOperationException("arrQueueBindingChanged");
+        if (!queue.TryGetProperty("id", out var queueIdValue) || !queueIdValue.TryGetInt32(out var returnedQueueId) || returnedQueueId != queueId
+            || !queue.TryGetProperty("downloadId", out var returnedDownloadId) || !string.Equals(returnedDownloadId.GetString(), downloadId, StringComparison.Ordinal)
+            || (queue.TryGetProperty("downloadClientId", out var returnedClientId)
+                && (!returnedClientId.TryGetInt32(out var returnedDownloadClientId) || returnedDownloadClientId != downloadClientId)))
+        {
+            throw new InvalidOperationException("arrQueueBindingChanged");
+        }
+
+        var arrClient = await SendArrJsonAsync(secrets, arrKind, HttpMethod.Get, $"/api/v3/downloadclient/{downloadClientId}", null, cancellationToken).ConfigureAwait(false);
+        if (!arrClient.TryGetProperty("id", out var clientIdValue) || !clientIdValue.TryGetInt32(out var returnedDefinitionClientId) || returnedDefinitionClientId != downloadClientId)
+        {
+            throw new InvalidOperationException("arrDownloadClientBindingChanged");
+        }
+        var providerName = ResolveExactArrDownloadProvider(arrClient, secrets);
+        if (providerName is null)
+        {
+            throw new InvalidOperationException("downloadClientBindingUnverified");
+        }
+        if (!await DownloaderContainsExactJobAsync(
+                configuration,
+                secrets,
+                providerName,
+                downloadId,
+                cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidOperationException("downloadClientBindingUnverified");
+        }
+
+        var paused = targetState == "paused";
+        var confirmedPaused = providerName switch
+        {
+            "sabnzbd" => await SetSabnzbdQueueStateAsync(configuration, secrets, downloadId, paused, cancellationToken).ConfigureAwait(false),
+            "qbittorrent" => await SetQbittorrentQueueStateAsync(configuration, secrets, downloadId, paused, cancellationToken).ConfigureAwait(false),
+            _ => throw new InvalidOperationException("downloadClientBindingUnverified")
+        };
+        if (confirmedPaused != paused)
+        {
+            throw new InvalidOperationException("downloadStateReadbackMismatch");
+        }
+        return new
+        {
+            arr_kind = arrKind,
+            arr_queue_id = queueId,
+            arr_download_client_id = downloadClientId,
+            download_id = downloadId,
+            provider = providerName,
+            state = paused ? "paused" : "running",
+            read_back = true
+        };
+    }
+
+    internal static JsonElement? FindExactArrQueueRecord(JsonElement queuePayload, int queueId)
+    {
+        var records = queuePayload.ValueKind == JsonValueKind.Object
+            && queuePayload.TryGetProperty("records", out var recordsElement)
+            && recordsElement.ValueKind == JsonValueKind.Array
+                ? recordsElement
+                : queuePayload.ValueKind == JsonValueKind.Array
+                    ? queuePayload
+                    : default;
+        if (records.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var record in records.EnumerateArray())
+        {
+            if (record.ValueKind == JsonValueKind.Object
+                && record.TryGetProperty("id", out var idElement)
+                && idElement.TryGetInt32(out var id)
+                && id == queueId)
+            {
+                return record.Clone();
+            }
+        }
+        return null;
+    }
+
+    private async Task<CommandResult> EnrichArrQueueDownloadClientIdsAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string arrKind,
+        CommandResult result,
+        CancellationToken cancellationToken)
+    {
+        if (!result.Payload.TryGetProperty("records", out var records)
+            || records.ValueKind != JsonValueKind.Array)
+        {
+            return result;
+        }
+
+        JsonElement definitions;
+        try
+        {
+            definitions = await SendArrJsonAsync(
+                secrets,
+                arrKind,
+                HttpMethod.Get,
+                "/api/v3/downloadclient",
+                null,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return result;
+        }
+        if (definitions.ValueKind != JsonValueKind.Array)
+        {
+            return result;
+        }
+
+        var clients = definitions.EnumerateArray()
+            .Select(definition => new
+            {
+                ClientId = definition.TryGetProperty("id", out var id) && id.TryGetInt32(out var value) && value > 0
+                    ? value
+                    : 0,
+                Provider = ResolveExactArrDownloadProvider(definition, secrets)
+            })
+            .Where(candidate => candidate.ClientId > 0 && candidate.Provider is not null)
+            .ToArray();
+        if (clients.Length == 0)
+        {
+            return result;
+        }
+
+        var proofCache = new Dictionary<string, bool>(StringComparer.Ordinal);
+        var candidates = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+        foreach (var record in records.EnumerateArray())
+        {
+            if (record.TryGetProperty("downloadClientId", out var existingClientId)
+                && existingClientId.TryGetInt32(out var existingValue)
+                && existingValue > 0)
+            {
+                continue;
+            }
+            if (!record.TryGetProperty("downloadId", out var downloadIdElement)
+                || downloadIdElement.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+            var downloadId = downloadIdElement.GetString()?.Trim() ?? string.Empty;
+            if (downloadId.Length == 0 || downloadId.Length > 128)
+            {
+                continue;
+            }
+            foreach (var client in clients)
+            {
+                var providerName = client.Provider!;
+                var cacheKey = providerName + "\0" + downloadId;
+                if (!proofCache.TryGetValue(cacheKey, out var exists))
+                {
+                    try
+                    {
+                        exists = await DownloaderContainsExactJobAsync(
+                            configuration,
+                            secrets,
+                            providerName,
+                            downloadId,
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        exists = false;
+                    }
+                    proofCache[cacheKey] = exists;
+                }
+                if (!exists)
+                {
+                    continue;
+                }
+                if (!candidates.TryGetValue(downloadId, out var ids))
+                {
+                    ids = new HashSet<int>();
+                    candidates[downloadId] = ids;
+                }
+                ids.Add(client.ClientId);
+            }
+        }
+
+        var exactCandidates = candidates.ToDictionary(
+            pair => pair.Key,
+            pair => pair.Value.Order().ToArray(),
+            StringComparer.Ordinal);
+        return result with
+        {
+            Payload = EnrichQueueWithVerifiedDownloadClientCandidates(
+                result.Payload,
+                exactCandidates)
+        };
+    }
+
+    internal static JsonElement EnrichQueueWithVerifiedDownloadClientCandidates(
+        JsonElement payload,
+        IReadOnlyDictionary<string, int[]> candidates)
+    {
+        var root = JsonNode.Parse(payload.GetRawText()) as JsonObject;
+        if (root?["records"] is not JsonArray records)
+        {
+            return payload;
+        }
+        foreach (var node in records)
+        {
+            if (node is not JsonObject record
+                || record["downloadClientId"] is not null
+                || record["downloadId"] is not JsonValue downloadIdValue
+                || !downloadIdValue.TryGetValue<string>(out var downloadId)
+                || string.IsNullOrWhiteSpace(downloadId)
+                || !candidates.TryGetValue(downloadId.Trim(), out var clientIds)
+                || clientIds.Distinct().Take(2).ToArray() is not [var clientId]
+                || clientId <= 0)
+            {
+                continue;
+            }
+            record["downloadClientId"] = clientId;
+        }
+        return JsonSerializer.SerializeToElement(root, JsonOptions);
+    }
+
+    private async Task<bool> DownloaderContainsExactJobAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string providerName,
+        string downloadId,
+        CancellationToken cancellationToken)
+    {
+        if (providerName == "sabnzbd")
+        {
+            var queue = await SendProviderReadAsync(
+                configuration,
+                secrets,
+                "sabnzbd",
+                "/api",
+                new Dictionary<string, JsonElement>
+                {
+                    ["mode"] = JsonSerializer.SerializeToElement("queue")
+                },
+                cancellationToken).ConfigureAwait(false);
+            return queue.Payload.TryGetProperty("queue", out var queueElement)
+                && queueElement.TryGetProperty("slots", out var slots)
+                && slots.ValueKind == JsonValueKind.Array
+                && slots.EnumerateArray().Any(slot =>
+                    slot.TryGetProperty("nzo_id", out var idElement)
+                    && idElement.ValueKind == JsonValueKind.String
+                    && string.Equals(idElement.GetString(), downloadId, StringComparison.Ordinal));
+        }
+        if (providerName == "qbittorrent")
+        {
+            var torrents = await SendProviderReadAsync(
+                configuration,
+                secrets,
+                "qbittorrent",
+                "/api/v2/torrents/info",
+                new Dictionary<string, JsonElement>
+                {
+                    ["hashes"] = JsonSerializer.SerializeToElement(downloadId)
+                },
+                cancellationToken).ConfigureAwait(false);
+            return torrents.Payload.ValueKind == JsonValueKind.Array
+                && torrents.Payload.EnumerateArray().Any(torrent =>
+                    torrent.TryGetProperty("hash", out var hashElement)
+                    && hashElement.ValueKind == JsonValueKind.String
+                    && string.Equals(hashElement.GetString(), downloadId, StringComparison.OrdinalIgnoreCase));
+        }
+        return false;
+    }
+
+    internal static string? ResolveExactArrDownloadProvider(JsonElement arrClient, KaevoConnectorSecrets secrets)
+    {
+        if (!arrClient.TryGetProperty("implementation", out var implementationElement)
+            || implementationElement.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+        var providerName = implementationElement.GetString()?.Trim().ToLowerInvariant() switch
+        {
+            var implementation when implementation?.Contains("sab", StringComparison.Ordinal) == true => "sabnzbd",
+            var implementation when implementation?.Contains("qbit", StringComparison.Ordinal) == true => "qbittorrent",
+            _ => null
+        };
+        if (providerName is null || !TryReadArrDownloadClientEndpoint(arrClient, out var host, out var port))
+        {
+            return null;
+        }
+        var provider = secrets.GetProvider(providerName);
+        return provider?.Enabled == true
+            && Uri.TryCreate(provider.BaseUrl, UriKind.Absolute, out var providerUri)
+            && string.Equals(providerUri.Host, host, StringComparison.OrdinalIgnoreCase)
+            && providerUri.Port == port
+            ? providerName
+            : null;
+    }
+
+    private static bool TryReadArrDownloadClientEndpoint(JsonElement arrClient, out string host, out int port)
+    {
+        host = string.Empty;
+        port = 0;
+        if (!arrClient.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+        foreach (var field in fields.EnumerateArray())
+        {
+            if (!field.TryGetProperty("name", out var nameElement) || nameElement.ValueKind != JsonValueKind.String
+                || !field.TryGetProperty("value", out var value))
+            {
+                continue;
+            }
+            var name = nameElement.GetString();
+            if (string.Equals(name, "host", StringComparison.OrdinalIgnoreCase) && value.ValueKind == JsonValueKind.String)
+            {
+                host = value.GetString()?.Trim() ?? string.Empty;
+            }
+            else if (string.Equals(name, "port", StringComparison.OrdinalIgnoreCase))
+            {
+                if (value.TryGetInt32(out var integerPort)) port = integerPort;
+                else if (value.ValueKind == JsonValueKind.String && int.TryParse(value.GetString(), out var stringPort)) port = stringPort;
+            }
+        }
+        return host.Length > 0 && port is > 0 and <= 65535;
+    }
+
+    private async Task<bool> SetSabnzbdQueueStateAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string downloadId,
+        bool paused,
+        CancellationToken cancellationToken)
+    {
+        var commandQuery = BuildSabnzbdQueueStateQuery(downloadId, paused);
+        await SendProviderReadAsync(configuration, secrets, "sabnzbd", "/api", commandQuery, cancellationToken).ConfigureAwait(false);
+        var queue = await SendProviderReadAsync(
+            configuration,
+            secrets,
+            "sabnzbd",
+            "/api",
+            new Dictionary<string, JsonElement> { ["mode"] = JsonSerializer.SerializeToElement("queue") },
+            cancellationToken).ConfigureAwait(false);
+        if (!queue.Payload.TryGetProperty("queue", out var queueElement)
+            || !queueElement.TryGetProperty("slots", out var slots)
+            || slots.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException("sabnzbdQueueReadbackInvalid");
+        }
+        foreach (var slot in slots.EnumerateArray())
+        {
+            if (!slot.TryGetProperty("nzo_id", out var idElement)
+                || !string.Equals(idElement.GetString(), downloadId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            var state = slot.TryGetProperty("status", out var stateElement) ? stateElement.GetString() ?? string.Empty : string.Empty;
+            return state.Contains("pause", StringComparison.OrdinalIgnoreCase);
+        }
+        throw new InvalidOperationException("sabnzbdQueueReadbackMissing");
+    }
+
+    internal static IReadOnlyDictionary<string, JsonElement> BuildSabnzbdQueueStateQuery(
+        string downloadId,
+        bool paused) => new Dictionary<string, JsonElement>
+        {
+            // SABnzbd's top-level mode=pause|resume controls the entire queue
+            // and does not target value. Exact job control is a queue command.
+            ["mode"] = JsonSerializer.SerializeToElement("queue"),
+            ["name"] = JsonSerializer.SerializeToElement(paused ? "pause" : "resume"),
+            ["value"] = JsonSerializer.SerializeToElement(downloadId)
+        };
+
+    private async Task<bool> SetQbittorrentQueueStateAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string downloadId,
+        bool paused,
+        CancellationToken cancellationToken)
+    {
+        var provider = secrets.GetProvider("qbittorrent");
+        if (provider?.Enabled != true || !Uri.TryCreate(provider.BaseUrl, UriKind.Absolute, out _))
+        {
+            throw new InvalidOperationException("qbittorrentNotProvisioned");
+        }
+        var cookie = await AuthenticateQbittorrentAsync(provider, cancellationToken).ConfigureAwait(false);
+        var uri = new Uri(provider.BaseUrl.TrimEnd('/') + $"/api/v2/torrents/{(paused ? "pause" : "resume")}", UriKind.Absolute);
+        using (var message = new HttpRequestMessage(HttpMethod.Post, uri)
+        {
+            Content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("hashes", downloadId) })
+        })
+        {
+            message.Headers.TryAddWithoutValidation("Cookie", cookie);
+            using var response = await _providerTransport.SendAsync("qbittorrent", provider, message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if ((int)response.StatusCode is >= 300 and < 400) throw new InvalidOperationException("qbittorrentRedirectRejected");
+            if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"qbittorrentHttp{(int)response.StatusCode}");
+        }
+        var info = await SendProviderReadAsync(
+            configuration,
+            secrets,
+            "qbittorrent",
+            "/api/v2/torrents/info",
+            new Dictionary<string, JsonElement> { ["hashes"] = JsonSerializer.SerializeToElement(downloadId) },
+            cancellationToken).ConfigureAwait(false);
+        if (info.Payload.ValueKind != JsonValueKind.Array) throw new InvalidOperationException("qbittorrentQueueReadbackInvalid");
+        foreach (var torrent in info.Payload.EnumerateArray())
+        {
+            if (!torrent.TryGetProperty("hash", out var hashElement)
+                || !string.Equals(hashElement.GetString(), downloadId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            var state = torrent.TryGetProperty("state", out var stateElement) ? stateElement.GetString() ?? string.Empty : string.Empty;
+            return state.StartsWith("paused", StringComparison.OrdinalIgnoreCase);
+        }
+        throw new InvalidOperationException("qbittorrentQueueReadbackMissing");
     }
 
     private async Task<JsonElement> SendSeerrJsonAsync(
@@ -1194,9 +2554,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
         else if (!string.IsNullOrWhiteSpace(provider.ApiKey) && providerName != "sabnzbd")
         {
-            message.Headers.TryAddWithoutValidation(
-                providerName == "bazarr" ? "X-API-KEY" : "X-Api-Key",
-                provider.ApiKey);
+            message.Headers.TryAddWithoutValidation("X-Api-Key", provider.ApiKey);
         }
 
         using var response = await _providerTransport.SendAsync(
@@ -1314,7 +2672,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     }
 
     private static bool RequiresProviderApiKey(string providerName)
-        => providerName is not ("tdarr" or "qbittorrent");
+        => providerName != "qbittorrent";
 
     private static bool RequiresProviderUsernamePassword(string providerName)
         => string.Equals(providerName, "qbittorrent", StringComparison.Ordinal);
@@ -1339,11 +2697,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var path = providerName switch
         {
             "seerr" => "/api/v1/status",
-            "bazarr" => "/api/system/status",
-            "tdarr" => "/api/v2/status",
             "sabnzbd" => "/api",
             "qbittorrent" => "/api/v2/app/version",
-            "lidarr" or "readarr" or "prowlarr" => "/api/v1/system/status",
             _ => "/api/v3/system/status"
         };
         var uri = new Uri(provider.BaseUrl.TrimEnd('/') + path, UriKind.Absolute);
@@ -1367,7 +2722,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
         else if (!string.IsNullOrWhiteSpace(provider.ApiKey) && providerName != "sabnzbd")
         {
-            message.Headers.TryAddWithoutValidation(providerName == "bazarr" ? "X-API-KEY" : "X-Api-Key", provider.ApiKey);
+            message.Headers.TryAddWithoutValidation("X-Api-Key", provider.ApiKey);
         }
 
         HttpResponseMessage response;
@@ -1481,6 +2836,33 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return result;
     }
 
+    internal static int? ResolveSeerrCreateRequesterUserId(
+        IReadOnlyDictionary<string, JsonElement> parameters)
+    {
+        if (!parameters.TryGetValue("requester_mode", out var modeValue))
+        {
+            // Backward compatibility for already-queued Cloud commands from
+            // releases that carried only the exact bound user id.
+            return RequirePositiveInt(parameters, "requester_user_id");
+        }
+        if (modeValue.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException("seerrRequesterModeInvalid");
+        }
+
+        var mode = modeValue.GetString()?.Trim() ?? string.Empty;
+        if (string.Equals(mode, "bound_user", StringComparison.Ordinal))
+        {
+            return RequirePositiveInt(parameters, "requester_user_id");
+        }
+        if (string.Equals(mode, "authenticated_connection_owner", StringComparison.Ordinal)
+            && !parameters.ContainsKey("requester_user_id"))
+        {
+            return null;
+        }
+        throw new InvalidOperationException("seerrRequesterModeInvalid");
+    }
+
     private static int? OptionalNonNegativeInt(IReadOnlyDictionary<string, JsonElement> parameters, string key)
     {
         if (!parameters.TryGetValue(key, out var value) || value.ValueKind == JsonValueKind.Null)
@@ -1585,6 +2967,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             playbackInfoQuery.Add($"SubtitleStreamIndex={subtitleStreamIndex.Value}");
         }
+        var itemAuthorityTask = SendLocalAsync(
+            configuration,
+            secrets,
+            HttpMethod.Get,
+            $"/Users/{Uri.EscapeDataString(jellyfinUserId)}/Items/{Uri.EscapeDataString(itemId)}?Fields=SeriesId,SeasonId&EnableImages=false",
+            null,
+            null,
+            cancellationToken);
         var local = await SendLocalAsync(
             configuration,
             secrets,
@@ -1593,6 +2983,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             null,
             body,
             cancellationToken).ConfigureAwait(false);
+        var itemAuthority = await itemAuthorityTask.ConfigureAwait(false);
         var root = local.Payload;
         var source = root.TryGetProperty("MediaSources", out var sources) && sources.ValueKind == JsonValueKind.Array
             ? sources.EnumerateArray().FirstOrDefault()
@@ -1616,6 +3007,36 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var remux = source.TryGetProperty("SupportsDirectStream", out var streamValue) && streamValue.GetBoolean();
         var mode = compatibilityPlayer ? "direct_play" : remux ? "remux" : "transcode";
         var tracks = KaevoPlaybackTrackCatalog.FromMediaSource(source);
+        var mediaSegmentsRequested = parameters.TryGetValue("media_segments_enabled", out var mediaSegmentsValue)
+            && mediaSegmentsValue.ValueKind is JsonValueKind.True or JsonValueKind.False
+            && mediaSegmentsValue.GetBoolean();
+        var mediaSegmentsTask = configuration.JellyfinPluginIntegrationsEnabled && mediaSegmentsRequested
+            ? ReadPlaybackMediaSegmentsAsync(configuration, secrets, itemId, cancellationToken)
+            : Task.FromResult<IReadOnlyList<KaevoMediaSegmentProjection>>(Array.Empty<KaevoMediaSegmentProjection>());
+        var trickplay = KaevoPlaybackTrickplayCatalog.FromItem(root, mediaSourceId)
+            ?? await ReadPlaybackTrickplayMetadataAsync(
+                configuration,
+                secrets,
+                jellyfinUserId,
+                itemId,
+                mediaSourceId,
+                cancellationToken).ConfigureAwait(false);
+        var mediaSegments = await mediaSegmentsTask.ConfigureAwait(false);
+        var authorityRoot = itemAuthority.Payload;
+        var itemKind = authorityRoot.TryGetProperty("Type", out var typeValue)
+            ? typeValue.GetString()?.Trim().ToLowerInvariant()
+            : null;
+        var seriesId = authorityRoot.TryGetProperty("SeriesId", out var seriesValue)
+            ? seriesValue.GetString()?.Trim().ToLowerInvariant()
+            : null;
+        var seasonId = authorityRoot.TryGetProperty("SeasonId", out var seasonValue)
+            ? seasonValue.GetString()?.Trim().ToLowerInvariant()
+            : null;
+        var runTimeTicks = authorityRoot.TryGetProperty("RunTimeTicks", out var runtimeValue)
+            && runtimeValue.TryGetInt64(out var parsedRuntime)
+            && parsedRuntime > 0
+                ? parsedRuntime
+                : (long?)null;
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
             requestId = request.RequestId,
@@ -1631,9 +3052,81 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 audio_tracks = tracks.AudioTracks,
                 subtitle_tracks = tracks.SubtitleTracks,
                 selected_audio_stream_index = audioStreamIndex ?? tracks.SelectedAudioStreamIndex,
-                selected_subtitle_stream_index = subtitleStreamIndex
+                selected_subtitle_stream_index = subtitleStreamIndex,
+                item_kind = itemKind == "series" ? "show" : itemKind,
+                series_id = seriesId,
+                season_id = seasonId,
+                runtime_ticks = runTimeTicks,
+                trickplay,
+                media_segments = mediaSegments
             }
         }, JsonOptions), false);
+    }
+
+    private async Task<IReadOnlyList<KaevoMediaSegmentProjection>> ReadPlaybackMediaSegmentsAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string itemId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await SendLocalAsync(
+                configuration,
+                secrets,
+                HttpMethod.Get,
+                $"/MediaSegments/{Uri.EscapeDataString(itemId)}?includeSegmentTypes=Intro&includeSegmentTypes=Recap&includeSegmentTypes=Outro",
+                null,
+                null,
+                cancellationToken).ConfigureAwait(false);
+            return KaevoMediaSegmentCatalog.FromJellyfin(response.Payload, itemId);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (InvalidOperationException)
+        {
+            // Media segments are an optional enhancement. An unavailable
+            // provider must never block the underlying playback route.
+            return Array.Empty<KaevoMediaSegmentProjection>();
+        }
+    }
+
+    private async Task<KaevoPlaybackTrickplayMetadata?> ReadPlaybackTrickplayMetadataAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string jellyfinUserId,
+        string itemId,
+        string mediaSourceId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var item = await SendLocalAsync(
+                configuration,
+                secrets,
+                HttpMethod.Get,
+                $"/Users/{Uri.EscapeDataString(jellyfinUserId)}/Items/{Uri.EscapeDataString(itemId)}?Fields=Trickplay&EnableImages=false",
+                null,
+                null,
+                cancellationToken).ConfigureAwait(false);
+            return KaevoPlaybackTrickplayCatalog.FromItem(item.Payload, mediaSourceId);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (InvalidOperationException)
+        {
+            // Trickplay is optional. Playback preparation remains valid when
+            // this Jellyfin version or library item has no sprite catalog.
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private async Task<CommandResult> ReadArtworkAsync(
@@ -1643,8 +3136,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         CancellationToken cancellationToken)
     {
         var itemId = QueryString(query, "item_id");
-        var imageType = QueryString(query, "image_type");
-        if (!ItemIdRegex().IsMatch(itemId) || imageType is not ("Primary" or "Backdrop" or "Logo" or "Thumb"))
+        var imageType = NormalizeRemoteArtworkImageType(QueryString(query, "image_type"));
+        if (!ItemIdRegex().IsMatch(itemId) || string.IsNullOrEmpty(imageType))
         {
             throw new InvalidOperationException("remoteArtworkRequestInvalid");
         }
@@ -1697,6 +3190,18 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         throw new InvalidOperationException("remoteArtworkPayloadTooLarge");
     }
 
+    internal static string NormalizeRemoteArtworkImageType(string rawImageType)
+    {
+        return rawImageType.Trim().ToLowerInvariant() switch
+        {
+            "primary" => "Primary",
+            "backdrop" => "Backdrop",
+            "logo" => "Logo",
+            "thumb" => "Thumb",
+            _ => string.Empty
+        };
+    }
+
     private async Task<CommandResult> ReadMainSnapshotAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
@@ -1735,6 +3240,61 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }, JsonOptions), false);
     }
 
+    private Task<CommandResult> ReadGuestScopeAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string? cloudProfileId,
+        IReadOnlyDictionary<string, JsonElement>? query,
+        CancellationToken cancellationToken)
+    {
+        var userId = RequireBoundJellyfinUserId(
+            configuration,
+            cloudProfileId,
+            "profileJellyfinBindingMissing");
+        var request = BuildGuestScopeItemsRequest(userId, QueryString(query, "itemIds"));
+        return SendLocalAsync(
+            configuration,
+            secrets,
+            HttpMethod.Get,
+            request.Path,
+            request.Query,
+            null,
+            cancellationToken);
+    }
+
+    internal static (string Path, IReadOnlyDictionary<string, JsonElement> Query) BuildGuestScopeItemsRequest(
+        string userId,
+        string rawItemIds)
+    {
+        if (!ItemIdRegex().IsMatch(userId))
+        {
+            throw new InvalidOperationException("profileJellyfinBindingMissing");
+        }
+        var itemIds = rawItemIds
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(value => ItemIdRegex().IsMatch(value))
+            .Select(value => value.ToLowerInvariant())
+            .Distinct(StringComparer.Ordinal)
+            .Take(500)
+            .ToArray();
+        if (itemIds.Length == 0)
+        {
+            throw new InvalidOperationException("guestScopeItemsInvalid");
+        }
+        return ($"/Users/{userId}/Items", new Dictionary<string, JsonElement>
+        {
+            ["Ids"] = JsonSerializer.SerializeToElement(string.Join(',', itemIds)),
+            ["Recursive"] = JsonSerializer.SerializeToElement(false),
+            ["StartIndex"] = JsonSerializer.SerializeToElement(0),
+            ["Limit"] = JsonSerializer.SerializeToElement(itemIds.Length),
+            ["Fields"] = JsonSerializer.SerializeToElement(MainSnapshotItemFields),
+            ["EnableUserData"] = JsonSerializer.SerializeToElement(false),
+            ["EnableImages"] = JsonSerializer.SerializeToElement(true),
+            ["ImageTypeLimit"] = JsonSerializer.SerializeToElement(1),
+            ["EnableImageTypes"] = JsonSerializer.SerializeToElement("Primary,Backdrop,Logo")
+        });
+    }
+
     private Task<CommandResult> ReadSnapshotItemsAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
@@ -1744,13 +3304,55 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         bool? isResumable,
         CancellationToken cancellationToken)
     {
+        var request = BuildMainSnapshotItemsRequest(
+            userId,
+            includeItemTypes,
+            limit,
+            isResumable);
+        return SendLocalAsync(
+            configuration,
+            secrets,
+            HttpMethod.Get,
+            request.Path,
+            request.Query,
+            null,
+            cancellationToken);
+    }
+
+    internal static (string Path, IReadOnlyDictionary<string, JsonElement> Query) BuildMainSnapshotItemsRequest(
+        string userId,
+        string includeItemTypes,
+        int limit,
+        bool? isResumable)
+    {
+        if (isResumable == true)
+        {
+            // Jellyfin's supported Continue Watching surface is
+            // /UserItems/Resume. IsResumable on /Users/{id}/Items is not an
+            // equivalent filter and can return ordinary zero-progress items.
+            // Keep the canonical bound user ID in this connector-owned query.
+            return ("/UserItems/Resume", new Dictionary<string, JsonElement>
+            {
+                ["userId"] = JsonSerializer.SerializeToElement(userId),
+                ["startIndex"] = JsonSerializer.SerializeToElement(0),
+                ["limit"] = JsonSerializer.SerializeToElement(limit),
+                ["mediaTypes"] = JsonSerializer.SerializeToElement("Video"),
+                ["fields"] = JsonSerializer.SerializeToElement(MainSnapshotItemFields),
+                ["enableUserData"] = JsonSerializer.SerializeToElement(true),
+                ["enableImages"] = JsonSerializer.SerializeToElement(true),
+                ["imageTypeLimit"] = JsonSerializer.SerializeToElement(1),
+                ["enableImageTypes"] = JsonSerializer.SerializeToElement("Primary,Backdrop,Logo"),
+                ["excludeActiveSessions"] = JsonSerializer.SerializeToElement(true)
+            });
+        }
+
         var query = new Dictionary<string, JsonElement>
         {
             ["Recursive"] = JsonSerializer.SerializeToElement(true),
             ["StartIndex"] = JsonSerializer.SerializeToElement(0),
             ["Limit"] = JsonSerializer.SerializeToElement(limit),
             ["IncludeItemTypes"] = JsonSerializer.SerializeToElement(includeItemTypes),
-            ["Fields"] = JsonSerializer.SerializeToElement("Overview,Genres,Studios,People,MediaSources,MediaStreams,ProviderIds,PrimaryImageAspectRatio"),
+            ["Fields"] = JsonSerializer.SerializeToElement(MainSnapshotItemFields),
             ["EnableUserData"] = JsonSerializer.SerializeToElement(true),
             ["EnableImages"] = JsonSerializer.SerializeToElement(true),
             ["ImageTypeLimit"] = JsonSerializer.SerializeToElement(1),
@@ -1762,7 +3364,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             query["IsResumable"] = JsonSerializer.SerializeToElement(isResumable.Value);
         }
 
-        return SendLocalAsync(configuration, secrets, HttpMethod.Get, $"/Users/{userId}/Items", query, null, cancellationToken);
+        return ($"/Users/{userId}/Items", query);
     }
 
     private async Task<CommandResult> SendLocalAsync(
@@ -1799,7 +3401,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private async Task RunRelayLoopAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<IRelayRequestActivity>? beginVerifiedActivity = null)
     {
         var relayTicket = await SendCloudAsync<RelayTicketResponse>(
             configuration,
@@ -1841,7 +3444,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 }
                 else if (message.Type == "request" && !string.IsNullOrWhiteSpace(message.Grant))
                 {
-                    var context = new RelayRequestContext(cancellationToken);
+                    var context = new RelayRequestContext(cancellationToken, beginVerifiedActivity);
                     if (!active.TryAdd(message.RequestId, context))
                     {
                         context.Dispose();
@@ -1862,10 +3465,15 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         finally
         {
             _state.RelayDisconnected();
-            foreach (var context in active.Values)
+            var pending = active.Values.ToArray();
+            foreach (var context in pending)
             {
                 context.Cancel();
             }
+            // The preview demand owner must drain these detached handlers
+            // before parking/replacing its pool. Legacy ownership is unchanged.
+            if (beginVerifiedActivity is not null)
+                await Task.WhenAll(pending.Select(context => context.Processed)).ConfigureAwait(false);
         }
     }
 
@@ -1891,10 +3499,12 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
         finally
         {
-            if (active.TryRemove(message.RequestId, out var completed))
+            try
             {
-                completed.Dispose();
+                if (active.TryRemove(message.RequestId, out var completed))
+                    completed.Dispose();
             }
+            finally { context.MarkProcessed(); }
         }
     }
 
@@ -1946,6 +3556,34 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 pairingV3VerificationKeysJson: configuration.PairingV3CloudAuthorizationVerificationKeysJson,
                 pairingV3Issuer: configuration.PairingV3CloudAuthorizationIssuer);
             var resolved = KaevoPlaybackSecurity.Resolve(grant, message.Method ?? "GET", message.Path ?? string.Empty, message.Query, message.Range);
+            // Only verified grant + exact resource activity can keep an admitted
+            // preview pool warm. Ping/pong, malformed requests and auth failures
+            // never reach this hook. It does not grant playback permission.
+            using var activity = context.BeginVerifiedActivity();
+            if (ShouldSynthesizeRelayManifestHead(resolved.Method, resolved.PathAndQuery))
+            {
+                // AVPlayer probes an HLS manifest with HEAD before requesting
+                // it. Jellyfin's dynamic HLS endpoint can enter transcode
+                // preparation even for that bodyless probe, which holds all
+                // relay channels until their response-start deadline. The
+                // signed grant and exact resource path have already been
+                // verified above, so answer only the representation metadata;
+                // the following GET still has to pass every grant check and
+                // obtain the real manifest from Jellyfin.
+                await SendTextAsync(socket, sendGate, JsonSerializer.Serialize(new
+                {
+                    type = "response_start",
+                    request_id = message.RequestId,
+                    status = (int)HttpStatusCode.OK,
+                    headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["content-type"] = "application/vnd.apple.mpegurl",
+                        ["cache-control"] = "no-store"
+                    }
+                }, JsonOptions), cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             using var local = new HttpRequestMessage(resolved.Method, BuildLocalUri(configuration, resolved.PathAndQuery, null));
             local.Headers.Add("X-Emby-Token", secrets.JellyfinApiKey);
             if (!string.IsNullOrWhiteSpace(resolved.RangeHeader))
@@ -2046,6 +3684,18 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
     }
 
+    internal static bool ShouldSynthesizeRelayManifestHead(HttpMethod method, string pathAndQuery)
+    {
+        if (method != HttpMethod.Head || string.IsNullOrWhiteSpace(pathAndQuery))
+        {
+            return false;
+        }
+
+        var queryIndex = pathAndQuery.IndexOf('?', StringComparison.Ordinal);
+        var path = queryIndex >= 0 ? pathAndQuery[..queryIndex] : pathAndQuery;
+        return path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static async Task SendRelayBodyAsync(
         ClientWebSocket socket,
         SemaphoreSlim sendGate,
@@ -2058,6 +3708,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         // control-message round trip here prevents a dropped body ACK from
         // deadlocking every HLS playlist and segment.
         await SendBinaryAsync(socket, sendGate, payload, context.Token).ConfigureAwait(false);
+        context.RecordVerifiedBodyProgress();
     }
 
     private async Task<T> SendCloudAsync<T>(
@@ -2076,7 +3727,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             : await _lifecycleClient.SendConnectorAsync(cloudBase, method, effectivePath, body, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException($"cloudHttp{(int)response.StatusCode}");
+            throw new InvalidOperationException(CloudFailureCategory(effectivePath, response.StatusCode));
         }
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -2087,8 +3738,35 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private static PluginConfiguration CurrentConfiguration()
         => KaevoPlugin.Instance?.Configuration ?? throw new InvalidOperationException("pluginConfigurationUnavailable");
 
+    private static PluginConfiguration RuntimeConfiguration(PluginConfiguration connectedConfiguration)
+        => SelectRuntimeConfiguration(connectedConfiguration, KaevoPlugin.Instance?.Configuration);
+
+    internal static PluginConfiguration SelectRuntimeConfiguration(
+        PluginConfiguration connectedConfiguration,
+        PluginConfiguration? savedConfiguration)
+        => savedConfiguration ?? connectedConfiguration;
+
     internal static string PairingV3CloudPath(string path)
         => path.StartsWith("/v1/", StringComparison.Ordinal) ? "/v3/" + path[4..] : path;
+
+    internal static string CloudFailureCategory(string path, HttpStatusCode statusCode)
+    {
+        var stage = path switch
+        {
+            "/v1/remote-requests/claim" or "/v3/remote-requests/claim" => "cloudRemoteRequestClaim",
+            _ when path.EndsWith("/claim", StringComparison.Ordinal)
+                && (path.StartsWith("/v1/remote-requests/", StringComparison.Ordinal)
+                    || path.StartsWith("/v3/remote-requests/", StringComparison.Ordinal)) => "cloudRemoteRequestClaim",
+            _ when path.EndsWith("/complete", StringComparison.Ordinal)
+                && (path.StartsWith("/v1/remote-requests/", StringComparison.Ordinal)
+                    || path.StartsWith("/v3/remote-requests/", StringComparison.Ordinal)) => "cloudRemoteRequestComplete",
+            _ when path.EndsWith("/fail", StringComparison.Ordinal)
+                && (path.StartsWith("/v1/remote-requests/", StringComparison.Ordinal)
+                    || path.StartsWith("/v3/remote-requests/", StringComparison.Ordinal)) => "cloudRemoteRequestFail",
+            _ => "cloudConnector",
+        };
+        return $"{stage}Http{(int)statusCode}";
+    }
 
     internal static string ProfileIdForCloud(string profileId, bool pairingV3Active)
         => pairingV3Active ? string.Empty : profileId;
@@ -2121,6 +3799,30 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             throw new InvalidOperationException("cloudProfileMissing");
         }
+    }
+
+    /// <summary>
+    /// A registration response is the authority for the playback relay route.
+    /// Older or interrupted installs can persist the enablement bit without a
+    /// usable URL; fail closed for playback so that state cannot prevent the
+    /// connector from registering and receiving the current signed route.
+    /// </summary>
+    internal static bool NormalizeStaleRelayConfigurationBeforeRegistration(PluginConfiguration configuration)
+    {
+        if (!configuration.RemotePlaybackEnabled)
+        {
+            return false;
+        }
+
+        if (Uri.TryCreate(configuration.RelayWebSocketUrl, UriKind.Absolute, out var relay)
+            && relay.Scheme == "wss")
+        {
+            return false;
+        }
+
+        configuration.RemotePlaybackEnabled = false;
+        configuration.RelayWebSocketUrl = string.Empty;
+        return true;
     }
 
     private static Uri BuildLocalUri(
@@ -2167,11 +3869,6 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             "sonarr" => new[] { "/api/v3/system/status", "/api/v3/series", "/api/v3/queue", "/api/v3/history", "/api/v3/wanted/missing" },
             "radarr" => new[] { "/api/v3/system/status", "/api/v3/movie", "/api/v3/queue", "/api/v3/history", "/api/v3/wanted/missing" },
             "seerr" => new[] { "/api/v1/status", "/api/v1/search", "/api/v1/discover/trending", "/api/v1/discover/movies", "/api/v1/discover/tv", "/api/v1/request", "/api/v1/media/", "/api/v1/movie/", "/api/v1/tv/" },
-            "lidarr" => new[] { "/api/v1/system/status", "/api/v1/artist", "/api/v1/queue", "/api/v1/history", "/api/v1/wanted/missing" },
-            "readarr" => new[] { "/api/v1/system/status", "/api/v1/author", "/api/v1/book", "/api/v1/queue", "/api/v1/history", "/api/v1/wanted/missing" },
-            "prowlarr" => new[] { "/api/v1/system/status", "/api/v1/indexer", "/api/v1/indexerstatus" },
-            "bazarr" => new[] { "/api/system/status" },
-            "tdarr" => new[] { "/api/v2/status" },
             "sabnzbd" => new[] { "/api" },
             "qbittorrent" => new[] { "/api/v2/app/version", "/api/v2/transfer/info", "/api/v2/torrents/info" },
             _ => Array.Empty<string>()
@@ -2189,6 +3886,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         if (!IsAllowedProviderReadPath(provider, path))
         {
             return false;
+        }
+
+        if (query is not null && (query.ContainsKey("tmdbIds") || query.ContainsKey("tvdbIds")))
+        {
+            return TryGetArrIdentityBatch(provider, path, query, out _, out _);
         }
 
         if (provider.Equals("sabnzbd", StringComparison.OrdinalIgnoreCase))
@@ -2211,6 +3913,66 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return true;
     }
 
+    internal static bool TryGetArrIdentityBatch(
+        string provider,
+        string path,
+        IReadOnlyDictionary<string, JsonElement>? query,
+        out string identityField,
+        out HashSet<int> identities)
+    {
+        identityField = string.Empty;
+        identities = [];
+        var expected = provider.ToLowerInvariant() switch
+        {
+            "radarr" when path == "/api/v3/movie" => (Query: "tmdbIds", Field: "tmdbId"),
+            "sonarr" when path == "/api/v3/series" => (Query: "tvdbIds", Field: "tvdbId"),
+            _ => (Query: string.Empty, Field: string.Empty)
+        };
+        if (string.IsNullOrEmpty(expected.Query)
+            || query is null
+            || query.Count != 1
+            || !query.TryGetValue(expected.Query, out var raw)
+            || raw.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var parts = (raw.GetString() ?? string.Empty).Split(',', StringSplitOptions.TrimEntries);
+        if (parts.Length is < 1 or > 32)
+        {
+            return false;
+        }
+        foreach (var part in parts)
+        {
+            if (!int.TryParse(part, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value)
+                || value <= 0
+                || !identities.Add(value))
+            {
+                identities.Clear();
+                return false;
+            }
+        }
+        identityField = expected.Field;
+        return true;
+    }
+
+    internal static JsonElement FilterArrCatalog(
+        JsonElement payload,
+        string identityField,
+        IReadOnlySet<int> identities)
+    {
+        if (payload.ValueKind != JsonValueKind.Array || identities.Count is < 1 or > 32)
+        {
+            throw new InvalidOperationException("remoteArrCatalogResponseInvalid");
+        }
+        var matches = payload.EnumerateArray().Where(item =>
+            item.ValueKind == JsonValueKind.Object
+            && item.TryGetProperty(identityField, out var identity)
+            && identity.TryGetInt32(out var value)
+            && identities.Contains(value)).Select(item => item.Clone()).ToArray();
+        return JsonSerializer.SerializeToElement(matches, JsonOptions);
+    }
+
     private static bool HasUnsafeProviderQuery(IReadOnlyDictionary<string, JsonElement>? query)
     {
         if (query is null)
@@ -2228,6 +3990,32 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             "apikey", "api_key", "token", "password", "pass", "key", "auth"
         };
         return query.Any(pair => blocked.Contains(pair.Key) || pair.Value.ToString().Length > 2_048);
+    }
+
+    internal static (string Path, IReadOnlyDictionary<string, JsonElement> Query) BuildMetadataRefreshRequest(
+        string itemId,
+        string mode,
+        bool replaceImages,
+        bool regenerateTrickplay)
+    {
+        var (refreshMode, replaceAllMetadata) = mode switch
+        {
+            "scan" => ("Default", false),
+            "missing" => ("FullRefresh", false),
+            "replaceAll" => ("FullRefresh", true),
+            _ => throw new InvalidOperationException("metadataRefreshModeInvalid")
+        };
+        return (
+            $"/Items/{itemId}/Refresh",
+            new Dictionary<string, JsonElement>
+            {
+                ["recursive"] = JsonSerializer.SerializeToElement(true),
+                ["imageRefreshMode"] = JsonSerializer.SerializeToElement(refreshMode),
+                ["metadataRefreshMode"] = JsonSerializer.SerializeToElement(refreshMode),
+                ["replaceAllImages"] = JsonSerializer.SerializeToElement(replaceImages),
+                ["regenerateTrickplay"] = JsonSerializer.SerializeToElement(regenerateTrickplay),
+                ["replaceAllMetadata"] = JsonSerializer.SerializeToElement(replaceAllMetadata)
+            });
     }
 
     private static string RequireItemId(IReadOnlyDictionary<string, JsonElement> parameters)
@@ -2252,6 +4040,20 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return Guid.TryParse(value, out var result)
             ? result
             : throw new InvalidOperationException(error);
+    }
+
+    private static bool RequireBoolean(
+        IReadOnlyDictionary<string, JsonElement> parameters,
+        string key,
+        string error)
+    {
+        if (!parameters.TryGetValue(key, out var element)
+            || element.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            throw new InvalidOperationException(error);
+        }
+
+        return element.GetBoolean();
     }
 
     private static string RequireString(
@@ -2383,6 +4185,30 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return Encoding.UTF8.GetString(output.ToArray());
     }
 
+    private static async Task<string> ReceiveControlTextAsync(
+        ClientWebSocket socket,
+        CancellationToken cancellationToken)
+    {
+        var buffer = new byte[16 * 1024];
+        await using var output = new MemoryStream();
+        WebSocketReceiveResult result;
+        do
+        {
+            result = await socket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                throw new InvalidOperationException("controlDisconnected");
+            }
+            if (result.MessageType != WebSocketMessageType.Text || output.Length + result.Count > 16 * 1024)
+            {
+                throw new InvalidOperationException("controlMessageInvalid");
+            }
+            await output.WriteAsync(buffer.AsMemory(0, result.Count), cancellationToken).ConfigureAwait(false);
+        }
+        while (!result.EndOfMessage);
+        return Encoding.UTF8.GetString(output.ToArray());
+    }
+
     private static async Task SendTextAsync(ClientWebSocket socket, SemaphoreSlim gate, string value, CancellationToken cancellationToken)
     {
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -2429,7 +4255,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private static ProviderReachability ProviderStatus(bool ok, bool configured, string version, string? reason)
         => new(ok, configured, version, reason);
 
-    private static IReadOnlyDictionary<string, ProviderReachability> BuildProviderStatus(
+    internal static IReadOnlyDictionary<string, ProviderReachability> BuildProviderStatus(
         KaevoConnectorSecrets secrets,
         PluginConfiguration configuration,
         bool includeOptimizer)
@@ -2438,13 +4264,12 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             ["jellyfin"] = ProviderStatus(true, true, PluginVersion, null)
         };
-        foreach (var providerName in new[] { "sonarr", "radarr", "seerr", "lidarr", "readarr", "prowlarr", "bazarr", "tdarr" })
+        foreach (var providerName in new[] { "sonarr", "radarr", "seerr" })
         {
             var provider = secrets.GetProvider(providerName);
-            var requiresApiKey = providerName != "tdarr";
             var configured = provider is not null
                 && Uri.TryCreate(provider.BaseUrl, UriKind.Absolute, out _)
-                && (!requiresApiKey || !string.IsNullOrWhiteSpace(provider.ApiKey));
+                && !string.IsNullOrWhiteSpace(provider.ApiKey);
             var enabled = provider?.Enabled == true;
             result[providerName] = ProviderStatus(
                 enabled && configured,
@@ -2452,6 +4277,18 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 PluginVersion,
                 !configured ? "notConfigured" : enabled ? null : "disabled");
         }
+
+        var configuredDownloaders = new[] { "sabnzbd", "qbittorrent" }
+            .Select(secrets.GetProvider)
+            .Where(provider => provider is not null)
+            .ToArray();
+        var anyDownloaderConfigured = configuredDownloaders.Any(provider =>
+            Uri.TryCreate(provider!.BaseUrl, UriKind.Absolute, out _) && provider.Enabled);
+        result["downloaders"] = ProviderStatus(
+            anyDownloaderConfigured,
+            configuredDownloaders.Any(provider => Uri.TryCreate(provider!.BaseUrl, UriKind.Absolute, out _)),
+            PluginVersion,
+            anyDownloaderConfigured ? null : "notConfigured");
 
         if (includeOptimizer)
         {
@@ -2466,18 +4303,42 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             configuration.RemotePlaybackEnabled,
             PluginVersion,
             configuration.RemotePlaybackEnabled ? null : "disabled");
+        // This is an authenticated capability projection, not deletion
+        // authority. Cloud still resolves the exact canonical profile and
+        // connector edge, while provider deletion re-checks this setting at
+        // execution time. Publishing it here lets clients fail closed before
+        // they offer the destructive Everything scope.
+        result["profile_deletion"] = ProviderStatus(
+            configuration.TwoWayProfileDeletionEnabled,
+            true,
+            PluginVersion,
+            configuration.TwoWayProfileDeletionEnabled ? null : "disabled");
         return result;
+    }
+
+    internal interface IRelayRequestActivity : IDisposable
+    {
+        void RecordBodyProgress();
     }
 
     internal sealed class RelayRequestContext : IDisposable
     {
         private readonly CancellationTokenSource _cancellation;
         private readonly SemaphoreSlim _bodyAcknowledged = new(0, 1);
+        private readonly Func<IRelayRequestActivity>? _beginVerifiedActivity;
+        private IRelayRequestActivity? _activity;
+        private readonly TaskCompletionSource _processed = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public RelayRequestContext(CancellationToken cancellationToken)
+        public RelayRequestContext(CancellationToken cancellationToken, Func<IRelayRequestActivity>? beginVerifiedActivity = null)
         {
             _cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _beginVerifiedActivity = beginVerifiedActivity;
         }
+
+        internal IRelayRequestActivity? BeginVerifiedActivity() => _activity = _beginVerifiedActivity?.Invoke();
+        internal void RecordVerifiedBodyProgress() => _activity?.RecordBodyProgress();
+        internal Task Processed => _processed.Task;
+        internal void MarkProcessed() => _processed.TrySetResult();
 
         public CancellationToken Token => _cancellation.Token;
 
@@ -2518,8 +4379,18 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
     }
 
+    internal sealed record BoundPlaybackRequest(
+        string Operation,
+        string JellyfinUserId,
+        string DeviceId,
+        Guid ItemId,
+        string MediaSourceId,
+        string PlaySessionId,
+        long PositionTicks,
+        bool IsPaused);
+
     private sealed record CommandResult(int Status, JsonElement Payload, bool Truncated);
-    private sealed record ProviderReachability(bool Ok, bool Configured, string Version, string? Reason);
+    internal sealed record ProviderReachability(bool Ok, bool Configured, string Version, string? Reason);
 
     [GeneratedRegex("^[0-9a-fA-F]{32}$", RegexOptions.CultureInvariant)]
     private static partial Regex ItemIdRegex();

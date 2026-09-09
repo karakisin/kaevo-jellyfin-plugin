@@ -143,7 +143,169 @@ public sealed class KaevoSeerrIdentityProvisioningService
                 return new("seerr_permission_failed");
             }
 
-            return new("ready", verified.Id);
+            // This provenance is part of the rollback receipt.  Callers may
+            // delete the exact Seerr identity during a failed transaction only
+            // when this exact provisioning attempt created it.
+            return new("ready", verified.Id, createdByThisAttempt);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return new("provider_unavailable");
+        }
+    }
+
+    /// <summary>
+    /// Deletes only the Seerr user whose immutable Jellyfin identity and Seerr
+    /// identifier both match the caller's verified binding.  A successful
+    /// DELETE response is not sufficient: the subsequent authoritative user
+    /// list must contain neither identifier before deletion is reported.
+    /// </summary>
+    public async Task<KaevoSeerrJellyfinUserDeletionResponse> DeleteExactJellyfinUserAsync(
+        KaevoConnectorSecrets secrets,
+        string jellyfinUserId,
+        int seerrUserId,
+        CancellationToken cancellationToken)
+    {
+        if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(jellyfinUserId, out var normalizedUserId)
+            || seerrUserId <= 0)
+        {
+            return new("invalid");
+        }
+
+        try
+        {
+            var users = await ReadUsersAsync(secrets, cancellationToken).ConfigureAwait(false);
+            var exactMatches = users
+                .Where(user => user.Id == seerrUserId && user.JellyfinUserId == normalizedUserId)
+                .ToArray();
+            var identifierMatches = users.Any(user => user.Id == seerrUserId);
+            var jellyfinMatches = users.Any(user => user.JellyfinUserId == normalizedUserId);
+            if (exactMatches.Length == 0 && !identifierMatches && !jellyfinMatches)
+            {
+                // A retry after an earlier confirmed DELETE is safe only when
+                // the authoritative collection contains neither immutable ID.
+                return new("absent");
+            }
+            if (exactMatches.Length != 1) return new("seerr_identity_mismatch");
+
+            // Refuse an ambiguous relationship even if one row happens to
+            // match the requested Seerr ID.  Deletion must have one exact,
+            // immutable provider edge.
+            if (users.Count(user => user.JellyfinUserId == normalizedUserId) != 1)
+            {
+                return new("seerr_user_ambiguous");
+            }
+
+            await SendAsync(
+                secrets,
+                HttpMethod.Delete,
+                $"/api/v1/user/{seerrUserId}",
+                null,
+                cancellationToken).ConfigureAwait(false);
+
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                if (attempt > 0)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(350), cancellationToken).ConfigureAwait(false);
+                }
+                var readback = await ReadUsersAsync(secrets, cancellationToken).ConfigureAwait(false);
+                var targetStillExists = readback.Any(user =>
+                    user.Id == seerrUserId || user.JellyfinUserId == normalizedUserId);
+                if (!targetStillExists) return new("deleted");
+            }
+
+            return new("seerr_delete_unconfirmed");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return new("provider_unavailable");
+        }
+    }
+
+    /// <summary>
+    /// Dispatches deletion of one exact immutable Seerr/Jellyfin identity pair.
+    /// This intentionally does not report absence: lifecycle V2 obtains that
+    /// proof through a separate authoritative read operation.
+    /// </summary>
+    public async Task<KaevoSeerrJellyfinUserDeletionResponse> DispatchDeleteExactJellyfinUserAsync(
+        KaevoConnectorSecrets secrets,
+        string jellyfinUserId,
+        int seerrUserId,
+        CancellationToken cancellationToken)
+    {
+        if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(jellyfinUserId, out var normalizedUserId)
+            || seerrUserId <= 0)
+        {
+            return new("invalid");
+        }
+
+        try
+        {
+            var users = await ReadUsersAsync(secrets, cancellationToken).ConfigureAwait(false);
+            var exactMatches = users
+                .Where(user => user.Id == seerrUserId && user.JellyfinUserId == normalizedUserId)
+                .ToArray();
+            var identifierMatches = users.Any(user => user.Id == seerrUserId);
+            var jellyfinMatches = users.Any(user => user.JellyfinUserId == normalizedUserId);
+            if (exactMatches.Length == 0 && !identifierMatches && !jellyfinMatches)
+            {
+                return new("already_absent");
+            }
+            if (exactMatches.Length != 1
+                || users.Count(user => user.JellyfinUserId == normalizedUserId) != 1)
+            {
+                return new("seerr_identity_mismatch");
+            }
+
+            await SendAsync(
+                secrets,
+                HttpMethod.Delete,
+                $"/api/v1/user/{seerrUserId}",
+                null,
+                cancellationToken).ConfigureAwait(false);
+            return new("delete_dispatched");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return new("provider_unavailable");
+        }
+    }
+
+    /// <summary>
+    /// Proves that neither immutable identifier remains in Seerr.  This is a
+    /// read-only operation and is deliberately separate from delete dispatch.
+    /// </summary>
+    public async Task<KaevoSeerrJellyfinUserDeletionResponse> VerifyExactJellyfinUserAbsentAsync(
+        KaevoConnectorSecrets secrets,
+        string jellyfinUserId,
+        int seerrUserId,
+        CancellationToken cancellationToken)
+    {
+        if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(jellyfinUserId, out var normalizedUserId)
+            || seerrUserId <= 0)
+        {
+            return new("invalid");
+        }
+
+        try
+        {
+            var users = await ReadUsersAsync(secrets, cancellationToken).ConfigureAwait(false);
+            return users.Any(user => user.Id == seerrUserId || user.JellyfinUserId == normalizedUserId)
+                ? new("still_present")
+                : new("absence_confirmed");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

@@ -4,6 +4,7 @@ using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Common.Plugins;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
@@ -19,18 +20,12 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Api;
 [Produces("application/json")]
 public sealed class KaevoController : ControllerBase, IActionFilter
 {
-    private const string PluginVersion = "0.2.82";
     private static readonly IReadOnlyDictionary<string, (string DisplayName, bool RequiresApiKey, bool RequiresUsernamePassword, string Category)> SupportedProviders =
         new Dictionary<string, (string DisplayName, bool RequiresApiKey, bool RequiresUsernamePassword, string Category)>(StringComparer.OrdinalIgnoreCase)
         {
             ["sonarr"] = ("Sonarr", true, false, "Media Automation"),
             ["radarr"] = ("Radarr", true, false, "Media Automation"),
             ["seerr"] = ("Seerr", true, false, "Media Automation"),
-            ["lidarr"] = ("Lidarr", true, false, "Media Automation"),
-            ["readarr"] = ("Readarr", true, false, "Media Automation"),
-            ["prowlarr"] = ("Prowlarr", true, false, "Media Automation"),
-            ["bazarr"] = ("Bazarr", true, false, "Media Automation"),
-            ["tdarr"] = ("Tdarr", false, false, "Media Automation"),
             ["sabnzbd"] = ("SABnzbd", true, false, "Download Clients"),
             ["qbittorrent"] = ("qBittorrent", false, true, "Download Clients")
         };
@@ -48,6 +43,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     private readonly KaevoPairingV3Service _pairingV3;
     private readonly KaevoProviderPolicyAuditStore _providerAudit;
     private readonly KaevoSeerrIdentityProvisioningService _seerrIdentityProvisioning;
+    private readonly IPluginManager _pluginManager;
 
     public KaevoController(
         ILibraryManager libraryManager,
@@ -61,7 +57,8 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         KaevoLocalPairingService localPairing,
         KaevoPairingV3Service pairingV3,
         KaevoProviderPolicyAuditStore providerAudit,
-        KaevoSeerrIdentityProvisioningService seerrIdentityProvisioning)
+        KaevoSeerrIdentityProvisioningService seerrIdentityProvisioning,
+        IPluginManager pluginManager)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
@@ -75,6 +72,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         _pairingV3 = pairingV3;
         _providerAudit = providerAudit;
         _seerrIdentityProvisioning = seerrIdentityProvisioning;
+        _pluginManager = pluginManager;
     }
 
     public void OnActionExecuting(ActionExecutingContext context)
@@ -117,7 +115,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         return Ok(new KaevoStatusResponse(
             "ok",
             "Kaevo",
-            PluginVersion,
+            KaevoPlugin.BuildVersion,
             configuration.CloudConnectorEnabled,
             cloud.Status,
             cloud.LastHeartbeatUtc,
@@ -129,7 +127,12 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             relay.ConnectedChannels,
             "hls-bounded-buffer-v3",
             configuration.OptimizerExecutionEnabled,
-            KaevoProfileJellyfinBindingStore.ProfileBindingState(configuration)));
+            KaevoProfileJellyfinBindingStore.ProfileBindingState(configuration),
+            configuration.TwoWayProfileDeletionEnabled,
+            configuration.JellyfinPluginIntegrationsEnabled,
+            _pluginManager.Plugins.Any(plugin =>
+                plugin.IsEnabledAndSupported
+                && string.Equals(plugin.Name, "Intro Skipper", StringComparison.OrdinalIgnoreCase))));
     }
 
     [HttpGet("cloud/status")]
@@ -165,7 +168,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             var start = await _pairingV3.StartAsync(request.JellyfinServerId, request.JellyfinServerName, localEndpoint, request.JellyfinSetupUserId, cancellationToken).ConfigureAwait(false);
             using var data = QRCodeGenerator.GenerateQrCode(start.PairingUri, QRCodeGenerator.ECCLevel.Q);
             var png = new PngByteQRCode(data).GetGraphic(8);
-            return Ok(new KaevoPairingV3StartResponse(start.Protocol, start.ExpiresAtUtc, Convert.ToBase64String(png)));
+            return Ok(new KaevoPairingV3StartResponse(start.Protocol, start.ExpiresAtUtc, start.PairingUri, Convert.ToBase64String(png)));
         }
         catch (KaevoPairingV3Exception exception) { return V3Error(exception, StatusForV3(exception.Code)); }
         catch (Exception) { return V3Error(new KaevoPairingV3Exception("unexpected_internal_error"), 500); }
@@ -439,6 +442,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         configuration.RemoteArtworkEnabled = true;
         configuration.RemoteWritesEnabled = true;
         configuration.RemoteMediaDeletionEnabled = false;
+        configuration.TwoWayProfileDeletionEnabled = false;
         configuration.RemotePlaybackEnabled = false;
         configuration.OptimizerPlanningEnabled = true;
         configuration.OptimizerExecutionEnabled = false;
@@ -599,6 +603,12 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             return StatusCode(503, new KaevoProfileJellyfinBindingResponse("unavailable"));
         }
 
+        if (!KaevoTwoWayProfileDeletionPolicy.Allows(configuration))
+        {
+            return Conflict(new KaevoProfileJellyfinBindingResponse(
+                KaevoTwoWayProfileDeletionPolicy.DisabledState));
+        }
+
         if (!KaevoProfileJellyfinBindingStore.TryUnbind(
                 configuration,
                 request.CloudProfileId,
@@ -744,6 +754,50 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             request.Permissions,
             cancellationToken).ConfigureAwait(false);
         return response.State == "ready"
+            ? Ok(response)
+            : StatusCode(502, response);
+    }
+
+    /// <summary>
+    /// Deletes one exact Seerr identity through the paired plugin.  The app
+    /// supplies the already-bound Jellyfin and Seerr identifiers; Seerr
+    /// administrator credentials remain server-side and deletion is reported
+    /// only after the plugin confirms the identity is absent.
+    /// </summary>
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpDelete("providers/seerr/jellyfin-user")]
+    public async Task<ActionResult<KaevoSeerrJellyfinUserDeletionResponse>> DeleteSeerrJellyfinUser(
+        [FromBody] KaevoSeerrJellyfinUserDeletionRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!KaevoTwoWayProfileDeletionPolicy.Allows(KaevoPlugin.Instance?.Configuration))
+        {
+            return Conflict(new KaevoSeerrJellyfinUserDeletionResponse(
+                KaevoTwoWayProfileDeletionPolicy.DisabledState));
+        }
+
+        if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                request.JellyfinUserId,
+                out var normalizedUserId)
+            || request.SeerrUserId <= 0)
+        {
+            return BadRequest(new KaevoSeerrJellyfinUserDeletionResponse("invalid"));
+        }
+
+        var secrets = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (secrets?.GetProvider("seerr") is not { Enabled: true })
+        {
+            return Conflict(new KaevoSeerrJellyfinUserDeletionResponse("seerr_not_configured"));
+        }
+
+        var response = await _seerrIdentityProvisioning.DeleteExactJellyfinUserAsync(
+            secrets,
+            normalizedUserId,
+            request.SeerrUserId,
+            cancellationToken).ConfigureAwait(false);
+        // An authoritative dual-ID absence is the idempotent success state for
+        // a cleanup retry whose first response may have been lost.
+        return response.State is "deleted" or "absent"
             ? Ok(response)
             : StatusCode(502, response);
     }

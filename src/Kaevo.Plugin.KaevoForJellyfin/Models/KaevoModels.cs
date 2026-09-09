@@ -15,7 +15,10 @@ public sealed record KaevoStatusResponse(
     int PlaybackRelayChannels,
     string PlaybackRelayProtocol,
     bool OptimizerExecution,
-    string ProfileBindingState);
+    string ProfileBindingState,
+    bool TwoWayProfileDeletionEnabled,
+    bool JellyfinPluginIntegrations,
+    bool IntroSkipperInstalled);
 
 public sealed record KaevoCloudPairingStatus(
     string State,
@@ -80,11 +83,13 @@ public sealed record KaevoPairingV3StartRequest(
     string JellyfinServerName,
     string JellyfinSetupUserId);
 
-// The QR image is returned only to the elevated local Jellyfin administrator
-// who created the one-time ticket. It is never logged or persisted by the UI.
+// The QR image and equivalent one-time link are returned only to the elevated
+// local Jellyfin administrator who created the ticket. Neither is logged or
+// persisted by the UI.
 public sealed record KaevoPairingV3StartResponse(
     string Protocol,
     DateTimeOffset ExpiresAtUtc,
+    string PairingUri,
     string QrPngBase64);
 
 /// <summary>
@@ -144,7 +149,20 @@ public sealed record KaevoSeerrJellyfinUserProvisionRequest(
 
 public sealed record KaevoSeerrJellyfinUserProvisionResponse(
     string State,
-    int? SeerrUserId = null);
+    int? SeerrUserId = null,
+    bool CreatedByThisAttempt = false);
+
+/// <summary>
+/// Deletes one exact Seerr identity which was previously imported from the
+/// supplied Jellyfin user.  Both identifiers are required so this endpoint
+/// can never select a provider account by display name.
+/// </summary>
+public sealed record KaevoSeerrJellyfinUserDeletionRequest(
+    string JellyfinUserId,
+    int SeerrUserId);
+
+public sealed record KaevoSeerrJellyfinUserDeletionResponse(
+    string State);
 
 public sealed record KaevoProviderStatusResponse(
     string Provider,

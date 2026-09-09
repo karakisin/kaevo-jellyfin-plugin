@@ -1,0 +1,885 @@
+[
+  {
+    "category": "General",
+    "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
+    "imageUrl": "https://raw.githubusercontent.com/karakisin/kaevo-jellyfin-plugin/main/assets/Kaevo.Plugin.Icon.png",
+    "name": "Kaevo",
+    "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
+    "owner": "Kaevo",
+    "overview": "Secure Kaevo Cloud access for Jellyfin",
+    "versions": [
+      {
+        "version": "0.3.26.0",
+        "changelog": "Testing release for manual installation: includes guarded Firebase control and relay support. Existing AWS pairing remains active until separately authorized migration. Firebase is not activated by installation; Home recovery and physical playback remain under investigation.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.26/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "d789f84ffff4e90209d674883449b028",
+        "timestamp": "2026-09-09T01:56:01Z"
+      },
+      {
+        "version": "0.3.25.0",
+        "changelog": "Adds signed protocol-2 connector-control push for Cloud provider operations and restores exact-profile playback reporting on Jellyfin 10.11 without changing profile authority or playback security.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.25/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "df48330f4504db9407d000b602b04ff0",
+        "timestamp": "2026-09-05T00:25:30Z"
+      },
+      {
+        "version": "0.3.20.0",
+        "changelog": "Completes clean Pairing V3 setup by provisioning a dedicated local Jellyfin API key for connector registration and heartbeat without sending the key to Kaevo Cloud.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.20/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "49219c5b71ebc40686640a20d73de543",
+        "timestamp": "2026-09-01T19:16:54Z"
+      },
+      {
+        "version": "0.3.19.0",
+        "changelog": "Makes exact-profile watched and unwatched commands resilient on Jellyfin 10.11 by supplying a complete client identity and requiring authoritative exact-user, exact-item state readback; missing, stale, conflicting, or mismatched bindings still fail closed.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.19/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "3e1eb214b82123d1ed7e99339cbbe6b5",
+        "timestamp": "2026-08-29T07:39:42Z"
+      },
+      {
+        "version": "0.3.18.0",
+        "changelog": "Keeps exact-profile watched and unwatched commands working when Jellyfin temporarily cannot persist the Cloud-authoritative binding, while missing, stale, conflicting, or mismatched bindings still fail closed.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.18/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "44817b5eb685f993cc3f6f08abb4b28b",
+        "timestamp": "2026-08-29T07:09:55Z"
+      },
+      {
+        "version": "0.3.17.0",
+        "changelog": "Allows the canonical Kaevo household Owner to submit Seerr requests through the already-authenticated connector identity while preserving exact immutable Seerr user attribution for members.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.17/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "6dc93cc428e5d889b6e12d84d6e6b682",
+        "timestamp": "2026-08-28T05:03:12Z"
+      },
+      {
+        "version": "0.3.16.0",
+        "changelog": "Keeps the Cloud heartbeat independent from remote-command and playback work so a connected plugin cannot become falsely stale, without changing Requests or Download Details behavior.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.16/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "57f363b11018359fa91ad822e9b0d5b7",
+        "timestamp": "2026-08-26T12:06:20Z"
+      },
+      {
+        "version": "0.3.15.0",
+        "changelog": "Fixes Pairing V3 repair by selecting the exact pinned QA or Production authorization trust and matching Cloud endpoint from the signed authorization.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.15/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "a89e880bdcd29d216eaedaeb3d32f9d2",
+        "timestamp": "2026-08-26T10:48:48Z"
+      },
+      {
+        "version": "0.3.14.0",
+        "changelog": "Replaces an exact consumed Pairing V3 QR with a visible Kaevo App Connected success state without changing Requests or Download Details behavior.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.14/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "b7f83400eeef09548fc0015aac4a980f",
+        "timestamp": "2026-08-25T04:19:15Z"
+      },
+      {
+        "version": "0.3.13.0",
+        "changelog": "Migrates stale or empty Pairing V3 Production verification settings to Kaevo's pinned public trust so valid iPhone authorizations complete without changing Requests or Download Details behavior.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.13/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "e50a05d3342b43ae9c2f62acd7d8b869",
+        "timestamp": "2026-08-25T03:54:06Z"
+      },
+      {
+        "version": "0.3.12.0",
+        "changelog": "Repairs Pairing V3 after Production endpoint hardening by migrating only invalid or empty saved endpoints to Kaevo's compiled Production endpoint while preserving approved configuration and fail-closed environment isolation.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.12/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "73455d6be7b41097b8c783ce79b33a63",
+        "timestamp": "2026-08-25T03:21:41Z"
+      },
+      {
+        "version": "0.3.11.0",
+        "changelog": "Hardens Pairing V3 completion by checking the immutable attempt after an uncertain Cloud response and retrying redemption once only when Cloud confirms the first request did not commit.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.11/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "b3f3fc7ae650bd4c1a35d7a8048d04bd",
+        "timestamp": "2026-08-25T02:44:04Z"
+      },
+      {
+        "version": "0.3.10.0",
+        "changelog": "Pins Production pairing to Kaevo's exact Production Cloud endpoint, preserves explicit QA and security environments, and rejects stale or unapproved Cloud routes.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.10/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "a7258c75ca8a5ff34ba5c1b8863a6761",
+        "timestamp": "2026-08-22T00:35:49Z"
+      },
+      {
+        "version": "0.3.9.0",
+        "changelog": "Adds exact-ID Account Lifecycle V2 delete and absence-verification commands for Kaevo, Jellyfin, and Seerr accounts while always preserving libraries and media.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.9/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "f213f5a32b75d57907a82f10fac4c79d",
+        "timestamp": "2026-08-21T23:22:33Z"
+      },
+      {
+        "version": "0.3.8.0",
+        "changelog": "Reloads Jellyfin's saved plugin configuration before signed heartbeats and remote commands so two-way profile deletion status and enforcement update without a server restart.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.8/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "6315eb57009675ac5cceef56c28ea7aa",
+        "timestamp": "2026-08-20T10:23:53Z"
+      },
+      {
+        "version": "0.3.7.0",
+        "changelog": "Restores Jellyfin checkbox outlines by preserving each toggle row as the outline positioning anchor and isolating Kaevo text layout from Jellyfin's generated checkbox elements.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.7/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "d6e324819c2a57225844949fec85d4a0",
+        "timestamp": "2026-08-20T10:05:10Z"
+      },
+      {
+        "version": "0.3.6.0",
+        "changelog": "Restores Jellyfin checkbox controls and card spacing, and removes Lidarr, Readarr, Prowlarr, Bazarr, and Tdarr from supported Kaevo connections.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.6/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "2e1eb719efaf3fea96441dfc7d1d8093",
+        "timestamp": "2026-08-20T09:54:44Z"
+      },
+      {
+        "version": "0.3.5.0",
+        "changelog": "Fixes wrapped permission descriptions in the Kaevo plugin settings so helper text keeps its full height and no longer overlaps the next section heading.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.5/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "f47b474704505bbe24c929deeab31871",
+        "timestamp": "2026-08-20T09:39:03Z"
+      },
+      {
+        "version": "0.3.4.0",
+        "changelog": "Adds separate default-off consent for two-way Kaevo profile deletion, reports the signed permission to Kaevo Cloud, and blocks exact Jellyfin or Seerr user deletion unless the server administrator enables it. Media files remain unchanged.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.4/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "cff486948c63e31cc7b9add63f33f5eb",
+        "timestamp": "2026-08-20T09:18:48Z"
+      },
+      {
+        "version": "0.3.3.0",
+        "changelog": "Makes household-member provisioning transactional by retaining exact provider receipts, rolling back Seerr before Jellyfin with authoritative absence verification, and enabling owner-confirmed exact-ID orphan repair.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.3/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "7c60d0dea7bfdcfd0083d78bc2b10dd0",
+        "timestamp": "2026-08-19T22:39:27Z"
+      },
+      {
+        "version": "0.3.2.0",
+        "changelog": "Adds optional exact linked-account cleanup during Kaevo account deletion, deleting Seerr first and Jellyfin second with immutable-ID absence verification.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.2/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "be737f9208ba333ad28c8ba4721550b4",
+        "timestamp": "2026-08-19T05:31:32Z"
+      },
+      {
+        "version": "0.3.1.0",
+        "changelog": "Fixes Mark Watched and Mark Unwatched on Jellyfin 10.11 by using the supported exact-user playstate endpoint and validating its authoritative item readback.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.1/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "ba548efa95a2bbae7657e4ae7f89cd43",
+        "timestamp": "2026-08-18T08:59:43Z"
+      },
+      {
+        "version": "0.3.0.0",
+        "changelog": "Fixes watched-state confirmation on Jellyfin 10.11 by reading the exact bound user's authoritative data without calling the removed Jellyfin 10.10 API.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.0/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "63055728fbb6799d77875eee9bd72b3b",
+        "timestamp": "2026-08-18T08:26:59Z"
+      },
+      {
+        "version": "0.2.99.0",
+        "changelog": "Applies watched and unwatched state directly to the exact bound Jellyfin profile and returns authoritative played-state readback for fast, consistent Kaevo Library updates.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.99/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "215dd4a3c7b23b46155bcd57e9a37ac9",
+        "timestamp": "2026-08-18T05:55:08Z"
+      },
+      {
+        "version": "0.2.98.0",
+        "changelog": "Hardens Requests and download progress with immutable Arr identity filters, byte-exact signed connector requests, and bounded recovery for stale Cloud request leases.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.98/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "40ed0855cebdfcf471bfba086e271b06",
+        "timestamp": "2026-08-17T08:02:12Z"
+      },
+      {
+        "version": "0.2.97.0",
+        "changelog": "Restores Guest Pass cover artwork and allows AVPlayer's authorized HLS manifest probe to complete immediately so protected playback can start instead of timing out on a black screen.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.97/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "451efdc223351c58c3e6254abcc4a271",
+        "timestamp": "2026-08-17T01:14:36Z"
+      },
+      {
+        "version": "0.2.96.0",
+        "changelog": "Adds server-authorized Guest Pass library scope and trusted playback ancestry so Kaevo can enforce exact movie, show, season, and episode access without creating a Jellyfin profile.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.96/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "a07e3d3d6c4256aab7d4e2f6d839a381",
+        "timestamp": "2026-08-15T11:05:27Z"
+      },
+      {
+        "version": "0.2.95.0",
+        "changelog": "Keeps dark Saved confirmations synchronized with Jellyfin's actual saved values across the main configuration and Media Services, exposing gold Save buttons only while settings differ.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.95/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "408f03a82cb9fc8fd6e6099bfa723d5c",
+        "timestamp": "2026-08-14T09:33:44Z"
+      },
+      {
+        "version": "0.2.94.0",
+        "changelog": "Adds clear Saving, Saved, and retry feedback to the Kaevo configuration Save button so administrators can immediately confirm whether their settings were saved.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.94/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "e63cd526ced12300ce40672c85ff2085",
+        "timestamp": "2026-08-14T09:20:42Z"
+      },
+      {
+        "version": "0.2.93.0",
+        "changelog": "Keeps the Jellyfin Plugin Integrations guidance fully visible and directs users to finish Intro Skipper setup in Kaevo under Settings and Connections.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.93/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "96442a254bb352d9f45393db1183903e",
+        "timestamp": "2026-08-14T09:01:52Z"
+      },
+      {
+        "version": "0.2.92.0",
+        "changelog": "Adds opt-in Jellyfin plugin integrations and bounded Intro Skipper media-segment support for exact Skip Intro and Skip Recap playback prompts.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.92/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "d4b3f46c17e55ca2502dae9786a96203",
+        "timestamp": "2026-08-14T08:38:15Z"
+      },
+      {
+        "version": "0.2.91.0",
+        "changelog": "Carries exact bounded Jellyfin trickplay metadata through Kaevo Cloud so remote playback can display grant-authorized sprite previews without changing transport or controls.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.91/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "2724907d307aa597c2b945706cc97fa8",
+        "timestamp": "2026-08-13T07:52:15Z"
+      },
+      {
+        "version": "0.2.90.0",
+        "changelog": "Attributes playback progress to each switched profile's exact Jellyfin user so Continue Watching remains profile-specific.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.90/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "6a1f6f3f1aca0f2738e648b09409bfee",
+        "timestamp": "2026-08-12T22:26:15Z"
+      },
+      {
+        "version": "0.2.89.0",
+        "changelog": "Uses each authorized switched profile's exact Jellyfin binding for media access and Continue Watching, including Jellyfin's canonical resume endpoint.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.89/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "140a7a55bc296295c939376cf1552436",
+        "timestamp": "2026-08-12T21:51:52Z"
+      },
+      {
+        "version": "0.2.88.0",
+        "changelog": "Fixes exact SABnzbd job Start and Pause by using SABnzbd's per-job queue command with the immutable nzo_id instead of a global queue-state command.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.88/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "e8ed4c813390e3619a0cd2015f219ff2",
+        "timestamp": "2026-08-09T21:32:49Z"
+      },
+      {
+        "version": "0.2.87.0",
+        "changelog": "Fixes owner-only Start and Pause controls by re-reading the exact immutable Arr queue binding through the supported paged queue endpoint before mutating the matching SABnzbd or qBittorrent job.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.87/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "6d66f11d84f44eeeeac04c3bc64f3fcd",
+        "timestamp": "2026-08-09T21:20:43Z"
+      },
+      {
+        "version": "0.2.86.0",
+        "changelog": "Restores owner-only Start and Pause controls when an Arr queue item omits its download-client ID by proving one exact immutable Arr client and exact SABnzbd or qBittorrent job before exposing or executing the control.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.86/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "f7d720028946e5f269f8902a4e46ba8b",
+        "timestamp": "2026-08-09T20:32:14Z"
+      },
+      {
+        "version": "0.2.85.0",
+        "changelog": "Adds owner-only verified downloader controls with exact Arr and download-client read-back, preserves canonical Seerr request attribution, and improves the Repair Kaevo Connection action.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.85/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "2121fe4f326fff99de6b40f800e1fee1",
+        "timestamp": "2026-08-09T09:56:13Z"
+      },
+      {
+        "version": "0.2.84.0",
+        "changelog": "Binds every Seerr request to the exact Seerr user resolved from Kaevo Cloud's protected household profile binding, preventing one household member's request from being attributed to another.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.84/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "2a7d1f6db57d9ba384648d87cf7fb701",
+        "timestamp": "2026-08-09T04:24:34Z"
+      },
+      {
+        "version": "0.2.83.0",
+        "changelog": "Fixes the Kaevo Connection repair control so it remains clearly readable in Jellyfin and explains that it should be used only when Kaevo asks the server to reconnect.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.83/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "28498dbeac1c3d7e043c431bf138cc56",
+        "timestamp": "2026-08-03T09:31:16Z"
+      },
+      {
+        "version": "0.2.82.0",
+        "changelog": "Repairs a Kaevo household connector without replacing any profile's immutable Jellyfin user, adds local-only SABnzbd and qBittorrent health access, and explains safe reconnection after plugin removal.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.82/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "2c5ae592e5f0b47eb5a5e87034ffbadc",
+        "timestamp": "2026-08-03T09:20:00Z"
+      },
+      {
+        "version": "0.2.81.0",
+        "changelog": "Fixes the remote command completion contract used to inspect and safely transfer one explicitly selected existing Jellyfin user between verified household profiles.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.81/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "0fdc942bc04575a3722698e587597bda",
+        "timestamp": "2026-08-02T22:30:00Z"
+      },
+      {
+        "version": "0.2.80.0",
+        "changelog": "Adds a guarded, revision-checked transfer for one explicitly selected existing Jellyfin user between verified household profiles.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.80/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "52163c869b61ddc4ff68948bb3caf3fd",
+        "timestamp": "2026-08-02T20:00:00Z"
+      },
+      {
+        "version": "0.2.79.0",
+        "changelog": "Adds signed, profile-bound member media capability enforcement for Household Username Auth V1 without an Owner fallback.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.79/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "fff148cfa1e8acf431ee93f83ed66ea0",
+        "timestamp": "2026-08-01T20:26:40Z"
+      },
+      {
+        "version": "0.2.78.0",
+        "changelog": "Adds guarded Owner-authorized claims for a confirmed unbound Jellyfin user while refusing active, unrelated, and ambiguous bindings.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.78/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "066a25ede8be713f533a95961ddcab20",
+        "timestamp": "2026-08-01T11:33:18Z"
+      },
+      {
+        "version": "0.2.77.0",
+        "changelog": "Allows an Owner to repair one exact stale profile-to-Jellyfin link only after Kaevo Cloud verifies the previous same-household profile is inactive or deleted.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.77/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "28663372fa5cba01aaa11c5244c14eed",
+        "timestamp": "2026-08-01T02:57:13Z"
+      },
+      {
+        "version": "0.2.76.0",
+        "changelog": "Allows an Owner to repair one exact stale profile-to-Jellyfin link only after Kaevo Cloud verifies the previous same-household profile is inactive or deleted.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.76/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "ba7319a429bec4e971ec9c3b450d0a17",
+        "timestamp": "2026-08-01T02:57:13Z"
+      },
+      {
+        "version": "0.2.75.0",
+        "changelog": "Lets Kaevo Cloud recover one exact profile-to-Jellyfin binding from the paired plugin without display-name matching, pairing again, or sharing owner credentials.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.75/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "bacdcfc60dbeace7f58f65cab280492b",
+        "timestamp": "2026-08-01T01:01:08Z"
+      },
+      {
+        "version": "0.2.74.0",
+        "changelog": "Restores an exact server-authorized Cloud profile to its Jellyfin identity on joined devices without pairing again or sharing owner credentials.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.74/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "7d484e8a2894bebe344ae2255149fbc4",
+        "timestamp": "2026-07-31T23:27:02Z"
+      },
+      {
+        "version": "0.2.73.0",
+        "changelog": "Lets Kaevo provision one exact Jellyfin member into Seerr through the paired plugin without exposing Seerr administrator credentials to an iPhone.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.73/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "9b31590cbc9132d2846f224f11cbb4e8",
+        "timestamp": "2026-07-31T11:30:00Z"
+      },
+      {
+        "version": "0.2.72.0",
+        "changelog": "Fixes Jellyfin 10.11 profile binding by resolving exact user IDs through the runtime-compatible user contract.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.72/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "1155feb5360909e643327487cb39e0f8",
+        "timestamp": "2026-07-31T08:33:39Z"
+      },
+      {
+        "version": "0.2.71.0",
+        "changelog": "Adds exact, non-identifying profile-binding diagnostics so Kaevo prevents incomplete media setup before it creates a household member.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.71/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "f4a33e3699441034fde2a9e22fa309d6",
+        "timestamp": "2026-07-31T07:42:21Z"
+      },
+      {
+        "version": "0.2.70.0",
+        "changelog": "Adds protected exact profile-to-Jellyfin unbinding for permanent profile cleanup and prevents one Jellyfin user from being shared across Cloud profiles.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.70/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "ad9752fbcdb35f20826f810729e5fbcf",
+        "timestamp": "2026-07-31T04:37:00Z"
+      },
+      {
+        "version": "0.2.69.0",
+        "changelog": "Adds exact Cloud-profile-to-Jellyfin-user binding so household members receive only their own authorized library identity.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.69/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "167e04b0609a784bd9bdf96949f32f84",
+        "timestamp": "2026-07-30T18:29:01Z"
+      },
+      {
+        "version": "0.2.68.0",
+        "changelog": "Adds V3 Cloud-signed playback-grant verification while preserving legacy connector grants.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.68/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "684db2b67132dca598d714968b0f4efe",
+        "timestamp": "2026-07-24T11:16:43Z"
+      },
+      {
+        "version": "0.2.67.0",
+        "changelog": "Refreshes a revoked local Jellyfin connector credential from an elevated, signed-in Kaevo session without sending it to Kaevo Cloud.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.67/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "ae45cd7a84baad58b5d193d74cdc42cd",
+        "timestamp": "2026-07-23T20:52:17Z"
+      },
+      {
+        "version": "0.2.66.0",
+        "changelog": "Keeps Pairing V3 response signatures valid for international Seerr titles so Search results can return through Cloud securely.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.66/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "4b6bce613a743278dd1f098576dc549e",
+        "timestamp": "2026-07-22T12:08:00Z"
+      },
+      {
+        "version": "0.2.65.0",
+        "changelog": "Matches the connected app state in Jellyfin and securely supports administrator-approved private Docker and NAS provider ports.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.65/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "acb29fd45f847bc2534b2ddc34821067",
+        "timestamp": "2026-07-22T10:02:41Z"
+      },
+      {
+        "version": "0.2.60.0",
+        "changelog": "Adds Secure Pairing V3 and shows the completed Kaevo App connection state in Jellyfin.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.60/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "ee055522872662d93c90f61120001e54",
+        "timestamp": "2026-07-22T06:32:09Z"
+      },
+      {
+        "version": "0.2.55.0",
+        "changelog": "Adds explicit local-pairing expiry enforcement and improves QR rejection behavior for expired or malformed handshake codes.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.55/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "243c735964b35af14b5bca67a11bc0f0",
+        "timestamp": "2026-07-20T20:59:06Z"
+      },
+      {
+        "version": "0.2.54.0",
+        "changelog": "Matches every Media Services provider toggle to the larger aligned Media Management checkbox style.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.54/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "4d3dc3986066140488170c7d57c9ef94",
+        "timestamp": "2026-07-20T09:00:00Z"
+      },
+      {
+        "version": "0.2.53.0",
+        "changelog": "Adds official transparent Kaevo branding, clear privacy guidance, and consistently aligned configuration cards.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.53/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "8ccaf7a8770c6c1fe5df2517285c3135",
+        "timestamp": "2026-07-20T08:30:00Z"
+      },
+      {
+        "version": "0.2.52.0",
+        "changelog": "Applies Kaevo branding inside Jellyfin's injected plugin page and centers the pairing experience.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.52/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "32cc7839372da77a2acd417381abee2c",
+        "timestamp": "2026-07-20T08:12:00Z"
+      },
+      {
+        "version": "0.2.51.0",
+        "changelog": "Adds a Kaevo-branded plugin layout and a live countdown for local pairing codes.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.51/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "82a068f2597801b36e19374447e1576d",
+        "timestamp": "2026-07-20T08:00:00Z"
+      },
+      {
+        "version": "0.2.50.0",
+        "changelog": "Fixes QR and one-time code display after Jellyfin returns the pairing response.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.50/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "5851efab4f7cc3d38511d87f575919f9",
+        "timestamp": "2026-07-20T07:40:00Z"
+      },
+      {
+        "version": "0.2.49.0",
+        "changelog": "Adds a local-only, single-use QR or code handshake for securely pairing the Kaevo app with Jellyfin.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.49/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "c57b45758fd70888795593bbf8d4b76e",
+        "timestamp": "2026-07-19T13:04:12Z"
+      },
+      {
+        "version": "0.2.48.0",
+        "changelog": "Binds Cloud connector access to local lifecycle keys and enforces pinned local-provider destinations.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.48/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "ead01b0e1966e595169f7606c26d6689",
+        "timestamp": "2026-07-18T22:39:26Z"
+      },
+      {
+        "version": "0.2.47.0",
+        "changelog": "Lets paused titles yield the optimizer lane without losing priority and safely rebuilds silent optimized audio from the protected original.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.47/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "2028078c0e61300e105c590bf511385c",
+        "timestamp": "2026-07-18T02:05:00Z"
+      },
+      {
+        "version": "0.2.46.0",
+        "changelog": "Targets verified stereo AAC for silent multichannel audio fixes, speeds up full Apple H.264 conversion, and reports progress across Jellyfin FFmpeg variants.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.46/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "d82188def31e5ff5d513b44b25641eeb",
+        "timestamp": "2026-07-18T01:35:00Z"
+      },
+      {
+        "version": "0.2.45.0",
+        "changelog": "Persists active, paused, and pending Media Optimization jobs across Jellyfin restarts; interrupted work returns safely paused, eligible queued work continues, and paused priority is retained without blocking the queue.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.45/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "4068e8a63b2828155c5239e3f957c140",
+        "timestamp": "2026-07-18T01:00:00Z"
+      },
+      {
+        "version": "0.2.44.0",
+        "changelog": "Aligns optimization with Kaevo's proven Apple playback profile by converting HEVC to H.264, refreshes Jellyfin media details after replacement, and safely supports re-optimizing a title while retaining its original backup.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.44/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "c732e5031f33cd138a4b3c02f4e6ba08",
+        "timestamp": "2026-07-18T00:45:00Z"
+      },
+      {
+        "version": "0.2.43.0",
+        "changelog": "Recovers safely from Jellyfin restarts by removing only confirmed interrupted Kaevo partial output, and reports the actual remux, audio, or video optimization action.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.43/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "1b721d325067c14add869266fce7a58a",
+        "timestamp": "2026-07-18T00:30:00Z"
+      },
+      {
+        "version": "0.2.42.0",
+        "changelog": "Adds safe pause and resume for active Media Optimization jobs, including indefinite, 1-hour, 6-hour, and 12-hour pauses with automatic server-side resume.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.42/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "042c7528579d9c8939ba1bc38135859c",
+        "timestamp": "2026-07-18T00:12:00Z"
+      },
+      {
+        "version": "0.2.41.0",
+        "changelog": "Adds an explicit H.264/AAC fallback plan after a fast Apple remux path fails, without silently repeating the same plan.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.41/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "926812686db81d4919c01e05fa21f9bf",
+        "timestamp": "2026-07-17T23:31:00Z"
+      },
+      {
+        "version": "0.2.40.0",
+        "changelog": "Adds confirmed safe cancellation for active and pending optimization jobs while preserving originals and removing partial output.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.40/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "d0dad437c58c9237be01f97ff380e21f",
+        "timestamp": "2026-07-17T23:18:00Z"
+      },
+      {
+        "version": "0.2.39.0",
+        "changelog": "Selects the fastest safe Apple Direct Play path: remux, copy compatible video while converting audio, or full video conversion only when required.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.39/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "70a2b7b9485d1317fa6a67f45682b056",
+        "timestamp": "2026-07-17T23:12:07Z"
+      },
+      {
+        "version": "0.2.38.0",
+        "changelog": "Fixes Direct Play planning for incompatible MP4 videos and shows both the series and episode name throughout optimization progress.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.38/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "b81a96438f7981c4a82706ec7deb644a",
+        "timestamp": "2026-07-17T22:50:36Z"
+      },
+      {
+        "version": "0.2.36.0",
+        "changelog": "Adds persistent active and pending Media Optimization jobs with safe priority reordering while one conversion runs at a time.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.36/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "3834ecde3e5fecee33bb6bc125e4ac50",
+        "timestamp": "2026-07-17T22:37:23Z"
+      },
+      {
+        "version": "0.2.35.0",
+        "changelog": "Fixes FFmpeg conversion startup by preserving the MP4 extension on temporary output and adds a safe retry workflow.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.35/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "e6c4c37799198492fa15fd7460b9bb81",
+        "timestamp": "2026-07-17T22:11:09Z"
+      },
+      {
+        "version": "0.2.28.0",
+        "changelog": "Adds grant-bound WebVTT captions that do not restart video, stabilizes track changes, keeps Jellyfin transcoding available, and reports the active plugin version accurately.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.28/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "da56b4427fc11b01e76986c1ff049c69",
+        "timestamp": "2026-07-16T08:45:00Z"
+      },
+      {
+        "version": "0.2.27.0",
+        "changelog": "Adds grant-bound WebVTT captions that do not restart video, stabilizes track changes, and keeps Jellyfin transcoding available for media Apple devices cannot directly play.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.27/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "72a1105432959e6848489be14c211d86",
+        "timestamp": "2026-07-16T08:35:00Z"
+      },
+      {
+        "version": "0.2.26.0",
+        "changelog": "Uses Apple-compatible HEVC fragmented-MP4 HLS to preserve compatible video and transcode unsupported audio without unnecessarily invoking Jellyfin's video encoder.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.26/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "cb557673758abd2c198b75fddc456a83",
+        "timestamp": "2026-07-16T08:20:00Z"
+      },
+      {
+        "version": "0.2.25.0",
+        "changelog": "Fixes feature-length movie playback by accepting bounded 2 MiB Jellyfin VOD playlists and preserving validated relative segment URLs without duplicating signed grants.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.25/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "ec6b2c306b55d758540c2a1826d4f540",
+        "timestamp": "2026-07-16T08:10:00Z"
+      },
+      {
+        "version": "0.2.24.0",
+        "changelog": "Fixes 4K HEVC playback startup by securely relaying Jellyfin's native trickplay playlist and thumbnail tiles instead of rejecting the master playlist.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.24/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "064705aaaebacf24dd8bfc8e1aa91c5e",
+        "timestamp": "2026-07-16T07:50:00Z"
+      },
+      {
+        "version": "0.2.23.0",
+        "changelog": "Fixes HEVC playback by preventing incompatible MPEG-TS stream copy, refreshes sessions for audio and caption selection, restores Jellyfin watched actions, and adds confirmed media deletion.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.23/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "7371e357518fbf55e189edd20e4626f3",
+        "timestamp": "2026-07-16T07:30:00Z"
+      },
+      {
+        "version": "0.2.22.0",
+        "changelog": "Adds secure multi-language audio selection and native HLS text captions, including temporary captions after rewind, without exposing Jellyfin credentials.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.22/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "cd9afb4c8d6477dd44d3c3f7c58905dd",
+        "timestamp": "2026-07-16T06:47:09Z"
+      },
+      {
+        "version": "0.2.21.0",
+        "changelog": "Fixes cellular playback by removing the relay body-ack deadlock, forces Apple-compatible H.264 and AAC HLS, and preserves video stream copy when Jellyfin can safely remux it.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.21/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "d071100dd6944fff6124b0e389cf7e37",
+        "timestamp": "2026-07-16T05:12:00Z"
+      },
+      {
+        "version": "0.2.20.0",
+        "changelog": "Installs the verified bidirectional HLS relay protocol as a new binary version, exposes its protocol fingerprint, and preserves local audio transcoding with Jellyfin progress reporting.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.20/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "0ac87562c15f6b84dde35e9105776323",
+        "timestamp": "2026-07-16T04:50:23Z"
+      },
+      {
+        "version": "0.2.19.0",
+        "changelog": "Fixes cellular HLS startup for alternate audio renditions, prevents relay backpressure stalls, adds bidirectional Jellyfin playback progress, and keeps transcoding local.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.19/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "b1425a74786225488ab9b52d3dec6171",
+        "timestamp": "2026-07-16T04:17:33Z"
+      },
+      {
+        "version": "0.2.18.0",
+        "changelog": "Keeps provider settings live without a restart and securely enables Seerr and Arr reads through the Kaevo Plugin.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.18/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "25a1fc2cb4fa6567e5780920e6d1d259",
+        "timestamp": "2026-07-16T00:22:30Z"
+      },
+      {
+        "version": "0.2.17.0",
+        "changelog": "Adds independent Cloud connection checks for Sonarr, Radarr, Seerr, Lidarr, Readarr, Prowlarr, Bazarr, and Tdarr without exposing local credentials.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.17/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "a2babd53825c369200de670b827eb39d",
+        "timestamp": "2026-07-15T23:26:38Z"
+      },
+      {
+        "version": "0.2.16.0",
+        "changelog": "Adds live Sonarr search and cancellation plus private, independently enabled local connections for Seerr, the Arr services, and Tdarr.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.16/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "97f9730f6dfe0b93f07bf06c1e9cbd66",
+        "timestamp": "2026-07-15T22:15:28Z"
+      },
+      {
+        "version": "0.2.13.0",
+        "changelog": "Prioritizes playback and metadata over artwork, processes Cloud requests concurrently, and returns an authoritative Recently Added feed.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.13/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "02f715c3b1b34e8d05a3687d99b7eadc",
+        "timestamp": "2026-07-15T10:11:25Z"
+      },
+      {
+        "version": "0.2.12.0",
+        "changelog": "Keeps Recently Added current by requesting Jellyfin items in newest-added order while preserving the complete guarded HLS playback session.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.12/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "26cd211ed45925710593f417f9999051",
+        "timestamp": "2026-07-15T09:36:52Z"
+      },
+      {
+        "version": "0.2.11.0",
+        "changelog": "Rebuilds remote playback around the complete Jellyfin HLS session, including nested playlists, initialization segments, byte ranges, and guarded query forwarding.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.11/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "dd9a5a666c9996d218639871ae1299bb",
+        "timestamp": "2026-07-15T09:15:23Z"
+      },
+      {
+        "version": "0.2.10.0",
+        "changelog": "Fixes Apple playback startup for locally transcoded audio by using Jellyfin's MPEG-TS HLS output while preserving compatible video streams.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.10/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "a88bd77d17a31e79159b8df255abb784",
+        "timestamp": "2026-07-15T08:23:51Z"
+      },
+      {
+        "version": "0.2.9.0",
+        "changelog": "Keeps active playback valid across long streams and enables Jellyfin-managed audio transcoding while preserving compatible video streams.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.9/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "b00384ab022405ad357bfcccdd4277a0",
+        "timestamp": "2026-07-15T07:57:00Z"
+      },
+      {
+        "version": "0.2.8.0",
+        "changelog": "Adds a three-channel playback pool so normal network connection rotation cannot briefly remove the only media path.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.8/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "01c3302c22dcd97cafa48ab36040d8e5",
+        "timestamp": "2026-07-15T05:54:29Z"
+      },
+      {
+        "version": "0.2.7.0",
+        "changelog": "Ignores harmless late player cancellations after request cleanup so rapid Apple player starts cannot reconnect the relay.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.7/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "04e50056b230015736c96eee5c8ea6f9",
+        "timestamp": "2026-07-15T05:46:55Z"
+      },
+      {
+        "version": "0.2.6.0",
+        "changelog": "Keeps healthy playback connected while Cloud metadata and heartbeat operations retry independently.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.6/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "2ba8483a52476e3313f692187296f857",
+        "timestamp": "2026-07-15T05:26:56Z"
+      },
+      {
+        "version": "0.2.5.0",
+        "changelog": "Prevents abandoned player requests from blocking the playback channel and reports relay health independently from Cloud status.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.5/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "32b5c9fe08b0d0e14bee94389f20f6e0",
+        "timestamp": "2026-07-15T04:52:52Z"
+      },
+      {
+        "version": "0.2.4.0",
+        "changelog": "Keeps metadata online while playback reconnects independently, and enables guarded relay playback with local Jellyfin remux/transcoding.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.4/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "e552cc4cde5b825f3a210ffa7abcfa86",
+        "timestamp": "2026-07-15T02:02:33Z"
+      },
+      {
+        "version": "0.2.3.0",
+        "changelog": "Enables guarded remote playback through short-lived device-bound grants, with direct connection preferred and local Jellyfin remux/transcoding retained.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.3/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "6a15d8fc98ea0f2756a486ed884d4d3e",
+        "timestamp": "2026-07-15T01:21:29Z"
+      },
+      {
+        "version": "0.2.2.0",
+        "changelog": "Raises remote Hero artwork to a bounded 2160-pixel tier with adaptive fallback so Cloud images stay sharp without returning truncated image data.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.2/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "52fc6d21dd1ee60b26d026e00c878682",
+        "timestamp": "2026-07-15T00:02:13Z"
+      },
+      {
+        "version": "0.2.1.0",
+        "changelog": "Adds one-tap, administrator-authorized Cloud activation from the Kaevo app while keeping remote playback, mutations, and optimizer execution disabled.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.1/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "05b965d228967fd1edcf9eddfd4902fe",
+        "timestamp": "2026-07-14T11:19:19Z"
+      },
+      {
+        "version": "0.2.0.0",
+        "changelog": "Adds the plugin-only Kaevo Cloud connector, remote metadata and artwork, guarded Jellyfin writes, playback preparation, and an outbound secure playback relay.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.2.0/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "1e8c83978268686d6102262168959b32",
+        "timestamp": "2026-07-14T10:17:21Z"
+      },
+      {
+        "version": "0.1.2.0",
+        "changelog": "Fixes Jellyfin 10.11 snapshot item querying and restores the Kaevo settings page with a configurable snapshot limit.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.1.2/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "b30e5b4ad072f9ac4175b9324c7529bc",
+        "timestamp": "2026-07-14T08:45:48Z"
+      },
+      {
+        "version": "0.1.1.0",
+        "changelog": "Fixes main snapshot compatibility with Jellyfin 10.11 while preserving bounded read-only metadata and image tags.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.1.1/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "d42bbd4ea952afd617e00cc18aff2e25",
+        "timestamp": "2026-07-14T08:30:44Z"
+      },
+      {
+        "version": "0.1.0.0",
+        "changelog": "Initial Kaevo release with local read-only status, media counts, and bounded main snapshot endpoints.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.1.0/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "6d1ec88bf98e676c41e7fd67e677d432",
+        "timestamp": "2026-07-14T08:05:38Z"
+      }
+    ]
+  }
+]

@@ -26,7 +26,7 @@ public sealed class KaevoProviderPolicyAuditStore
     public async Task RecordAsync(string provider, string outcome, string securityClass, Uri? destination, string reason, CancellationToken cancellationToken)
     {
         var safeProvider = provider is "sonarr" or "radarr" or "seerr" or "sabnzbd" or "qbittorrent"
-            or "lidarr" or "readarr" or "prowlarr" or "bazarr" or "tdarr" ? provider : "unknown";
+            ? provider : "unknown";
         var destinationReference = destination is null ? "" : Reference(destination.Scheme + "://" + destination.IdnHost + ":" + destination.Port);
         var record = JsonSerializer.Serialize(new
         {

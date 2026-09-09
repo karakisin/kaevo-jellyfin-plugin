@@ -25,6 +25,7 @@ public sealed class ControllerAuthorizationTests
     [InlineData(nameof(KaevoController.GetProviderStatus))]
     [InlineData(nameof(KaevoController.ProvisionProvider))]
     [InlineData(nameof(KaevoController.ProvisionSeerrJellyfinUser))]
+    [InlineData(nameof(KaevoController.DeleteSeerrJellyfinUser))]
     [InlineData(nameof(KaevoController.PairLifecycle))]
     [InlineData(nameof(KaevoController.RotateLifecycle))]
     [InlineData(nameof(KaevoController.RecoverLifecycle))]

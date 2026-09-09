@@ -1,4 +1,6 @@
 using System.Reflection;
+using System.Collections;
+using Kaevo.Plugin.KaevoForJellyfin.Api;
 using Kaevo.Plugin.KaevoForJellyfin.Services;
 using Xunit;
 
@@ -27,8 +29,6 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("button.disabled = paired", page, StringComparison.Ordinal);
         Assert.Contains("KaevoConfig.pairingV3Connected", page, StringComparison.Ordinal);
         Assert.Contains("KaevoRepairPairing", page, StringComparison.Ordinal);
-        Assert.Contains("KaevoRepairHint", page, StringComparison.Ordinal);
-        Assert.Contains("Use this only if Kaevo asks this server to reconnect.", page, StringComparison.Ordinal);
         Assert.Contains("Create a new one-time signed repair QR", page, StringComparison.Ordinal);
         Assert.Contains("Before uninstalling:", page, StringComparison.Ordinal);
         Assert.Contains("SABnzbd", page, StringComparison.Ordinal);
@@ -39,9 +39,15 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("background:#0b0d10 !important", page, StringComparison.Ordinal);
         Assert.Contains("background:rgba(8,10,13,.52)", page, StringComparison.Ordinal);
         Assert.Contains("border:1px solid rgba(231,196,139,.45)", page, StringComparison.Ordinal);
-        Assert.Contains("#KaevoRepairPairing:hover", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoRepairPairing", page, StringComparison.Ordinal);
         Assert.Contains("background:rgba(8,10,13,.74) !important", page, StringComparison.Ordinal);
-        Assert.Contains("Scan this signed Pairing V3 QR in Kaevo.", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoRepairPairing:focus-visible", page, StringComparison.Ordinal);
+        Assert.Contains("Scan the QR or copy its one-time link for manual entry in Kaevo.", page, StringComparison.Ordinal);
+        Assert.Contains("id=\"KaevoCopyPairingLink\"", page, StringComparison.Ordinal);
+        Assert.Contains("Pairing Link Copied", page, StringComparison.Ordinal);
+        Assert.Contains("ticket.PairingUri || ticket.pairingUri", page, StringComparison.Ordinal);
+        Assert.Contains("clearPairingLink();", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("textContent = pairingUri", page, StringComparison.Ordinal);
         Assert.Contains("KaevoPairingCountdown", page, StringComparison.Ordinal);
         Assert.Contains("Here’s your one-time code", page, StringComparison.Ordinal);
         Assert.Contains("class=\"kaevo-card\"", page, StringComparison.Ordinal);
@@ -54,10 +60,67 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("Nothing extra.", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoConfigForm { width:100%; max-width:none; margin:0; }", page, StringComparison.Ordinal);
         Assert.Contains("class=\"kaevo-toggle-row\"", page, StringComparison.Ordinal);
+        Assert.Contains("display:flex !important; flex-wrap:nowrap", page, StringComparison.Ordinal);
+        Assert.Contains("position:relative !important", page, StringComparison.Ordinal);
+        Assert.Contains(".kaevo-toggle-row > .kaevo-toggle-content", page, StringComparison.Ordinal);
+        Assert.Contains("flex:1 1 auto; min-width:0", page, StringComparison.Ordinal);
+        Assert.Contains("height:auto !important; min-height:0 !important", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoConfigPage #KaevoConfigForm > .kaevo-card + .kaevo-card { margin-top:1.5rem !important; }", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoConfigPage #KaevoConfigForm > .kaevo-warning + .kaevo-card { margin-top:1.5rem !important; }", page, StringComparison.Ordinal);
+        Assert.Contains("class=\"fieldDescription kaevo-inline-help\"", page, StringComparison.Ordinal);
+        Assert.Contains("class=\"kaevo-toggle-content\"", page, StringComparison.Ordinal);
+        Assert.DoesNotContain(".kaevo-toggle-row > span {", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help", page, StringComparison.Ordinal);
+        Assert.Contains("white-space:normal !important; overflow-wrap:anywhere", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoConfigPage .kaevo-toggle-row + h3 { margin-top:1.5rem; }", page, StringComparison.Ordinal);
+        Assert.Contains("class=\"fieldDescription kaevo-toggle-description\"", page, StringComparison.Ordinal);
+        Assert.Contains("position:static !important", page, StringComparison.Ordinal);
+        Assert.Contains("Settings → Connections → Jellyfin Plugins", page, StringComparison.Ordinal);
+        Assert.Contains("enable Jellyfin Plugin Integrations and Intro Skipper", page, StringComparison.Ordinal);
         Assert.Contains("type=\"checkbox\" is=\"emby-checkbox\"", page, StringComparison.Ordinal);
         Assert.Contains("input:not([type=\"checkbox\"])", page, StringComparison.Ordinal);
+        Assert.Contains("id=\"KaevoSaveConfiguration\"", page, StringComparison.Ordinal);
+        Assert.Contains("role=\"status\" aria-live=\"polite\"", page, StringComparison.Ordinal);
+        Assert.Contains("setSaveState('saving')", page, StringComparison.Ordinal);
+        Assert.Contains("setSaveState(configurationMatchesSavedSettings() ? 'saved' : 'idle')", page, StringComparison.Ordinal);
+        Assert.Contains("setSaveState('error')", page, StringComparison.Ordinal);
+        Assert.Contains("Saving…", page, StringComparison.Ordinal);
+        Assert.Contains("Saved ✓", page, StringComparison.Ordinal);
+        Assert.Contains("Settings are saved.", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoSaveConfiguration[data-save-state=\"saved\"]", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoSaveConfiguration { width:100%; box-sizing:border-box; }", page, StringComparison.Ordinal);
+        Assert.Contains("background:#0b0d10 !important", page, StringComparison.Ordinal);
+        Assert.Contains("addEventListener('input'", page, StringComparison.Ordinal);
+        Assert.Contains("addEventListener('change'", page, StringComparison.Ordinal);
+        Assert.Contains("savedSettings: null", page, StringComparison.Ordinal);
+        Assert.Contains("configurationMatchesSavedSettings", page, StringComparison.Ordinal);
+        Assert.Contains("refreshConfigurationSaveState", page, StringComparison.Ordinal);
+        Assert.Contains("KaevoConfig.savedSettings = settingsToSave", page, StringComparison.Ordinal);
+        Assert.Contains("button.disabled = true", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("saveResetTimer", page, StringComparison.Ordinal);
+        Assert.Contains("providerSavedSettings: {}", page, StringComparison.Ordinal);
+        Assert.Contains("class=\"raised emby-button kaevo-provider-save\"", page, StringComparison.Ordinal);
+        Assert.Contains("providerMatchesSavedSettings", page, StringComparison.Ordinal);
+        Assert.Contains("refreshProviderSaveStateFromEvent", page, StringComparison.Ordinal);
+        Assert.Contains("setProviderSaveState(provider, 'saving')", page, StringComparison.Ordinal);
+        Assert.Contains("setProviderSaveState(provider, 'error')", page, StringComparison.Ordinal);
+        Assert.Contains(".kaevo-provider-save[data-save-state=\"saved\"]", page, StringComparison.Ordinal);
 
         Assert.Contains(assembly.GetManifestResourceNames(), name => name.EndsWith("Branding.Kaevo_LogoMark_Transparent.png", StringComparison.Ordinal));
         Assert.Contains(assembly.GetManifestResourceNames(), name => name.EndsWith("Branding.Kaevo_Wordmark_Transparent.png", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("lidarr")]
+    [InlineData("readarr")]
+    [InlineData("prowlarr")]
+    [InlineData("bazarr")]
+    [InlineData("tdarr")]
+    public void RemovedProvidersAreNotAdvertisedByTheConfigurationApi(string provider)
+    {
+        var field = typeof(KaevoController).GetField("SupportedProviders", BindingFlags.NonPublic | BindingFlags.Static);
+        var providers = Assert.IsAssignableFrom<IDictionary>(field?.GetValue(null));
+
+        Assert.False(providers.Contains(provider));
     }
 }

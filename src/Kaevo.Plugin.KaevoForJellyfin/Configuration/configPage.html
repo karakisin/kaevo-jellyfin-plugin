@@ -27,6 +27,8 @@
             border-radius: 22px; background: linear-gradient(145deg, rgba(32,36,43,.96), rgba(21,24,29,.98));
             box-shadow: 0 18px 42px rgba(0,0,0,.2);
         }
+        #KaevoConfigPage #KaevoConfigForm > .kaevo-card + .kaevo-card { margin-top: 1.5rem !important; }
+        #KaevoConfigPage #KaevoConfigForm > .kaevo-warning + .kaevo-card { margin-top: 1.5rem !important; }
         #KaevoConfigPage .kaevo-card h3 { margin: 0 0 .55rem; color: var(--kaevo-text); font-size: 1.25rem; }
         #KaevoConfigPage .kaevo-card-intro { margin: 0 0 1.15rem; color: var(--kaevo-muted); line-height: 1.5; }
         #KaevoConfigPage .fieldDescription { color: var(--kaevo-muted); }
@@ -35,6 +37,33 @@
             border: 0; border-radius: 999px; min-height: 52px; color: #17191d;
             background: linear-gradient(135deg, #f0d3a3, #d6a65f); font-weight: 750;
             box-shadow: 0 10px 24px rgba(185, 135, 63, .17);
+        }
+        #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saving"] {
+            cursor: progress; opacity: .72; box-shadow: none;
+        }
+        #KaevoConfigPage #KaevoSaveConfiguration { width: 100%; box-sizing: border-box; }
+        #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saved"] {
+            color: var(--kaevo-gold) !important; background: #0b0d10 !important;
+            border: 1px solid rgba(231,196,139,.55) !important; box-shadow: none !important;
+            cursor: not-allowed; opacity: 1;
+        }
+        #KaevoConfigPage #KaevoSaveConfigurationStatus {
+            margin: .75rem 0 0; text-align: center; color: var(--kaevo-gold); font-weight: 700;
+        }
+        #KaevoConfigPage #KaevoSaveConfigurationStatus[data-save-state="error"] { color: #ffb4ab; }
+        #KaevoConfigPage .kaevo-provider-save {
+            display: block; width: 100%; box-sizing: border-box; min-height: 52px; margin-top: 1rem;
+            border: 0 !important; border-radius: 999px; color: #17191d !important;
+            background: linear-gradient(135deg, #f0d3a3, #d6a65f) !important;
+            font-weight: 750; box-shadow: 0 10px 24px rgba(185,135,63,.17) !important;
+        }
+        #KaevoConfigPage .kaevo-provider-save[data-save-state="saving"] {
+            cursor: progress; opacity: .72; box-shadow: none !important;
+        }
+        #KaevoConfigPage .kaevo-provider-save[data-save-state="saved"] {
+            color: var(--kaevo-gold) !important; background: #0b0d10 !important;
+            border: 1px solid rgba(231,196,139,.55) !important; box-shadow: none !important;
+            cursor: not-allowed; opacity: 1;
         }
         #KaevoConfigPage #KaevoCreatePairing:disabled {
             color: var(--kaevo-gold); background: rgba(8,10,13,.52);
@@ -47,18 +76,13 @@
             cursor: not-allowed; opacity: 1;
         }
         #KaevoConfigPage #KaevoRepairPairing {
-            display: block; width: 100%; margin-top: .8rem; min-height: 48px;
-            border: 1px solid rgba(231,196,139,.55) !important; border-radius: 999px;
+            display: block; width: 100%; margin-top: .8rem; min-height: 52px;
+            border: 1px solid rgba(231,196,139,.62) !important; border-radius: 999px;
             color: var(--kaevo-gold) !important; background: rgba(8,10,13,.74) !important;
             font-weight: 750; box-shadow: none !important; cursor: pointer;
         }
-        #KaevoConfigPage #KaevoRepairPairing:hover {
-            border-color: var(--kaevo-gold) !important; background: rgba(185,135,63,.14) !important;
-        }
-        #KaevoConfigPage #KaevoRepairPairing:focus-visible {
-            outline: 3px solid rgba(231,196,139,.52); outline-offset: 3px;
-        }
-        #KaevoConfigPage .kaevo-repair-hint { margin: .7rem 0 0; color: var(--kaevo-muted); line-height: 1.45; }
+        #KaevoConfigPage #KaevoRepairPairing:hover { background: rgba(185,135,63,.16) !important; }
+        #KaevoConfigPage #KaevoRepairPairing:focus-visible { outline: 3px solid rgba(231,196,139,.55); outline-offset: 3px; }
         #KaevoConfigPage .kaevo-warning {
             margin-top: 1.2rem; padding: 1rem 1.1rem; border: 1px solid rgba(231,196,139,.36);
             border-radius: 16px; background: rgba(185,135,63,.10); color: var(--kaevo-muted); line-height: 1.5;
@@ -77,6 +101,11 @@
             display: block; color: var(--kaevo-gold); font-size: clamp(1.65rem, 5vw, 2.35rem);
             letter-spacing: .16em; font-variant-numeric: tabular-nums;
         }
+        #KaevoConfigPage #KaevoCopyPairingLink {
+            display: block; width: 100%; margin-top: 1rem; min-height: 48px;
+            border: 1px solid rgba(231,196,139,.62); border-radius: 999px;
+            color: var(--kaevo-gold); background: rgba(8,10,13,.74); font-weight: 750;
+        }
         #KaevoConfigPage .kaevo-countdown { margin: .65rem 0 0; color: var(--kaevo-muted); }
         #KaevoConfigPage #KaevoPairingCountdown { color: var(--kaevo-text); font-variant-numeric: tabular-nums; }
         #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingQr,
@@ -86,6 +115,31 @@
         #KaevoConfigPage .kaevo-provider-card {
             padding: 1rem; margin: 1rem 0; border: 1px solid rgba(255,255,255,.1);
             border-radius: 16px; background: rgba(9,11,14,.35);
+        }
+        #KaevoConfigPage .kaevo-toggle-row {
+            display: flex !important; flex-wrap: nowrap; gap: .65rem;
+            align-items: flex-start !important; position: relative !important;
+            height: auto !important; min-height: 0 !important; margin: 1rem 0 1.25rem;
+            color: var(--kaevo-text); line-height: 1.35;
+        }
+        #KaevoConfigPage .kaevo-toggle-row input[type="checkbox"] {
+            width: auto; flex: 0 0 auto; box-sizing: initial;
+        }
+        #KaevoConfigPage .kaevo-toggle-row > .kaevo-toggle-content { display: block !important; flex: 1 1 auto; min-width: 0; }
+        #KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help {
+            position: static !important; display: block !important;
+            width: auto !important; max-width: none !important;
+            height: auto !important; min-height: 0 !important;
+            margin: .2rem 0 0 !important; line-height: 1.4 !important;
+            white-space: normal !important; overflow-wrap: anywhere;
+        }
+        #KaevoConfigPage .kaevo-toggle-row + h3 { margin-top: 1.5rem; }
+        #KaevoConfigPage .kaevo-toggle-description {
+            position: static !important; display: block; margin: -.55rem 0 1.5rem 3.1rem;
+            max-width: calc(100% - 3.1rem); line-height: 1.45;
+        }
+        #KaevoConfigPage .kaevo-toggle-description .kaevo-app-followup {
+            display: block; margin-top: .35rem;
         }
         @media (max-width: 600px) {
             #KaevoConfigPage .kaevo-card { padding: 1rem; border-radius: 18px; }
@@ -119,6 +173,8 @@
                 border-radius:22px; background:linear-gradient(145deg,rgba(32,36,43,.96),rgba(21,24,29,.98));
                 box-shadow:0 18px 42px rgba(0,0,0,.2); box-sizing:border-box; width:100%;
             }
+            #KaevoConfigPage #KaevoConfigForm > .kaevo-card + .kaevo-card { margin-top:1.5rem !important; }
+            #KaevoConfigPage #KaevoConfigForm > .kaevo-warning + .kaevo-card { margin-top:1.5rem !important; }
             #KaevoConfigPage .kaevo-card h3 { margin:0 0 .55rem; color:var(--kaevo-text); font-size:1.25rem; }
             #KaevoConfigPage .kaevo-card-intro, #KaevoConfigPage .fieldDescription { color:var(--kaevo-muted); }
             #KaevoConfigPage .kaevo-card-intro { margin:0 0 1.15rem; line-height:1.5; }
@@ -134,6 +190,33 @@
                 background:linear-gradient(135deg,#f0d3a3,#d6a65f); font-weight:750;
                 box-shadow:0 10px 24px rgba(185,135,63,.17);
             }
+            #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saving"] {
+                cursor:progress; opacity:.72; box-shadow:none;
+            }
+            #KaevoConfigPage #KaevoSaveConfiguration { width:100%; box-sizing:border-box; }
+            #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saved"] {
+                color:var(--kaevo-gold) !important; background:#0b0d10 !important;
+                border:1px solid rgba(231,196,139,.55) !important; box-shadow:none !important;
+                cursor:not-allowed; opacity:1;
+            }
+            #KaevoConfigPage #KaevoSaveConfigurationStatus {
+                margin:.75rem 0 0; text-align:center; color:var(--kaevo-gold); font-weight:700;
+            }
+            #KaevoConfigPage #KaevoSaveConfigurationStatus[data-save-state="error"] { color:#ffb4ab; }
+            #KaevoConfigPage .kaevo-provider-save {
+                display:block; width:100%; box-sizing:border-box; min-height:52px; margin-top:1rem;
+                border:0 !important; border-radius:999px; color:#17191d !important;
+                background:linear-gradient(135deg,#f0d3a3,#d6a65f) !important;
+                font-weight:750; box-shadow:0 10px 24px rgba(185,135,63,.17) !important;
+            }
+            #KaevoConfigPage .kaevo-provider-save[data-save-state="saving"] {
+                cursor:progress; opacity:.72; box-shadow:none !important;
+            }
+            #KaevoConfigPage .kaevo-provider-save[data-save-state="saved"] {
+                color:var(--kaevo-gold) !important; background:#0b0d10 !important;
+                border:1px solid rgba(231,196,139,.55) !important; box-shadow:none !important;
+                cursor:not-allowed; opacity:1;
+            }
             #KaevoConfigPage #KaevoCreatePairing:disabled {
                 color:var(--kaevo-gold); background:rgba(8,10,13,.52);
                 border:1px solid rgba(231,196,139,.45); box-shadow:none;
@@ -145,16 +228,13 @@
                 cursor:not-allowed; opacity:1;
             }
             #KaevoConfigPage #KaevoRepairPairing {
-                display:block; width:100%; margin-top:.8rem; min-height:48px;
-                border:1px solid rgba(231,196,139,.55) !important; border-radius:999px;
-                color:var(--kaevo-gold) !important; background:rgba(8,10,13,.74) !important;
-                font-weight:750; box-shadow:none !important; cursor:pointer;
+            display:block; width:100%; margin-top:.8rem; min-height:52px;
+            border:1px solid rgba(231,196,139,.62) !important; border-radius:999px;
+            color:var(--kaevo-gold) !important; background:rgba(8,10,13,.74) !important;
+            font-weight:750; box-shadow:none !important; cursor:pointer;
             }
-            #KaevoConfigPage #KaevoRepairPairing:hover {
-                border-color:var(--kaevo-gold) !important; background:rgba(185,135,63,.14) !important;
-            }
-            #KaevoConfigPage #KaevoRepairPairing:focus-visible { outline:3px solid rgba(231,196,139,.52); outline-offset:3px; }
-            #KaevoConfigPage .kaevo-repair-hint { margin:.7rem 0 0; color:var(--kaevo-muted); line-height:1.45; }
+            #KaevoConfigPage #KaevoRepairPairing:hover { background:rgba(185,135,63,.16) !important; }
+            #KaevoConfigPage #KaevoRepairPairing:focus-visible { outline:3px solid rgba(231,196,139,.55); outline-offset:3px; }
             #KaevoConfigPage .kaevo-warning {
                 margin-top:1.2rem; padding:1rem 1.1rem; border:1px solid rgba(231,196,139,.36);
                 border-radius:16px; background:rgba(185,135,63,.10); color:var(--kaevo-muted); line-height:1.5;
@@ -173,6 +253,12 @@
                 display:block; color:var(--kaevo-gold); font-size:clamp(1.65rem,5vw,2.35rem);
                 letter-spacing:.16em; font-variant-numeric:tabular-nums; text-align:center;
             }
+            #KaevoConfigPage #KaevoCopyPairingLink {
+                display:block; width:100%; margin-top:1rem; min-height:48px;
+                border:1px solid rgba(231,196,139,.62) !important; border-radius:999px;
+                color:var(--kaevo-gold) !important; background:rgba(8,10,13,.74) !important;
+                font-weight:750; box-shadow:none !important;
+            }
             #KaevoConfigPage .kaevo-countdown { margin:.65rem 0 0; color:var(--kaevo-muted); text-align:center; }
             #KaevoConfigPage #KaevoPairingCountdown { color:var(--kaevo-text); font-variant-numeric:tabular-nums; }
             #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingQr,
@@ -186,13 +272,30 @@
             #KaevoConfigPage .kaevo-provider-card .inputContainer,
             #KaevoConfigPage .kaevo-provider-card input:not([type="checkbox"]) { width:100%; box-sizing:border-box; }
             #KaevoConfigPage .kaevo-toggle-row {
-                display:flex; gap:.65em; align-items:flex-start; margin:1em 0;
+                display:flex !important; flex-wrap:nowrap; gap:.65rem;
+                align-items:flex-start !important; position:relative !important;
+                height:auto !important; min-height:0 !important; margin:1rem 0 1.25rem;
                 color:var(--kaevo-text); line-height:1.35;
             }
             #KaevoConfigPage .kaevo-toggle-row input[type="checkbox"] {
                 width:auto; flex:0 0 auto; box-sizing:initial;
             }
-            #KaevoConfigPage .kaevo-toggle-row > span { display:block; }
+            #KaevoConfigPage .kaevo-toggle-row > .kaevo-toggle-content { display:block !important; flex:1 1 auto; min-width:0; }
+            #KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help {
+                position:static !important; display:block !important;
+                width:auto !important; max-width:none !important;
+                height:auto !important; min-height:0 !important;
+                margin:.2rem 0 0 !important; line-height:1.4 !important;
+                white-space:normal !important; overflow-wrap:anywhere;
+            }
+            #KaevoConfigPage .kaevo-toggle-row + h3 { margin-top:1.5rem; }
+            #KaevoConfigPage .kaevo-toggle-description {
+                position:static !important; display:block; margin:-.55rem 0 1.5rem 3.1rem;
+                max-width:calc(100% - 3.1rem); line-height:1.45;
+            }
+            #KaevoConfigPage .kaevo-toggle-description .kaevo-app-followup {
+                display:block; margin-top:.35rem;
+            }
             @media (max-width:600px) {
                 #KaevoConfigPage .kaevo-card { padding:1rem; border-radius:18px; }
                 #KaevoConfigPage .kaevo-hero { padding-top:.75rem; }
@@ -224,11 +327,13 @@
                     <button id="KaevoRepairPairing" is="emby-button" type="button" class="emby-button" hidden>
                         <span>Repair Kaevo Connection</span>
                     </button>
-                    <p id="KaevoRepairHint" class="kaevo-repair-hint" hidden>Use this only if Kaevo asks this server to reconnect. Your current connection stays active until the repair is completed.</p>
                     <section id="KaevoPairingTicket" hidden aria-live="polite">
                         <img id="KaevoPairingQr" alt="Kaevo one-time pairing QR code" width="240" height="240" />
                         <p id="KaevoPairingCodeLabel" class="kaevo-code-label">Here’s your one-time code</p>
                         <strong id="KaevoPairingCode"></strong>
+                        <button id="KaevoCopyPairingLink" is="emby-button" type="button" class="emby-button" hidden>
+                            <span>Copy Pairing Link</span>
+                        </button>
                         <p id="KaevoPairingExpiry" class="kaevo-countdown">It expires in <strong id="KaevoPairingCountdown">10:00</strong> and works once.</p>
                     </section>
                     </section>
@@ -247,14 +352,31 @@
                     <h3>Media Management</h3>
                     <label class="kaevo-toggle-row">
                         <input id="RemoteMediaDeletionEnabled" type="checkbox" is="emby-checkbox" />
-                        <span>
+                        <span class="kaevo-toggle-content">
                             Allow Kaevo to delete media
-                            <span class="fieldDescription" style="display:block">Kaevo still requires an in-app confirmation before deleting a movie or episode.</span>
+                            <span class="fieldDescription kaevo-inline-help">Kaevo still requires an in-app confirmation before deleting a movie or episode.</span>
                         </span>
                     </label>
-                    <button is="emby-button" type="submit" class="raised button-submit block emby-button">
-                        <span>Save</span>
+                    <label class="kaevo-toggle-row">
+                        <input id="TwoWayProfileDeletionEnabled" type="checkbox" is="emby-checkbox" />
+                        <span class="kaevo-toggle-content">
+                            Allow two-way profile deletion
+                            <span class="fieldDescription kaevo-inline-help">Allows an explicitly confirmed Kaevo deletion to remove the exact linked Seerr and Jellyfin users. Libraries and media files are never included.</span>
+                        </span>
+                    </label>
+                    <h3>Jellyfin Plugin Integrations</h3>
+                    <label class="kaevo-toggle-row">
+                        <input id="JellyfinPluginIntegrationsEnabled" type="checkbox" is="emby-checkbox" />
+                        <span class="kaevo-toggle-content">Enable Jellyfin Plugin Integrations</span>
+                    </label>
+                    <p class="fieldDescription kaevo-toggle-description">
+                        Allows Kaevo to use supported capabilities from installed Jellyfin plugins. Plugins are installed and configured by a Jellyfin administrator.
+                        <span class="kaevo-app-followup"><strong>Next:</strong> In Kaevo, open Settings → Connections → Jellyfin Plugins, then enable Jellyfin Plugin Integrations and Intro Skipper.</span>
+                    </p>
+                    <button id="KaevoSaveConfiguration" is="emby-button" type="submit" class="raised button-submit block emby-button" data-save-state="idle">
+                        <span id="KaevoSaveConfigurationLabel">Save</span>
                     </button>
+                    <p id="KaevoSaveConfigurationStatus" role="status" aria-live="polite" data-save-state="idle" hidden></p>
                     </section>
                 </form>
 
@@ -270,16 +392,106 @@
             var KaevoConfig = {
                 pluginUniqueId: '80c77b84-7f2d-4b52-84c7-7dfe68cd95ae',
                 providers: [],
+                providerSavedSettings: {},
                 pairingCountdownTimer: null,
+                savedSettings: null,
                 pairingV3Enabled: false,
-                pairingV3Connected: false
+                pairingV3Connected: false,
+                currentPairingUri: null
             };
+
+            function clearPairingLink() {
+                KaevoConfig.currentPairingUri = null;
+                var button = document.querySelector('#KaevoCopyPairingLink');
+                if (button) {
+                    button.hidden = true;
+                    button.disabled = true;
+                    button.querySelector('span').textContent = 'Copy Pairing Link';
+                }
+            }
+
+            function copyPairingLink() {
+                var pairingUri = KaevoConfig.currentPairingUri;
+                if (!pairingUri) return Promise.reject(new Error('Pairing link unavailable.'));
+                if (navigator.clipboard && window.isSecureContext) {
+                    return navigator.clipboard.writeText(pairingUri);
+                }
+                var field = document.createElement('textarea');
+                field.value = pairingUri;
+                field.setAttribute('readonly', '');
+                field.style.position = 'fixed';
+                field.style.opacity = '0';
+                document.body.appendChild(field);
+                field.select();
+                var copied = document.execCommand('copy');
+                field.remove();
+                return copied ? Promise.resolve() : Promise.reject(new Error('Copy failed.'));
+            }
 
             function stopPairingCountdown() {
                 if (KaevoConfig.pairingCountdownTimer) {
                     clearInterval(KaevoConfig.pairingCountdownTimer);
                     KaevoConfig.pairingCountdownTimer = null;
                 }
+            }
+
+            function setSaveState(state) {
+                var button = document.querySelector('#KaevoSaveConfiguration');
+                var label = document.querySelector('#KaevoSaveConfigurationLabel');
+                var status = document.querySelector('#KaevoSaveConfigurationStatus');
+                button.dataset.saveState = state;
+                status.dataset.saveState = state;
+                if (state === 'saving') {
+                    button.disabled = true;
+                    button.setAttribute('aria-disabled', 'true');
+                    label.textContent = 'Saving…';
+                    status.hidden = true;
+                    status.textContent = '';
+                    return;
+                }
+                if (state === 'saved') {
+                    button.disabled = true;
+                    button.setAttribute('aria-disabled', 'true');
+                    label.textContent = 'Saved ✓';
+                    status.textContent = 'Settings are saved.';
+                    status.hidden = false;
+                    return;
+                }
+                button.disabled = false;
+                button.setAttribute('aria-disabled', 'false');
+                if (state === 'error') {
+                    label.textContent = 'Try Again';
+                    status.textContent = 'Settings were not saved. Please try again.';
+                    status.hidden = false;
+                    return;
+                }
+                label.textContent = 'Save';
+                status.textContent = '';
+                status.hidden = true;
+            }
+
+            function readConfigurationSettings() {
+                var value = parseInt(document.querySelector('#SnapshotItemLimit').value, 10);
+                return {
+                    snapshotItemLimit: Math.max(1, Math.min(100, value || 50)),
+                    remoteMediaDeletionEnabled: document.querySelector('#RemoteMediaDeletionEnabled').checked,
+                    twoWayProfileDeletionEnabled: document.querySelector('#TwoWayProfileDeletionEnabled').checked,
+                    jellyfinPluginIntegrationsEnabled: document.querySelector('#JellyfinPluginIntegrationsEnabled').checked
+                };
+            }
+
+            function configurationMatchesSavedSettings() {
+                var saved = KaevoConfig.savedSettings;
+                if (!saved) return false;
+                var current = readConfigurationSettings();
+                return current.snapshotItemLimit === saved.snapshotItemLimit
+                    && current.remoteMediaDeletionEnabled === saved.remoteMediaDeletionEnabled
+                    && current.twoWayProfileDeletionEnabled === saved.twoWayProfileDeletionEnabled
+                    && current.jellyfinPluginIntegrationsEnabled === saved.jellyfinPluginIntegrationsEnabled;
+            }
+
+            function refreshConfigurationSaveState() {
+                setSaveState(configurationMatchesSavedSettings() ? 'saved' : 'idle');
             }
 
             function loadKaevoBranding() {
@@ -301,7 +513,6 @@
                 var paired = enabled && KaevoConfig.pairingV3Connected === true;
                 var button = document.querySelector('#KaevoCreatePairing');
                 var repairButton = document.querySelector('#KaevoRepairPairing');
-                var repairHint = document.querySelector('#KaevoRepairHint');
                 button.disabled = paired;
                 button.setAttribute('aria-disabled', paired ? 'true' : 'false');
                 button.setAttribute('data-connected', paired ? 'true' : 'false');
@@ -316,7 +527,6 @@
                         : 'Create a signed Pairing V3 QR, then confirm this Jellyfin server in Kaevo while you are at home.'
                     : 'Create a private connection, then scan the QR code or enter the one-time code in Kaevo while you are at home.';
                 repairButton.hidden = !paired;
-                repairHint.hidden = !paired;
             }
 
             function renderPairingV3Status(status) {
@@ -345,6 +555,7 @@
                     if (countdown) countdown.textContent = minutes + ':' + seconds;
                     if (remaining === 0) {
                         stopPairingCountdown();
+                        clearPairingLink();
                         ticket.dataset.expired = 'true';
                         expiry.textContent = 'This code has expired. Create a new code to continue.';
                     }
@@ -356,6 +567,62 @@
 
             function providerValue(provider, suffix) {
                 return document.querySelector('#KaevoProvider-' + provider + '-' + suffix);
+            }
+
+            function providerDisplayName(provider) {
+                var match = KaevoConfig.providers.find(function (item) { return item.Provider === provider; });
+                return match ? match.DisplayName : provider;
+            }
+
+            function readProviderSettings(provider) {
+                var keyInput = providerValue(provider, 'key');
+                var usernameInput = providerValue(provider, 'username');
+                var passwordInput = providerValue(provider, 'password');
+                return {
+                    baseUrl: providerValue(provider, 'url').value.trim(),
+                    apiKey: keyInput ? keyInput.value.trim() : '',
+                    username: usernameInput ? usernameInput.value.trim() : '',
+                    password: passwordInput ? passwordInput.value : '',
+                    enabled: providerValue(provider, 'enabled').checked
+                };
+            }
+
+            function providerMatchesSavedSettings(provider) {
+                var saved = KaevoConfig.providerSavedSettings[provider];
+                if (!saved) return false;
+                var current = readProviderSettings(provider);
+                return current.baseUrl === saved.baseUrl
+                    && current.apiKey === saved.apiKey
+                    && current.username === saved.username
+                    && current.password === saved.password
+                    && current.enabled === saved.enabled;
+            }
+
+            function setProviderSaveState(provider, state) {
+                var button = document.querySelector('[data-save-provider="' + provider + '"]');
+                if (!button) return;
+                button.dataset.saveState = state;
+                if (state === 'saving') {
+                    button.disabled = true;
+                    button.setAttribute('aria-disabled', 'true');
+                    button.querySelector('span').textContent = 'Saving…';
+                    return;
+                }
+                if (state === 'saved') {
+                    button.disabled = true;
+                    button.setAttribute('aria-disabled', 'true');
+                    button.querySelector('span').textContent = 'Saved ✓';
+                    return;
+                }
+                button.disabled = false;
+                button.setAttribute('aria-disabled', 'false');
+                button.querySelector('span').textContent = state === 'error'
+                    ? 'Try Again'
+                    : 'Save ' + providerDisplayName(provider);
+            }
+
+            function refreshProviderSaveState(provider) {
+                setProviderSaveState(provider, providerMatchesSavedSettings(provider) ? 'saved' : 'idle');
             }
 
             function escapeHtml(value) {
@@ -390,19 +657,24 @@
                             + '<input id="KaevoProvider-' + provider.Provider + '-password" type="password" is="emby-input" autocomplete="new-password" placeholder="Leave blank to keep the saved password" /></div>'
                         : '';
                     var connected = provider.Enabled && provider.Configured;
-                    return '<section class="kaevo-provider-card">'
+                    return '<section class="kaevo-provider-card" data-provider-card="' + provider.Provider + '">'
                         + '<h4 style="margin-top:0">' + provider.DisplayName + '</h4>'
                         + '<div class="fieldDescription">Status: <strong id="KaevoProvider-' + provider.Provider + '-status">'
                         + (connected ? 'Connected' : provider.Configured ? 'Off' : 'Not Connected') + '</strong></div>'
                         + '<label class="kaevo-toggle-row"><input id="KaevoProvider-' + provider.Provider + '-enabled" type="checkbox" is="emby-checkbox" '
-                        + (provider.Enabled ? 'checked' : '') + ' /><span>Use ' + provider.DisplayName + '</span></label>'
+                        + (provider.Enabled ? 'checked' : '') + ' /><span class="kaevo-toggle-content">Use ' + provider.DisplayName + '</span></label>'
                         + '<div class="inputContainer"><label class="inputLabel inputLabelUnfocused">Local address</label>'
                         + '<input id="KaevoProvider-' + provider.Provider + '-url" type="url" is="emby-input" value="' + escapeHtml(provider.BaseUrl) + '" placeholder="http://192.168.1.10:port" /></div>'
                         + keyField
                         + loginFields
-                        + '<button is="emby-button" type="button" class="raised emby-button" data-save-provider="' + provider.Provider + '"><span>Save ' + provider.DisplayName + '</span></button>'
+                        + '<button is="emby-button" type="button" class="raised emby-button kaevo-provider-save" data-save-provider="' + provider.Provider + '" data-save-state="idle"><span>Save ' + provider.DisplayName + '</span></button>'
                         + '</section>';
                 }).join('');
+                KaevoConfig.providerSavedSettings = {};
+                providers.forEach(function (provider) {
+                    KaevoConfig.providerSavedSettings[provider.Provider] = readProviderSettings(provider.Provider);
+                    refreshProviderSaveState(provider.Provider);
+                });
             }
 
             function loadProviders() {
@@ -415,6 +687,10 @@
                 ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
                     document.querySelector('#SnapshotItemLimit').value = config.SnapshotItemLimit || 50;
                     document.querySelector('#RemoteMediaDeletionEnabled').checked = config.RemoteMediaDeletionEnabled === true;
+                    document.querySelector('#TwoWayProfileDeletionEnabled').checked = config.TwoWayProfileDeletionEnabled === true;
+                    document.querySelector('#JellyfinPluginIntegrationsEnabled').checked = config.JellyfinPluginIntegrationsEnabled === true;
+                    KaevoConfig.savedSettings = readConfigurationSettings();
+                    refreshConfigurationSaveState();
                     KaevoConfig.pairingV3Enabled = pairingV3Enabled(config);
                     renderPairingMode();
                     return Promise.all([
@@ -445,30 +721,38 @@
                 });
             });
 
+            function refreshProviderSaveStateFromEvent(event) {
+                var card = event.target.closest('[data-provider-card]');
+                if (card) refreshProviderSaveState(card.getAttribute('data-provider-card'));
+            }
+
+            document.querySelector('#KaevoProviderList').addEventListener('input', refreshProviderSaveStateFromEvent);
+            document.querySelector('#KaevoProviderList').addEventListener('change', refreshProviderSaveStateFromEvent);
             document.querySelector('#KaevoProviderList').addEventListener('click', function (event) {
                 var button = event.target.closest('[data-save-provider]');
                 if (!button) return;
+                if (button.disabled) return;
                 var provider = button.getAttribute('data-save-provider');
-                var keyInput = providerValue(provider, 'key');
-                var usernameInput = providerValue(provider, 'username');
-                var passwordInput = providerValue(provider, 'password');
+                var settingsToSave = readProviderSettings(provider);
+                setProviderSaveState(provider, 'saving');
                 Dashboard.showLoadingMsg();
                 ApiClient.ajax({
                     type: 'POST',
                     url: ApiClient.getUrl('kaevo/providers/' + provider),
                     contentType: 'application/json',
                     data: JSON.stringify({
-                        BaseUrl: providerValue(provider, 'url').value.trim(),
-                        ApiKey: keyInput ? keyInput.value.trim() : '',
-                        Username: usernameInput ? usernameInput.value.trim() : '',
-                        Password: passwordInput ? passwordInput.value : '',
-                        Enabled: providerValue(provider, 'enabled').checked
+                        BaseUrl: settingsToSave.baseUrl,
+                        ApiKey: settingsToSave.apiKey,
+                        Username: settingsToSave.username,
+                        Password: settingsToSave.password,
+                        Enabled: settingsToSave.enabled
                     })
                 }).then(function () {
                     return loadProviders();
                 }).then(function () {
                     Dashboard.alert('Connection saved.');
                 }).catch(function () {
+                    setProviderSaveState(provider, 'error');
                     Dashboard.alert('Kaevo could not save this connection. Check the local address and API key.');
                 }).finally(function () {
                     Dashboard.hideLoadingMsg();
@@ -477,6 +761,7 @@
 
             function createPairingTicket(isRepair) {
                 if (KaevoConfig.pairingV3Enabled && KaevoConfig.pairingV3Connected && !isRepair) return;
+                clearPairingLink();
                 Dashboard.showLoadingMsg();
                 var startRequest;
                 if (KaevoConfig.pairingV3Enabled) {
@@ -512,13 +797,18 @@
                     var isV3 = protocol === 'kaevo-pairing-v3';
                     var code = isV3 ? 'Secure Pairing V3' : (ticket.Code || ticket.code);
                     var qr = ticket.QrPngBase64 || ticket.qrPngBase64;
+                    var pairingUri = ticket.PairingUri || ticket.pairingUri;
                     var expiresAt = ticket.ExpiresAtUtc || ticket.expiresAtUtc;
-                    if (!code || !qr) throw new Error('Incomplete Kaevo pairing response.');
+                    if (!code || !qr || (isV3 && !pairingUri)) throw new Error('Incomplete Kaevo pairing response.');
                     document.querySelector('#KaevoPairingCode').textContent = code;
                     document.querySelector('#KaevoPairingCodeLabel').textContent = isV3
-                        ? 'Scan this signed Pairing V3 QR in Kaevo.'
+                        ? 'Scan the QR or copy its one-time link for manual entry in Kaevo.'
                         : 'Here’s your one-time code';
                     document.querySelector('#KaevoPairingQr').src = 'data:image/png;base64,' + qr;
+                    KaevoConfig.currentPairingUri = isV3 ? pairingUri : null;
+                    var copyButton = document.querySelector('#KaevoCopyPairingLink');
+                    copyButton.hidden = !isV3;
+                    copyButton.disabled = !isV3;
                     document.querySelector('#KaevoPairingTicket').hidden = false;
                     document.querySelector('#KaevoCreatePairing span').textContent = isV3
                         ? 'Create New Pairing V3 QR'
@@ -540,19 +830,45 @@
                 createPairingTicket(true);
             });
 
-            document.querySelector('#KaevoConfigPage').addEventListener('pagehide', stopPairingCountdown);
+            document.querySelector('#KaevoCopyPairingLink').addEventListener('click', function () {
+                var button = this;
+                copyPairingLink().then(function () {
+                    button.querySelector('span').textContent = 'Pairing Link Copied';
+                }).catch(function () {
+                    Dashboard.alert('Kaevo could not copy the pairing link. Try another browser or scan the QR code.');
+                });
+            });
+
+            document.querySelector('#KaevoConfigPage').addEventListener('pagehide', function () {
+                stopPairingCountdown();
+                clearPairingLink();
+            });
+
+            document.querySelector('#KaevoConfigForm').addEventListener('input', refreshConfigurationSaveState);
+            document.querySelector('#KaevoConfigForm').addEventListener('change', refreshConfigurationSaveState);
 
             document.querySelector('#KaevoConfigForm').addEventListener('submit', function (event) {
                 event.preventDefault();
+                if (document.querySelector('#KaevoSaveConfiguration').disabled) return false;
+                var settingsToSave = readConfigurationSettings();
+                setSaveState('saving');
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
-                    var value = parseInt(document.querySelector('#SnapshotItemLimit').value, 10);
-                    config.SnapshotItemLimit = Math.max(1, Math.min(100, value || 50));
-                    config.RemoteMediaDeletionEnabled = document.querySelector('#RemoteMediaDeletionEnabled').checked;
+                    config.SnapshotItemLimit = settingsToSave.snapshotItemLimit;
+                    config.RemoteMediaDeletionEnabled = settingsToSave.remoteMediaDeletionEnabled;
+                    config.TwoWayProfileDeletionEnabled = settingsToSave.twoWayProfileDeletionEnabled;
+                    config.JellyfinPluginIntegrationsEnabled = settingsToSave.jellyfinPluginIntegrationsEnabled;
                     config.OptimizerExecutionEnabled = false;
                     return ApiClient.updatePluginConfiguration(KaevoConfig.pluginUniqueId, config);
                 }).then(function (result) {
                     Dashboard.processPluginConfigurationUpdateResult(result);
+                    KaevoConfig.savedSettings = settingsToSave;
+                    refreshConfigurationSaveState();
+                }).catch(function () {
+                    setSaveState('error');
+                    Dashboard.alert('Kaevo could not save these settings. Please try again.');
+                }).finally(function () {
+                    Dashboard.hideLoadingMsg();
                 });
                 return false;
             });
