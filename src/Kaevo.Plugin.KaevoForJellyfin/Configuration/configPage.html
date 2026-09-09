@@ -145,7 +145,10 @@
             #KaevoConfigPage .kaevo-card { padding: 1rem; border-radius: 18px; }
             #KaevoConfigPage .kaevo-hero { padding-top: .75rem; }
         }
-    </style>
+    #KaevoConfigPage .kaevo-cloud-action { background: #101719 !important; color: #ecc88e !important; border: 1px solid #917a53; border-radius: 24px; padding: 14px 22px; margin: 6px; }
+        #KaevoConfigPage .kaevo-cloud-action:disabled { background: #303439 !important; color: #bababa !important; opacity: 1; }
+        #KaevoConfigPage .kaevo-cloud-action[hidden] { display: none !important; }
+        </style>
 </head>
 <body>
     <div id="KaevoConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
@@ -346,8 +349,10 @@
                         <h3>Cloud Connection</h3>
                         <p id="KaevoCloudControlStatus" class="kaevo-card-intro" aria-live="polite">Checking connection…</p>
                         <p class="fieldDescription">Pausing stops Kaevo cloud requests and playback. Your saved pairing, profiles and provider settings stay in place.</p>
-                        <button id="KaevoPauseCloud" type="button" is="emby-button" class="emby-button" disabled><span>Pause Cloud Connection</span></button>
-                        <button id="KaevoResumeCloud" type="button" is="emby-button" class="emby-button" hidden disabled><span>Resume Cloud Connection</span></button>
+                        <button id="KaevoPauseCloud" type="button" is="emby-button" class="emby-button kaevo-cloud-action" disabled><span>Pause Cloud Connection</span></button>
+                        <button id="KaevoResumeCloud" type="button" is="emby-button" class="emby-button kaevo-cloud-action" hidden disabled><span>Resume Cloud Connection</span></button>
+                        <button id="KaevoMigrateFirebase" type="button" is="emby-button" class="emby-button kaevo-cloud-action" hidden disabled><span>Prepare Firebase Connection</span></button>
+                        <p id="KaevoMigrationStatus" class="fieldDescription" aria-live="polite"></p>
                     </section>
 
                     <section class="kaevo-card">
@@ -758,6 +763,8 @@
             function renderCloudControl(value) {
                 var enabled = value.Enabled === true;
                 var paused = value.Enabled === false && value.Paused === true && value.RelayChannels === 0;
+                document.querySelector('#KaevoMigrateFirebase').hidden = !paused || value.FirebaseSelected === true;
+                document.querySelector('#KaevoMigrateFirebase').disabled = !paused || value.FirebaseSelected === true;
                 document.querySelector('#KaevoPauseCloud').disabled = !enabled;
                 document.querySelector('#KaevoResumeCloud').hidden = enabled;
                 document.querySelector('#KaevoResumeCloud').disabled = !paused;
@@ -805,6 +812,31 @@
                 ApiClient.ajax({ type: 'POST', url: ApiClient.getUrl(resume ? 'kaevo/v3/pairing/reconnect' : 'kaevo/cloud/pause') })
                     .then(poll, poll);
             }
+            function migrateFirebase() {
+                var button = document.querySelector('#KaevoMigrateFirebase');
+                if (button.disabled) return;
+                stopCloudControlMonitor();
+                var generation = cloudControlGeneration;
+                button.disabled = true;
+                document.querySelector('#KaevoResumeCloud').disabled = true;
+                document.querySelector('#KaevoMigrationStatus').textContent = 'Verifying the approved Firebase transfer. The connection stays paused…';
+                function reconcile() {
+                    return ApiClient.getJSON(ApiClient.getUrl('kaevo/cloud/connection')).then(function (value) {
+                        if (generation !== cloudControlGeneration) return;
+                        renderCloudControl(value);
+                        document.querySelector('#KaevoMigrationStatus').textContent = value.FirebaseSelected === true && value.Paused === true
+                            ? 'Firebase connection prepared. Cloud connection is still paused; playback has not been verified.'
+                            : 'The Firebase transfer was not confirmed. Keep the connection paused and refresh this page.';
+                    }).catch(function () {
+                        if (generation === cloudControlGeneration)
+                            document.querySelector('#KaevoMigrationStatus').textContent = 'The transfer status could not be read. Keep the connection paused and refresh this page.';
+                    });
+                }
+                // Reconcile a lost response without sending another migration.
+                ApiClient.ajax({ type: 'POST', url: ApiClient.getUrl('kaevo/cloud/migrate-firebase'),
+                    headers: { 'X-Kaevo-Admin-Action': 'lifecycle' } }).then(reconcile, reconcile);
+            }
+            document.querySelector('#KaevoMigrateFirebase').addEventListener('click', migrateFirebase);
             document.querySelector('#KaevoPauseCloud').addEventListener('click', function () {
                 if (!this.disabled) changeCloudControl(false);
             });

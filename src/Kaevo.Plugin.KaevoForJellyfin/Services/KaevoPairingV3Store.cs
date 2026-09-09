@@ -67,6 +67,7 @@ internal sealed class KaevoPairingV3State
     public Dictionary<string, KaevoPairingV3Ticket> Tickets { get; set; } = new(StringComparer.Ordinal);
     public Dictionary<string, KaevoPairingV3Challenge> Challenges { get; set; } = new(StringComparer.Ordinal);
     public KaevoPairingV3Connector? Connector { get; set; }
+    public KaevoFirebaseMigrationJournal? FirebaseMigration { get; set; }
 }
 
 /// <summary>V3-only durable state. It never stores ticket secrets, Cloud authorizations, or owner credentials.</summary>

@@ -155,7 +155,8 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         return Ok(new { Enabled = configuration.CloudConnectorEnabled,
             Paused = !configuration.CloudConnectorEnabled && _cloudState.ConnectorPauseConfirmed
                 && _cloudState.Snapshot().Status == "disabled" && relay.ConnectedChannels == 0,
-            State = _cloudState.Snapshot().Status, RelayChannels = relay.ConnectedChannels });
+            State = _cloudState.Snapshot().Status, RelayChannels = relay.ConnectedChannels,
+            FirebaseSelected = KaevoFirebaseRuntime.IsSelected(configuration) });
     }
 
     [Authorize(Policy = "RequiresElevation")]
@@ -169,6 +170,36 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         _cloudState.SignalConfigurationChanged();
         // Saving the setting is not proof that the last request has stopped.
         return Accepted(new { State = "pausing" });
+    }
+
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("cloud/migrate-firebase")]
+    public async Task<IActionResult> MigrateCloudToFirebase(
+        [FromHeader(Name = "X-Kaevo-Admin-Action")] string adminAction, CancellationToken cancellationToken)
+    {
+        if (!ValidAdminAction(adminAction)) return BadRequest(new { State = "invalid_admin_action" });
+        var plugin = KaevoPlugin.Instance;
+        if (plugin is null) return StatusCode(503);
+        bool Paused() => !plugin.Configuration.CloudConnectorEnabled && _cloudState.ConnectorPauseConfirmed
+            && _cloudState.Snapshot().Status == "disabled" && _cloudState.RelaySnapshot().ConnectedChannels == 0;
+        bool UserExists(string id)
+        {
+            if (!Guid.TryParseExact(id, "N", out var expected)) return false;
+            // Preserve compatibility with Jellyfin 10.11's moved User type.
+            var users = _userManager.GetType().GetProperty("Users")?.GetValue(_userManager) as IEnumerable;
+            return users?.Cast<object>().Count(u => u.GetType().GetProperty("Id")?.GetValue(u) is Guid actual && actual == expected) == 1;
+        }
+        try
+        {
+            await _pairingV3.MigrateFirebaseAsync(plugin.Configuration, Paused, plugin.SaveConfiguration, UserExists, cancellationToken).ConfigureAwait(false);
+            _cloudState.SignalConfigurationChanged();
+            return Ok(new { State = "firebase_connection_prepared", Paused = true, PlaybackVerified = false });
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // No secrets or cloud response bodies enter the dashboard/logs.
+            return Conflict(new { State = "firebase_migration_not_confirmed", Paused = !plugin.Configuration.CloudConnectorEnabled });
+        }
     }
 
     [Authorize(Policy = "RequiresElevation")]

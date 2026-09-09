@@ -102,7 +102,7 @@ internal sealed class KaevoPairingV3CloudClient : IKaevoPairingV3CloudClient
     }
 }
 
-public sealed class KaevoPairingV3Service
+public sealed partial class KaevoPairingV3Service
 {
     private const int TicketLifetimeSeconds = 120;
     private const int ChallengeLifetimeSeconds = 30;

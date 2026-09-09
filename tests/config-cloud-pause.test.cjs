@@ -25,3 +25,14 @@ test('leaving the page invalidates late confirmation',async()=>{
 test('pause status read failure does not erase successful pairing status',async()=>{
  const f=fixture();f.node('#CloudConnectorStatus').textContent='Kaevo App Connected';const p=f.c.loadCloudControl();f.requests.shift().reject(Error('offline'));await p;assert.equal(f.node('#CloudConnectorStatus').textContent,'Kaevo App Connected');assert.match(f.node('#KaevoCloudControlStatus').textContent,/could not be read/);
 });
+test('migration is offered only after confirmed pause and before Firebase selection',()=>{
+ const f=fixture();f.c.renderCloudControl({Enabled:true,Paused:false,RelayChannels:0});assert.equal(f.node('#KaevoMigrateFirebase').hidden,true);
+ f.c.renderCloudControl({Enabled:false,Paused:true,RelayChannels:0,FirebaseSelected:false});assert.equal(f.node('#KaevoMigrateFirebase').disabled,false);
+ f.c.renderCloudControl({Enabled:false,Paused:true,RelayChannels:0,FirebaseSelected:true});assert.equal(f.node('#KaevoMigrateFirebase').hidden,true);
+});
+test('lost migration response reads status without retry or claiming playback',async()=>{
+ const f=fixture();f.c.renderCloudControl({Enabled:false,Paused:true,RelayChannels:0});f.c.migrateFirebase();
+ assert.equal(f.posts.length,1);assert.equal(f.posts[0].p.headers['X-Kaevo-Admin-Action'],'lifecycle');assert.equal(f.node('#KaevoResumeCloud').disabled,true);
+ f.posts[0].reject(Error('lost'));await f.settle();f.requests.shift().resolve({Enabled:false,Paused:true,RelayChannels:0,FirebaseSelected:true});await f.settle();
+ assert.equal(f.posts.length,1);assert.match(f.node('#KaevoMigrationStatus').textContent,/playback has not been verified/);
+});
