@@ -343,6 +343,14 @@
                     </aside>
 
                     <section class="kaevo-card">
+                        <h3>Cloud Connection</h3>
+                        <p id="KaevoCloudControlStatus" class="kaevo-card-intro" aria-live="polite">Checking connection…</p>
+                        <p class="fieldDescription">Pausing stops Kaevo cloud requests and playback. Your saved pairing, profiles and provider settings stay in place.</p>
+                        <button id="KaevoPauseCloud" type="button" is="emby-button" class="emby-button" disabled><span>Pause Cloud Connection</span></button>
+                        <button id="KaevoResumeCloud" type="button" is="emby-button" class="emby-button" hidden disabled><span>Resume Cloud Connection</span></button>
+                    </section>
+
+                    <section class="kaevo-card">
                     <h3>Library Snapshot</h3>
                     <div class="inputContainer">
                         <label class="inputLabel inputLabelUnfocused" for="SnapshotItemLimit">Items per section</label>
@@ -740,6 +748,70 @@
                 return ApiClient.getJSON(ApiClient.getUrl('kaevo/providers/status')).then(renderProviders);
             }
 
+            var cloudControlGeneration = 0;
+            var cloudControlTimer = null;
+            function stopCloudControlMonitor() {
+                cloudControlGeneration++;
+                clearTimeout(cloudControlTimer);
+                cloudControlTimer = null;
+            }
+            function renderCloudControl(value) {
+                var enabled = value.Enabled === true;
+                var paused = value.Enabled === false && value.Paused === true && value.RelayChannels === 0;
+                document.querySelector('#KaevoPauseCloud').disabled = !enabled;
+                document.querySelector('#KaevoResumeCloud').hidden = enabled;
+                document.querySelector('#KaevoResumeCloud').disabled = !paused;
+                document.querySelector('#KaevoCloudControlStatus').textContent = paused
+                    ? 'Cloud connection paused. All Kaevo cloud requests have stopped. Your pairing is saved.'
+                    : enabled ? (value.State === 'online' ? 'Cloud connection is online.' : 'Cloud connection is enabled. Connecting…')
+                    : 'Waiting for the cloud connection to stop…';
+                return paused;
+            }
+            function loadCloudControl() {
+                var generation = cloudControlGeneration;
+                return ApiClient.getJSON(ApiClient.getUrl('kaevo/cloud/connection')).then(function (value) {
+                    if (generation === cloudControlGeneration) renderCloudControl(value);
+                }).catch(function () {
+                    if (generation === cloudControlGeneration)
+                        document.querySelector('#KaevoCloudControlStatus').textContent = 'Cloud connection status could not be read. Refresh this page to check.';
+                });
+            }
+            function changeCloudControl(resume) {
+                stopCloudControlMonitor();
+                var generation = cloudControlGeneration;
+                var deadline = Date.now() + 90000;
+                document.querySelector('#KaevoPauseCloud').disabled = true;
+                document.querySelector('#KaevoResumeCloud').disabled = true;
+                document.querySelector('#KaevoCloudControlStatus').textContent = resume ? 'Resuming cloud connection…' : 'Stopping cloud requests…';
+                function poll() {
+                    if (generation !== cloudControlGeneration) return;
+                    ApiClient.getJSON(ApiClient.getUrl('kaevo/cloud/connection')).then(function (value) {
+                        if (generation !== cloudControlGeneration) return;
+                        if ((!resume && value.Enabled === false && value.Paused === true && value.RelayChannels === 0)
+                            || (resume && value.Enabled === true)) {
+                            stopCloudControlMonitor();
+                            renderCloudControl(value);
+                        }
+                    }).catch(function () {}).finally(function () {
+                        if (generation !== cloudControlGeneration) return;
+                        if (Date.now() >= deadline) {
+                            stopCloudControlMonitor();
+                            document.querySelector('#KaevoCloudControlStatus').textContent = 'Connection status could not be confirmed. Refresh this page to check; do not remove your pairing.';
+                        } else cloudControlTimer = setTimeout(poll, 1000);
+                    });
+                }
+                // A lost POST reply is reconciled by reading status, never by
+                // resubmitting the mutation or declaring that the owner stopped.
+                ApiClient.ajax({ type: 'POST', url: ApiClient.getUrl(resume ? 'kaevo/v3/pairing/reconnect' : 'kaevo/cloud/pause') })
+                    .then(poll, poll);
+            }
+            document.querySelector('#KaevoPauseCloud').addEventListener('click', function () {
+                if (!this.disabled) changeCloudControl(false);
+            });
+            document.querySelector('#KaevoResumeCloud').addEventListener('click', function () {
+                if (!this.disabled) changeCloudControl(true);
+            });
+
             document.querySelector('#KaevoConfigPage').addEventListener('pageshow', function () {
                 loadKaevoBranding();
                 Dashboard.showLoadingMsg();
@@ -757,7 +829,8 @@
                         KaevoConfig.pairingV3Enabled
                             ? ApiClient.getJSON(ApiClient.getUrl('kaevo/v3/pairing/status'))
                             : Promise.resolve(null),
-                        loadProviders()
+                        loadProviders(),
+                        loadCloudControl()
                     ]);
                 }).then(function (responses) {
                     var status = responses[0];
@@ -907,6 +980,7 @@
             });
 
             document.querySelector('#KaevoConfigPage').addEventListener('pagehide', function () {
+                stopCloudControlMonitor();
                 stopPairingMonitor();
                 stopPairingCountdown();
                 clearPairingLink();

@@ -110,6 +110,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 {
                     _state.Set("disabled");
                     _state.SetRelay("disabled");
+                    _state.ConfirmConnectorPaused();
                     await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken).ConfigureAwait(false);
                     continue;
                 }
@@ -3012,7 +3013,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             configuration,
             secrets,
             HttpMethod.Get,
-            $"/Users/{Uri.EscapeDataString(jellyfinUserId)}/Items/{Uri.EscapeDataString(itemId)}?Fields=SeriesId,SeasonId&EnableImages=false",
+            $"/Users/{Uri.EscapeDataString(jellyfinUserId)}/Items/{Uri.EscapeDataString(itemId)}?Fields=SeriesId,SeasonId,Trickplay&EnableImages=false",
             null,
             null,
             cancellationToken);
@@ -3054,7 +3055,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var mediaSegmentsTask = configuration.JellyfinPluginIntegrationsEnabled && mediaSegmentsRequested
             ? ReadPlaybackMediaSegmentsAsync(configuration, secrets, itemId, cancellationToken)
             : Task.FromResult<IReadOnlyList<KaevoMediaSegmentProjection>>(Array.Empty<KaevoMediaSegmentProjection>());
+        // The authority read is already required and runs beside PlaybackInfo.
+        // Reuse its sprite catalog before making another serial local request.
         var trickplay = KaevoPlaybackTrickplayCatalog.FromItem(root, mediaSourceId)
+            ?? KaevoPlaybackTrickplayCatalog.FromItem(itemAuthority.Payload, mediaSourceId)
             ?? await ReadPlaybackTrickplayMetadataAsync(
                 configuration,
                 secrets,

@@ -146,6 +146,32 @@ public sealed class KaevoController : ControllerBase, IActionFilter
     }
 
     [Authorize(Policy = "RequiresElevation")]
+    [HttpGet("cloud/connection")]
+    public IActionResult GetCloudConnectionControl()
+    {
+        var configuration = KaevoPlugin.Instance?.Configuration;
+        if (configuration is null) return StatusCode(503);
+        var relay = _cloudState.RelaySnapshot();
+        return Ok(new { Enabled = configuration.CloudConnectorEnabled,
+            Paused = !configuration.CloudConnectorEnabled && _cloudState.ConnectorPauseConfirmed
+                && _cloudState.Snapshot().Status == "disabled" && relay.ConnectedChannels == 0,
+            State = _cloudState.Snapshot().Status, RelayChannels = relay.ConnectedChannels });
+    }
+
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("cloud/pause")]
+    public IActionResult PauseCloudConnection()
+    {
+        var plugin = KaevoPlugin.Instance;
+        if (plugin is null) return StatusCode(503);
+        plugin.Configuration.CloudConnectorEnabled = false;
+        plugin.SaveConfiguration();
+        _cloudState.SignalConfigurationChanged();
+        // Saving the setting is not proof that the last request has stopped.
+        return Accepted(new { State = "pausing" });
+    }
+
+    [Authorize(Policy = "RequiresElevation")]
     [HttpPost("local-pairing/start")]
     public ActionResult<KaevoLocalPairingStartResponse> StartLocalPairing()
     {
