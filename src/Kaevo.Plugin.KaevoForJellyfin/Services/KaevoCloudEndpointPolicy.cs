@@ -9,9 +9,11 @@ public static class KaevoCloudEndpointPolicy
 
     public static bool TryNormalize(string? value, out Uri uri)
     {
-        var environment = ResolveEnvironment(
-            KaevoPlugin.Instance?.Configuration.CloudEnvironment,
-            Environment.GetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT"));
+        var configuration = KaevoPlugin.Instance?.Configuration;
+        var environment = ResolveSavedEnvironment(
+            configuration?.CloudEnvironment,
+            Environment.GetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT"),
+            configuration?.CloudBaseUrl);
         if (Uri.TryCreate(value?.Trim().TrimEnd('/'), UriKind.Absolute, out var parsed)
             && string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
             && string.IsNullOrEmpty(parsed.UserInfo)
@@ -66,6 +68,21 @@ public static class KaevoCloudEndpointPolicy
             "security-stage" => "security-stage",
             _ => "invalid"
         };
+    }
+
+    // Older paired configurations saved the exact approved AWS URL without an
+    // environment field. Recover that saved selection only when neither source
+    // explicitly specifies an environment. A request URL cannot choose it.
+    internal static string ResolveSavedEnvironment(string? configured, string? process, string? savedEndpoint)
+    {
+        if (string.IsNullOrWhiteSpace(configured) && string.IsNullOrWhiteSpace(process))
+        {
+            var saved = savedEndpoint?.Trim().TrimEnd('/');
+            if (string.Equals(saved, DevelopmentApi, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(saved, DevelopmentCustomApi, StringComparison.OrdinalIgnoreCase))
+                return "development";
+        }
+        return ResolveEnvironment(configured, process);
     }
 
     internal static string ResolveEnvironment(string? configuredEnvironment, string? processEnvironment)

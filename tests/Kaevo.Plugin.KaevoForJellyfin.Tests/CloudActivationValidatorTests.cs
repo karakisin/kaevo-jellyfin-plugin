@@ -10,6 +10,17 @@ public sealed class CloudEnvironmentCollection;
 [Collection("Cloud environment")]
 public sealed class CloudActivationValidatorTests
 {
+    [Theory]
+    [InlineData("", "", "https://aneohx5ff6.execute-api.us-west-2.amazonaws.com/dev", "development")]
+    [InlineData(null, null, "https://api.kaevo.watch/", "development")]
+    [InlineData("production", "", "https://api.kaevo.watch", "production")]
+    [InlineData("", "production", "https://api.kaevo.watch", "production")]
+    [InlineData("development", "production", "https://api.kaevo.watch", "invalid")]
+    [InlineData("", "", "https://api.kaevo.watch.attacker.example", "production")]
+    [InlineData("", "", "https://api.kaevo.watch?environment=development", "production")]
+    public void LegacySavedEnvironmentUsesOnlyPinnedStoredEndpoint(string? configured, string? process, string? saved, string expected)
+        => Assert.Equal(expected, KaevoCloudEndpointPolicy.ResolveSavedEnvironment(configured, process, saved));
+
     private static readonly KaevoCloudActivationRequest ValidRequest = new(
         "https://o25nzxe9bk.execute-api.us-west-2.amazonaws.com/production",
         "profile_stub",
