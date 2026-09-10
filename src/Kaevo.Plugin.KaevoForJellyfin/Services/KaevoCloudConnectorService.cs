@@ -3643,7 +3643,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 // verified above, so answer only the representation metadata;
                 // the following GET still has to pass every grant check and
                 // obtain the real manifest from Jellyfin.
-                await SendTextAsync(socket, sendGate, JsonSerializer.Serialize(new
+                await SendRelayTextAsync(socket, sendGate, JsonSerializer.Serialize(new
                 {
                     type = "response_start",
                     request_id = message.RequestId,
@@ -3653,7 +3653,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                         ["content-type"] = "application/vnd.apple.mpegurl",
                         ["cache-control"] = "no-store"
                     }
-                }, JsonOptions), cancellationToken).ConfigureAwait(false);
+                }, JsonOptions), context).ConfigureAwait(false);
                 return;
             }
 
@@ -3680,13 +3680,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 safeHeaders.Remove("content-length");
             }
 
-            await SendTextAsync(socket, sendGate, JsonSerializer.Serialize(new
+            await SendRelayTextAsync(socket, sendGate, JsonSerializer.Serialize(new
             {
                 type = "response_start",
                 request_id = message.RequestId,
                 status = (int)response.StatusCode,
                 headers = safeHeaders
-            }, JsonOptions), cancellationToken).ConfigureAwait(false);
+            }, JsonOptions), context).ConfigureAwait(false);
 
             if (isPlaylist)
             {
@@ -3732,7 +3732,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 }
             }
 
-            await SendTextAsync(socket, sendGate, JsonSerializer.Serialize(new { type = "response_end", request_id = message.RequestId }, JsonOptions), cancellationToken)
+            await SendRelayTextAsync(socket, sendGate, JsonSerializer.Serialize(new { type = "response_end", request_id = message.RequestId }, JsonOptions), context)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -3742,12 +3742,12 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             try
             {
-                await SendTextAsync(socket, sendGate, JsonSerializer.Serialize(new
+                await SendRelayTextAsync(socket, sendGate, JsonSerializer.Serialize(new
                 {
                     type = "error",
                     request_id = message.RequestId,
                     category = SanitizeError(exception)
-                }, JsonOptions), cancellationToken).ConfigureAwait(false);
+                }, JsonOptions), context).ConfigureAwait(false);
             }
             catch (Exception sendException) when (sendException is OperationCanceledException or WebSocketException or ObjectDisposedException)
             {
@@ -3780,9 +3780,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         // cancels only that request if its viewer stops draining. Avoiding a
         // control-message round trip here prevents a dropped body ACK from
         // deadlocking every HLS playlist and segment.
-        await SendBinaryAsync(socket, sendGate, payload, context.Token).ConfigureAwait(false);
+        await RelayFrameSender.SendAsync(socket, sendGate, payload, WebSocketMessageType.Binary, context.Token, context.ConnectionToken).ConfigureAwait(false);
         context.RecordVerifiedBodyProgress();
     }
+
+    private static Task SendRelayTextAsync(ClientWebSocket socket, SemaphoreSlim gate, string value, RelayRequestContext context)
+        => RelayFrameSender.SendAsync(socket, gate, Encoding.UTF8.GetBytes(value), WebSocketMessageType.Text,
+            context.Token, context.ConnectionToken);
 
     private async Task<T> SendCloudAsync<T>(
         PluginConfiguration configuration,
@@ -4416,6 +4420,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         public RelayRequestContext(CancellationToken cancellationToken, Func<IRelayRequestActivity>? beginVerifiedActivity = null)
         {
             _cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            ConnectionToken = cancellationToken;
             _beginVerifiedActivity = beginVerifiedActivity;
         }
 
@@ -4425,6 +4430,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         internal void MarkProcessed() => _processed.TrySetResult();
 
         public CancellationToken Token => _cancellation.Token;
+        internal CancellationToken ConnectionToken { get; }
 
         public void AcknowledgeBody()
         {
