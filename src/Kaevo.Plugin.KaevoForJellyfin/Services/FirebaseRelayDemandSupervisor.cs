@@ -5,6 +5,8 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 // before supplying it here. An opaque Firestore hint is NOT admitted demand.
 internal sealed record FirebaseRelayDemand(string Id, DateTimeOffset IssuedAt, DateTimeOffset ExpiresAt);
 
+internal sealed class FirebaseRelayStartingException : Exception { }
+
 internal sealed class FirebaseRelayDemandWindow
 {
     internal static readonly TimeSpan IdleGrace = TimeSpan.FromSeconds(310);
@@ -194,12 +196,22 @@ internal static class FirebaseRelayDemandSupervisor
         {
             var retry = 1;
             var startupRetryUsed = false;
+            var opened = clock.GetTimestamp();
             while (true)
             {
                 token.ThrowIfCancellationRequested();
                 var began = clock.GetTimestamp();
                 try { await runChannel(index, window, token).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch (FirebaseRelayStartingException) when (clock.GetElapsedTime(opened) < TimeSpan.FromSeconds(30))
+                {
+                    // Signed demand opened this pool. A 503 ticket response
+                    // during its first 30 seconds is startup, not a reason to
+                    // wait 16/30 seconds after the instance becomes available.
+                    // The window never resets or extends demand/idle lifetime.
+                    retry = 1;
+                    Emit(evidence, "media_instance_starting");
+                }
                 catch (FirebaseRelayStartupRaceException) when (!startupRetryUsed)
                 {
                     // A verified ticket became available before the relay HTTP

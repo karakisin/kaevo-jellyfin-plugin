@@ -3469,13 +3469,22 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         CancellationToken cancellationToken,
         Func<IRelayRequestActivity>? beginVerifiedActivity = null)
     {
-        var relayTicket = await SendCloudAsync<RelayTicketResponse>(
+        RelayTicketResponse relayTicket;
+        try
+        {
+        relayTicket = await SendCloudAsync<RelayTicketResponse>(
             configuration,
             secrets,
             HttpMethod.Post,
             $"/v1/home-connectors/{Uri.EscapeDataString(configuration.ConnectorId)}/relay-ticket",
             new { },
             cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException exception) when (beginVerifiedActivity is not null
+            && exception.Message == "cloudConnectorHttp503")
+        {
+            throw new FirebaseRelayStartingException();
+        }
         using var socket = new ClientWebSocket();
         socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
         socket.Options.SetRequestHeader("Authorization", $"Bearer {relayTicket.RelayTicket}");

@@ -216,6 +216,31 @@ public sealed class FirebaseRelayDemandSupervisorTests
     }
 
     [Fact]
+    public async Task StartingTicketRetriesAreShortOnlyForOriginalThirtySecondWindow()
+    {
+        var clock = new Clock(); var demands = Channel.CreateUnbounded<FirebaseRelayDemand>();
+        var attempts = new int[3]; using var stop = new CancellationTokenSource();
+        var run = FirebaseRelayDemandSupervisor.RunAsync(demands.Reader.ReadAllAsync(), (index, _, _) =>
+        {
+            Interlocked.Increment(ref attempts[index]);
+            return Task.FromException(new FirebaseRelayStartingException());
+        }, _ => { }, stop.Token, clock, clock.Delay);
+        demands.Writer.TryWrite(Demand(clock));
+        await Until(() => attempts.All(n => n == 1) && clock.Timers == 4);
+        for (var second = 1; second <= 30; second++)
+        {
+            clock.Advance(1);
+            await Until(() => attempts.All(n => n == second + 1) && clock.Timers == 4);
+        }
+        clock.Advance(1); await Task.Yield();
+        Assert.All(attempts, n => Assert.Equal(31, n));
+        clock.Advance(1); await Until(() => attempts.All(n => n == 32) && clock.Timers == 4);
+        stop.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(0, clock.Timers);
+    }
+
+    [Fact]
     public async Task AcceptedTicketStartupRaceGetsOnlyOneShortRetryPerChannel()
     {
         var clock = new Clock(); var demands = Channel.CreateUnbounded<FirebaseRelayDemand>();
