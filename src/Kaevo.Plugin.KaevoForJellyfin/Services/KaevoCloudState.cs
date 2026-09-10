@@ -11,6 +11,18 @@ public sealed class KaevoCloudState
     private DateTimeOffset? _lastRelayConnectedUtc;
     private int _relayConnectedChannels;
     private CancellationTokenSource _configurationChanged = new();
+    private bool _connectorPauseConfirmed;
+
+    public bool ConnectorPauseConfirmed
+    {
+        get { lock (_gate) { return _connectorPauseConfirmed; } }
+    }
+
+    // Only the connector owner acknowledges this after all prior work exits.
+    public void ConfirmConnectorPaused()
+    {
+        lock (_gate) { _connectorPauseConfirmed = true; }
+    }
 
     public CancellationToken ConfigurationChangedToken()
     {
@@ -27,6 +39,7 @@ public sealed class KaevoCloudState
         {
             previous = _configurationChanged;
             _configurationChanged = new CancellationTokenSource();
+            _connectorPauseConfirmed = false;
         }
         previous.Cancel();
         previous.Dispose();

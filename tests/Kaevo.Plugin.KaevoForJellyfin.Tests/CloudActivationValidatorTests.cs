@@ -4,10 +4,25 @@ using Xunit;
 
 namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 
+[CollectionDefinition("Cloud environment", DisableParallelization = true)]
+public sealed class CloudEnvironmentCollection;
+
+[Collection("Cloud environment")]
 public sealed class CloudActivationValidatorTests
 {
+    [Theory]
+    [InlineData("", "", "https://aneohx5ff6.execute-api.us-west-2.amazonaws.com/dev", "development")]
+    [InlineData(null, null, "https://api.kaevo.watch/", "development")]
+    [InlineData("production", "", "https://api.kaevo.watch", "production")]
+    [InlineData("", "production", "https://api.kaevo.watch", "production")]
+    [InlineData("development", "production", "https://api.kaevo.watch", "invalid")]
+    [InlineData("", "", "https://api.kaevo.watch.attacker.example", "production")]
+    [InlineData("", "", "https://api.kaevo.watch?environment=development", "production")]
+    public void LegacySavedEnvironmentUsesOnlyPinnedStoredEndpoint(string? configured, string? process, string? saved, string expected)
+        => Assert.Equal(expected, KaevoCloudEndpointPolicy.ResolveSavedEnvironment(configured, process, saved));
+
     private static readonly KaevoCloudActivationRequest ValidRequest = new(
-        "https://aneohx5ff6.execute-api.us-west-2.amazonaws.com/dev",
+        "https://o25nzxe9bk.execute-api.us-west-2.amazonaws.com/production",
         "profile_stub",
         "123e4567-e89b-42d3-a456-426614174000",
         "ABCD-1234-EF56",
@@ -19,12 +34,16 @@ public sealed class CloudActivationValidatorTests
     {
         var activation = KaevoCloudActivationValidator.Validate(ValidRequest);
 
-        Assert.Equal("https://aneohx5ff6.execute-api.us-west-2.amazonaws.com/dev", activation.CloudBaseUrl);
+        Assert.Equal("https://o25nzxe9bk.execute-api.us-west-2.amazonaws.com/production", activation.CloudBaseUrl);
         Assert.Equal("ABCD-1234-EF56", activation.PairingCode);
     }
 
     [Theory]
     [InlineData("http://aneohx5ff6.execute-api.us-west-2.amazonaws.com/dev")]
+    [InlineData("https://aneohx5ff6.execute-api.us-west-2.amazonaws.com/dev")]
+    [InlineData("https://o25nzxe9bk.execute-api.us-west-2.amazonaws.com/dev")]
+    [InlineData("https://o25nzxe9bk.execute-api.us-west-2.amazonaws.com/production/extra")]
+    [InlineData("https://api.kaevo.watch")]
     [InlineData("https://127.0.0.1/dev")]
     [InlineData("https://example.com/dev")]
     [InlineData("https://kaevo.app.evil.example/dev")]
@@ -42,6 +61,61 @@ public sealed class CloudActivationValidatorTests
         Assert.True(KaevoCloudEndpointPolicy.IsApprovedHost(host, "security-stage"));
         Assert.False(KaevoCloudEndpointPolicy.IsApprovedHost(host, "production"));
         Assert.False(KaevoCloudEndpointPolicy.IsApprovedHost("attacker.execute-api.us-west-2.amazonaws.com", "security-stage"));
+    }
+
+    [Theory]
+    [InlineData("development", "https://aneohx5ff6.execute-api.us-west-2.amazonaws.com/dev")]
+    [InlineData("dev", "https://api.kaevo.watch")]
+    [InlineData("internal-qa", "https://aneohx5ff6.execute-api.us-west-2.amazonaws.com/dev")]
+    [InlineData("security-stage", "https://vsuh8a8v8i.execute-api.us-west-2.amazonaws.com/security-stage")]
+    public void NonProductionCloudActivationRequiresExplicitEnvironment(
+        string environment,
+        string cloudBaseUrl)
+    {
+        var prior = Environment.GetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT");
+        try
+        {
+            Environment.SetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT", environment);
+            var activation = KaevoCloudActivationValidator.Validate(
+                ValidRequest with { CloudBaseUrl = cloudBaseUrl });
+            Assert.Equal(cloudBaseUrl, activation.CloudBaseUrl);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT", prior);
+        }
+    }
+
+    [Fact]
+    public void UnknownCloudEnvironmentFailsClosed()
+    {
+        var prior = Environment.GetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT");
+        try
+        {
+            Environment.SetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT", "unexpected");
+            Assert.Throws<ArgumentException>(() =>
+                KaevoCloudActivationValidator.Validate(ValidRequest));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT", prior);
+        }
+    }
+
+    [Theory]
+    [InlineData("development", null, "development")]
+    [InlineData("internal-qa", "dev", "development")]
+    [InlineData("", "security-stage", "security-stage")]
+    [InlineData("development", "production", "invalid")]
+    [InlineData("unexpected", null, "invalid")]
+    public void ExplicitServerBindingAndProcessBindingMustAgree(
+        string configuredEnvironment,
+        string? processEnvironment,
+        string expected)
+    {
+        Assert.Equal(expected, KaevoCloudEndpointPolicy.ResolveEnvironment(
+            configuredEnvironment,
+            processEnvironment));
     }
 
     [Fact]

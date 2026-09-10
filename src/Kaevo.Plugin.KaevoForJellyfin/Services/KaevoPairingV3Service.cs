@@ -102,7 +102,7 @@ internal sealed class KaevoPairingV3CloudClient : IKaevoPairingV3CloudClient
     }
 }
 
-public sealed class KaevoPairingV3Service
+public sealed partial class KaevoPairingV3Service
 {
     private const int TicketLifetimeSeconds = 120;
     private const int ChallengeLifetimeSeconds = 30;
@@ -139,8 +139,10 @@ public sealed class KaevoPairingV3Service
     /// successful state neither proves Cloud reachability nor reveals a
     /// connector identifier, ticket, authorization, or user/server binding.
     /// </summary>
-    internal async Task<KaevoPairingV3StatusResponse> GetLocalStatusAsync(CancellationToken cancellationToken = default)
+    internal async Task<KaevoPairingV3StatusResponse> GetLocalStatusAsync(CancellationToken cancellationToken = default, string? monitorId = null)
     {
+        if (monitorId is not null && (monitorId.Length != 64 || monitorId.Any(c => !char.IsAsciiHexDigit(c))))
+            monitorId = null;
         if (!_enabled())
         {
             return new KaevoPairingV3StatusResponse("disabled", KaevoPairingV3Crypto.Protocol, false);
@@ -152,12 +154,26 @@ public sealed class KaevoPairingV3Service
             var paired = connector is not null
                 && connector.Status == "active"
                 && connector.ProtocolVersion == KaevoPairingV3Crypto.Protocol;
+            // Monitor only the exact admin-created ticket, never the older
+            // active connector which remains paired while a repair is pending.
+            var ticket = monitorId is { Length: 64 }
+                ? state.Tickets.Values.FirstOrDefault(value => MonitorId(value.TicketId) == monitorId)
+                : null;
+            var ticketState = ticket is null ? "unknown"
+                : ticket.State == "consumed"
+                    ? paired && connector!.LastPairingAttemptId == ticket.PairingAttemptId
+                        ? "completed" : "superseded"
+                : ticket.State == "reserved" ? "pending"
+                : ticket.ExpiresAtUtc <= DateTimeOffset.UtcNow ? "expired" : "waiting";
             return new KaevoPairingV3StatusResponse(
                 paired ? "paired" : "not_paired",
                 KaevoPairingV3Crypto.Protocol,
-                false);
+                false, monitorId, monitorId is null ? null : ticketState);
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    internal static string MonitorId(string ticketId)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ticketId))).ToLowerInvariant();
 
     internal async Task<KaevoPairingV3Start> StartAsync(string serverId, string serverName, string localEndpoint, string setupUserId, CancellationToken cancellationToken = default)
     {
@@ -260,6 +276,37 @@ public sealed class KaevoPairingV3Service
         Observe(completion.CorrelationId, completion.PairingAttemptId, "/kaevo/v3/pairing/complete", "available_to_reserved", 202, "pairing_reserved");
         var request = CreateRedemption(prepared.ticket, prepared.identity, prepared.claims, completion);
         var result = await _cloud.RedeemAsync(cloudBase, request, cancellationToken).ConfigureAwait(false);
+        if (RequiresAmbiguousResolution(result))
+        {
+            // A timeout or unreadable response does not tell us whether Cloud
+            // committed the redemption. Check the immutable attempt before
+            // issuing any retry so a lost success response cannot create a
+            // second connector or replay the original signed nonce.
+            var status = await _cloud.StatusAsync(
+                cloudBase,
+                CreateStatus(prepared.ticket, prepared.identity, completion.CorrelationId),
+                cancellationToken).ConfigureAwait(false);
+            if (status.Code != "pairing_status_pending")
+            {
+                return await ApplyCloudResultAsync(prepared.ticket.TicketId, prepared.ticket.PairingAttemptId, completion.CorrelationId, status, cancellationToken).ConfigureAwait(false);
+            }
+
+            // Cloud has authoritatively confirmed that the first redemption
+            // did not commit. Retry once with a fresh timestamp, nonce, and
+            // signature while retaining the same ticket, authorization, and
+            // pairing-attempt identity.
+            result = await _cloud.RedeemAsync(
+                cloudBase,
+                CreateRedemption(prepared.ticket, prepared.identity, prepared.claims, completion),
+                cancellationToken).ConfigureAwait(false);
+            if (RequiresAmbiguousResolution(result))
+            {
+                result = await _cloud.StatusAsync(
+                    cloudBase,
+                    CreateStatus(prepared.ticket, prepared.identity, completion.CorrelationId),
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
         return await ApplyCloudResultAsync(prepared.ticket.TicketId, prepared.ticket.PairingAttemptId, completion.CorrelationId, result, cancellationToken).ConfigureAwait(false);
     }
 
@@ -278,6 +325,17 @@ public sealed class KaevoPairingV3Service
     }
 
     internal async Task<KaevoPairingV3SignedConnectorRequest> PrepareConnectorRequestAsync(string method, string canonicalRoute, object body, CancellationToken cancellationToken = default)
+        => await PrepareConnectorRequestDigestAsync(
+            method,
+            canonicalRoute,
+            KaevoPairingV3Crypto.CanonicalJsonDigest(body),
+            cancellationToken).ConfigureAwait(false);
+
+    private async Task<KaevoPairingV3SignedConnectorRequest> PrepareConnectorRequestDigestAsync(
+        string method,
+        string canonicalRoute,
+        string digest,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(method) || string.IsNullOrWhiteSpace(canonicalRoute) || !canonicalRoute.StartsWith("/", StringComparison.Ordinal)
             || canonicalRoute.Contains('\r') || canonicalRoute.Contains('\n')) throw new KaevoPairingV3Exception("malformed_request");
@@ -291,7 +349,6 @@ public sealed class KaevoPairingV3Service
         }, cancellationToken).ConfigureAwait(false);
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture);
         var nonce = KaevoPairingV3Crypto.Base64Url(RandomNumberGenerator.GetBytes(32));
-        var digest = KaevoPairingV3Crypto.CanonicalJsonDigest(body);
         var keyId = context.identity.KeyVersion.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var transcript = KaevoPairingV3Crypto.Transcript("connector-request", ("httpMethod", method.ToUpperInvariant()), ("canonicalRoute", canonicalRoute),
             ("bodyDigest", digest), ("timestamp", timestamp), ("nonce", nonce), ("connectorId", context.connector.ConnectorId),
@@ -320,17 +377,25 @@ public sealed class KaevoPairingV3Service
         object body,
         CancellationToken cancellationToken = default)
     {
-        var proof = await PrepareConnectorRequestAsync(method.Method, canonicalRoute, body, cancellationToken).ConfigureAwait(false);
+        var serializedBody = JsonSerializer.SerializeToUtf8Bytes(body, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var exactBodyDigest = KaevoPairingV3Crypto.Base64Url(SHA256.HashData(serializedBody));
+        var proof = await PrepareConnectorRequestDigestAsync(
+            method.Method,
+            canonicalRoute,
+            exactBodyDigest,
+            cancellationToken).ConfigureAwait(false);
         var uri = new Uri(new Uri(cloudBase.ToString().TrimEnd('/') + "/"), canonicalRoute.TrimStart('/'));
         var request = new HttpRequestMessage(method, uri)
         {
-            Content = new StringContent(JsonSerializer.Serialize(body, new JsonSerializerOptions(JsonSerializerDefaults.Web)), Encoding.UTF8, "application/json")
+            Content = new ByteArrayContent(serializedBody)
         };
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Key-Id", proof.PluginKeyId);
         request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Timestamp", proof.Timestamp);
         request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Nonce", proof.Nonce);
         request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Signature", proof.Signature);
+        request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Signature-Version", "2");
         try
         {
             return await _connectorHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
@@ -379,6 +444,9 @@ public sealed class KaevoPairingV3Service
                 ReservationExpiresAtUtc = null, RedemptionState = reason, AuthorizationJti = "" };
             return 0;
         }, cancellationToken).ConfigureAwait(false);
+
+    private static bool RequiresAmbiguousResolution(KaevoPairingV3CloudResult result) =>
+        result.Code is "cloud_unavailable" or "ambiguous_enrollment";
 
     private KaevoPairingV3RedemptionRequest CreateRedemption(KaevoPairingV3Ticket ticket, KaevoPairingV3Identity identity, PairingAuthorization claims, KaevoPairingV3Completion completion)
     {

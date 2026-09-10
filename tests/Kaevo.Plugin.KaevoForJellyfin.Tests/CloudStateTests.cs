@@ -6,6 +6,19 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 public sealed class CloudStateTests
 {
     [Fact]
+    public void PauseRequiresOwnerAcknowledgementAndIsInvalidatedByConfigurationChange()
+    {
+        var state = new KaevoCloudState();
+        Assert.False(state.ConnectorPauseConfirmed);
+        state.Set("disabled");
+        state.SetRelay("disabled");
+        Assert.False(state.ConnectorPauseConfirmed);
+        state.ConfirmConnectorPaused();
+        Assert.True(state.ConnectorPauseConfirmed);
+        state.SignalConfigurationChanged();
+        Assert.False(state.ConnectorPauseConfirmed);
+    }
+    [Fact]
     public void RelayRemainsOnlineWhileAnyPooledChannelIsConnected()
     {
         var state = new KaevoCloudState();

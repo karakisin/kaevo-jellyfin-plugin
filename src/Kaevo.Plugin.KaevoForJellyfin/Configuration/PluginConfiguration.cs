@@ -4,9 +4,21 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Configuration;
 
 public sealed class PluginConfiguration : BasePluginConfiguration
 {
+    internal PluginConfiguration ForAuthoritativeProfileRead(string exactBinding)
+    {
+        var scoped = (PluginConfiguration)MemberwiseClone();
+        scoped.ProfileJellyfinBindingsJson = exactBinding;
+        return scoped;
+    }
+
     public int SnapshotItemLimit { get; set; } = 50;
 
     public bool CloudConnectorEnabled { get; set; }
+
+    // Explicit deployment binding for isolated validation servers. Empty keeps
+    // the process-level/default production binding. Only the endpoint-policy
+    // allowlist consumes this value; it is not an arbitrary host override.
+    public string CloudEnvironment { get; set; } = string.Empty;
 
     public string CloudBaseUrl { get; set; } = string.Empty;
 
@@ -34,7 +46,16 @@ public sealed class PluginConfiguration : BasePluginConfiguration
 
     public bool RemoteMediaDeletionEnabled { get; set; }
 
+    // Separate, default-off server-administrator consent for deleting the
+    // exact Jellyfin and Seerr users linked to a Kaevo profile. This never
+    // authorizes media-file deletion.
+    public bool TwoWayProfileDeletionEnabled { get; set; }
+
     public bool RemotePlaybackEnabled { get; set; }
+
+    // Explicit server-administrator consent for integrations that consume
+    // standard Jellyfin capabilities published by other installed plugins.
+    public bool JellyfinPluginIntegrationsEnabled { get; set; }
 
     public bool MediaScanEnabled { get; set; } = true;
 

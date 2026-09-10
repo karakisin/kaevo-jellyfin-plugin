@@ -85,6 +85,30 @@ public sealed class PairingV3ServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task AdminMonitorConfirmsExactCompletedTicketNotAnExistingPairing()
+    {
+        var service = Service(new FakeCloud { Result = new("pairing_redeemed", "connector-1") });
+        var start = await service.StartAsync("server-v3-01", "Jellyfin", "http://127.0.0.1:8096", "user-1");
+        var monitor = KaevoPairingV3Service.MonitorId(start.TicketId);
+        Assert.Equal("waiting", (await service.GetLocalStatusAsync(monitorId: monitor)).TicketState);
+        var token = Authorization(start, "user-1");
+        var challenge = await service.ChallengeAsync(start.TicketId, Attempt, KaevoPairingV3Crypto.HashText(token), Correlation);
+        await service.CompleteAsync(new Uri("https://cloud.example"), ValidCompletion(start, challenge, token));
+        Assert.Equal("completed", (await service.GetLocalStatusAsync(monitorId: monitor)).TicketState);
+        var repair = await service.StartAsync("server-v3-01", "Jellyfin", "http://127.0.0.1:8096", "user-1");
+        var waiting = await service.GetLocalStatusAsync(monitorId: KaevoPairingV3Service.MonitorId(repair.TicketId));
+        Assert.Equal("paired", waiting.State);
+        Assert.Equal("waiting", waiting.TicketState);
+        await Store().MutateAsync(state => {
+            state.Tickets[repair.TicketId] = state.Tickets[repair.TicketId] with { State = "reserved" };
+            return 0;
+        });
+        Assert.Equal("pending", (await service.GetLocalStatusAsync(monitorId: KaevoPairingV3Service.MonitorId(repair.TicketId))).TicketState);
+        Assert.Equal("unknown", (await service.GetLocalStatusAsync(monitorId: new string('a', 64))).TicketState);
+        Assert.DoesNotContain(start.TicketId, JsonSerializer.Serialize(waiting));
+    }
+
+    [Fact]
     public async Task LocalStatusReportsOnlyPairedStateWithoutConnectorOrBindingMaterial()
     {
         var service = Service(new FakeCloud());
@@ -260,19 +284,73 @@ public sealed class PairingV3ServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task LostResponseRecoversThroughStatusAndConsumesDurably()
+    public void ConnectorResponseCanonicalDigestPreservesProviderNumberLexemes()
+    {
+        using var document = JsonDocument.Parse("""
+            {"z":1e+30,"a":1.2300,"n":-0.0}
+            """);
+
+        Assert.Equal(
+            "2q5ACfJV126jET-pNLYSExSxcYsJoHWO9vWCQI2TJwU",
+            KaevoPairingV3Crypto.CanonicalJsonDigest(document.RootElement));
+    }
+
+    [Fact]
+    public async Task LostRedemptionResponseIsResolvedThroughStatusWithoutDuplicateRedemption()
     {
         var cloud = new CapturingCloud(new("ambiguous_enrollment", Retryable: true)) { StatusResult = new("pairing_redeemed", "connector-1", Idempotent: true) };
         var service = Service(cloud);
         var start = await service.StartAsync("server-v3-01", "Jellyfin", "https://local", "user-1");
         var token = Authorization(start, "user-1");
         var challenge = await service.ChallengeAsync(start.TicketId, Attempt, KaevoPairingV3Crypto.HashText(token), Correlation);
-        Assert.Equal("ambiguous_enrollment", (await service.CompleteAsync(new Uri("https://cloud.example"), ValidCompletion(start, challenge, token))).Code);
-        var recovered = await Service(cloud).RecoverAsync(new Uri("https://cloud.example"), start.TicketId, Correlation);
+        var recovered = await service.CompleteAsync(new Uri("https://cloud.example"), ValidCompletion(start, challenge, token));
         Assert.Equal("pairing_redeemed", recovered.Code);
         Assert.True(recovered.Idempotent);
         Assert.Equal("consumed", (await Ticket(start.TicketId)).State);
         Assert.NotNull(cloud.Status);
+        Assert.Single(cloud.Redemptions);
+    }
+
+    [Fact]
+    public async Task RedemptionThatNeverReachedCloudIsRetriedOnceAfterAuthoritativePendingStatus()
+    {
+        var cloud = new SequencedCloud(
+            [new("ambiguous_enrollment", Retryable: true), new("pairing_redeemed", "connector-1")],
+            [new("pairing_status_pending", Retryable: true)]);
+        var service = Service(cloud);
+        var start = await service.StartAsync("server-v3-01", "Jellyfin", "https://local", "user-1");
+        var token = Authorization(start, "user-1");
+        var challenge = await service.ChallengeAsync(start.TicketId, Attempt, KaevoPairingV3Crypto.HashText(token), Correlation);
+
+        var result = await service.CompleteAsync(new Uri("https://cloud.example"), ValidCompletion(start, challenge, token));
+
+        Assert.Equal("pairing_redeemed", result.Code);
+        Assert.Equal("consumed", (await Ticket(start.TicketId)).State);
+        Assert.Equal(2, cloud.Redemptions.Count);
+        Assert.Single(cloud.Statuses);
+        Assert.NotEqual(cloud.Redemptions[0].Nonce, cloud.Redemptions[1].Nonce);
+        Assert.Equal(cloud.Redemptions[0].PairingAttemptId, cloud.Redemptions[1].PairingAttemptId);
+        Assert.Equal(cloud.Redemptions[0].AuthorizationJti, cloud.Redemptions[1].AuthorizationJti);
+    }
+
+    [Fact]
+    public async Task RepeatedAmbiguousRedemptionUsesFinalStatusAndRemainsReservedWhenStillPending()
+    {
+        var cloud = new SequencedCloud(
+            [new("ambiguous_enrollment", Retryable: true), new("ambiguous_enrollment", Retryable: true)],
+            [new("pairing_status_pending", Retryable: true), new("pairing_status_pending", Retryable: true)]);
+        var service = Service(cloud);
+        var start = await service.StartAsync("server-v3-01", "Jellyfin", "https://local", "user-1");
+        var token = Authorization(start, "user-1");
+        var challenge = await service.ChallengeAsync(start.TicketId, Attempt, KaevoPairingV3Crypto.HashText(token), Correlation);
+
+        var result = await service.CompleteAsync(new Uri("https://cloud.example"), ValidCompletion(start, challenge, token));
+
+        Assert.Equal("pairing_status_pending", result.Code);
+        Assert.True(result.Retryable);
+        Assert.Equal("reserved", (await Ticket(start.TicketId)).State);
+        Assert.Equal(2, cloud.Redemptions.Count);
+        Assert.Equal(2, cloud.Statuses.Count);
     }
 
     [Fact]
@@ -301,7 +379,7 @@ public sealed class PairingV3ServiceTests : IDisposable
         var token = Authorization(start, "user-1");
         var challenge = await service.ChallengeAsync(start.TicketId, Attempt, KaevoPairingV3Crypto.HashText(token), Correlation);
         await service.CompleteAsync(new Uri("https://cloud.example"), ValidCompletion(start, challenge, token));
-        var body = new { connector_id = "connector-1", profile_id = "profile-1", provider_status = new { } };
+        var body = new { z = 1, a = "a\u2060b", connector_id = "connector-1" };
 
         using var response = await service.SendConnectorRequestAsync(
             new Uri("https://cloud.example"), HttpMethod.Post, "/v3/home-connectors/register", body);
@@ -312,11 +390,33 @@ public sealed class PairingV3ServiceTests : IDisposable
         Assert.False(string.IsNullOrWhiteSpace(capture.Headers["X-Kaevo-Plugin-Timestamp"]));
         Assert.False(string.IsNullOrWhiteSpace(capture.Headers["X-Kaevo-Plugin-Nonce"]));
         Assert.False(string.IsNullOrWhiteSpace(capture.Headers["X-Kaevo-Plugin-Signature"]));
+        Assert.Equal("2", capture.Headers["X-Kaevo-Plugin-Signature-Version"]);
+        var exactDigest = KaevoPairingV3Crypto.Base64Url(SHA256.HashData(Encoding.UTF8.GetBytes(capture.Body)));
+        Assert.NotEqual(KaevoPairingV3Crypto.CanonicalJsonDigest(body), exactDigest);
+        var exactTranscript = KaevoPairingV3Crypto.Transcript(
+            "connector-request",
+            ("httpMethod", "POST"),
+            ("canonicalRoute", capture.Path),
+            ("bodyDigest", exactDigest),
+            ("timestamp", capture.Headers["X-Kaevo-Plugin-Timestamp"]),
+            ("nonce", capture.Headers["X-Kaevo-Plugin-Nonce"]),
+            ("connectorId", "connector-1"),
+            ("pluginInstanceId", start.PluginInstanceId),
+            ("pluginKeyId", "1"),
+            ("pluginPublicKeyFingerprint", start.PluginFingerprint));
+        Assert.True(KaevoPairingV3Crypto.Verify(
+            KaevoPairingV3Crypto.Base64UrlDecode(start.PluginPublicKey),
+            exactTranscript,
+            capture.Headers["X-Kaevo-Plugin-Signature"]));
         Assert.DoesNotContain("Authorization", capture.Headers.Keys);
         Assert.DoesNotContain("DPoP", capture.Headers.Keys);
         Assert.DoesNotContain(token, capture.Body);
         Assert.Equal("/v3/remote-requests/claim", KaevoCloudConnectorService.PairingV3CloudPath("/v1/remote-requests/claim"));
         Assert.Equal("/v3/home-connectors/connector-1/heartbeat", KaevoCloudConnectorService.PairingV3CloudPath("/v1/home-connectors/connector-1/heartbeat"));
+        Assert.Equal("cloudRemoteRequestClaimHttp401", KaevoCloudConnectorService.CloudFailureCategory("/v3/remote-requests/claim", HttpStatusCode.Unauthorized));
+        Assert.Equal("cloudRemoteRequestCompleteHttp401", KaevoCloudConnectorService.CloudFailureCategory("/v3/remote-requests/request-secret/complete", HttpStatusCode.Unauthorized));
+        Assert.Equal("cloudRemoteRequestFailHttp401", KaevoCloudConnectorService.CloudFailureCategory("/v3/remote-requests/request-secret/fail", HttpStatusCode.Unauthorized));
+        Assert.Equal("cloudConnectorHttp503", KaevoCloudConnectorService.CloudFailureCategory("/v3/home-connectors/connector-secret/heartbeat", HttpStatusCode.ServiceUnavailable));
         Assert.Equal(string.Empty, KaevoCloudConnectorService.ProfileIdForCloud("legacy-profile", pairingV3Active: true));
         Assert.Equal("legacy-profile", KaevoCloudConnectorService.ProfileIdForCloud("legacy-profile", pairingV3Active: false));
     }
@@ -403,16 +503,39 @@ public sealed class PairingV3ServiceTests : IDisposable
         public TaskCompletionSource<bool> Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<KaevoPairingV3CloudResult> Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task<KaevoPairingV3CloudResult> RedeemAsync(Uri _, KaevoPairingV3RedemptionRequest __, CancellationToken ___) { Entered.TrySetResult(true); return Release.Task; }
-        public Task<KaevoPairingV3CloudResult> StatusAsync(Uri _, KaevoPairingV3StatusRequest __, CancellationToken ___) => Task.FromResult(new KaevoPairingV3CloudResult("pairing_status_pending", Retryable: true));
+        public Task<KaevoPairingV3CloudResult> StatusAsync(Uri _, KaevoPairingV3StatusRequest __, CancellationToken ___) => Task.FromResult(new KaevoPairingV3CloudResult("ambiguous_enrollment", Retryable: true));
     }
 
     private sealed class CapturingCloud(KaevoPairingV3CloudResult redemption) : IKaevoPairingV3CloudClient
     {
-        public KaevoPairingV3RedemptionRequest? Redemption { get; private set; }
+        public List<KaevoPairingV3RedemptionRequest> Redemptions { get; } = [];
+        public KaevoPairingV3RedemptionRequest? Redemption => Redemptions.LastOrDefault();
         public KaevoPairingV3StatusRequest? Status { get; private set; }
         public KaevoPairingV3CloudResult StatusResult { get; init; } = new("pairing_status_pending", Retryable: true);
-        public Task<KaevoPairingV3CloudResult> RedeemAsync(Uri _, KaevoPairingV3RedemptionRequest request, CancellationToken ___) { Redemption = request; return Task.FromResult(redemption); }
+        public Task<KaevoPairingV3CloudResult> RedeemAsync(Uri _, KaevoPairingV3RedemptionRequest request, CancellationToken ___) { Redemptions.Add(request); return Task.FromResult(redemption); }
         public Task<KaevoPairingV3CloudResult> StatusAsync(Uri _, KaevoPairingV3StatusRequest request, CancellationToken ___) { Status = request; return Task.FromResult(StatusResult); }
+    }
+
+    private sealed class SequencedCloud(
+        IEnumerable<KaevoPairingV3CloudResult> redemptions,
+        IEnumerable<KaevoPairingV3CloudResult> statuses) : IKaevoPairingV3CloudClient
+    {
+        private readonly Queue<KaevoPairingV3CloudResult> _redemptionResults = new(redemptions);
+        private readonly Queue<KaevoPairingV3CloudResult> _statusResults = new(statuses);
+        public List<KaevoPairingV3RedemptionRequest> Redemptions { get; } = [];
+        public List<KaevoPairingV3StatusRequest> Statuses { get; } = [];
+
+        public Task<KaevoPairingV3CloudResult> RedeemAsync(Uri _, KaevoPairingV3RedemptionRequest request, CancellationToken ___)
+        {
+            Redemptions.Add(request);
+            return Task.FromResult(_redemptionResults.Dequeue());
+        }
+
+        public Task<KaevoPairingV3CloudResult> StatusAsync(Uri _, KaevoPairingV3StatusRequest request, CancellationToken ___)
+        {
+            Statuses.Add(request);
+            return Task.FromResult(_statusResults.Dequeue());
+        }
     }
 
     private sealed class ConnectorCaptureHandler : HttpMessageHandler

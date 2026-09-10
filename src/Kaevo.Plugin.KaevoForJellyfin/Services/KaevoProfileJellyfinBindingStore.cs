@@ -181,6 +181,24 @@ internal static class KaevoProfileJellyfinBindingStore
         _ => "invalid_request"
     };
 
+    internal static bool TryUnbind(
+        PluginConfiguration configuration,
+        string? cloudProfileId,
+        string? jellyfinUserId)
+    {
+        if (!TryUnbind(
+                configuration.ProfileJellyfinBindingsJson,
+                cloudProfileId,
+                jellyfinUserId,
+                out var updatedBindingsJson))
+        {
+            return false;
+        }
+
+        configuration.ProfileJellyfinBindingsJson = updatedBindingsJson;
+        return true;
+    }
+
     internal static KaevoProfileJellyfinBindingOwnerLookupResult FindExactOwner(
         string? bindingsJson,
         string? jellyfinUserId,
@@ -282,11 +300,15 @@ internal static class KaevoProfileJellyfinBindingStore
             && string.Equals(alreadyBoundUserId, normalizedUserId, StringComparison.Ordinal)
             && string.Equals(actualSourceProfileId, targetProfileId, StringComparison.Ordinal))
         {
-            // Duplicate delivery after the exact CAS move preserves every
-            // unrelated binding and reports the idempotent outcome.
+            // A duplicated connector delivery arrives after the first CAS move:
+            // the only owner is now the requested target. Preserve every other
+            // binding and report the durable idempotent outcome.
             return KaevoProfileJellyfinBindingReassignmentResult.AlreadyBound;
         }
-        if (!string.Equals(actualSourceProfileId, normalizedExpectedSourceProfileId, StringComparison.Ordinal))
+        if (!string.Equals(
+                actualSourceProfileId,
+                normalizedExpectedSourceProfileId,
+                StringComparison.Ordinal))
         {
             return KaevoProfileJellyfinBindingReassignmentResult.OwnerMismatch;
         }
@@ -312,24 +334,6 @@ internal static class KaevoProfileJellyfinBindingStore
         bindings[targetProfileId!] = normalizedUserId;
         updatedBindingsJson = Serialize(bindings);
         return KaevoProfileJellyfinBindingReassignmentResult.Reassigned;
-    }
-
-    internal static bool TryUnbind(
-        PluginConfiguration configuration,
-        string? cloudProfileId,
-        string? jellyfinUserId)
-    {
-        if (!TryUnbind(
-                configuration.ProfileJellyfinBindingsJson,
-                cloudProfileId,
-                jellyfinUserId,
-                out var updatedBindingsJson))
-        {
-            return false;
-        }
-
-        configuration.ProfileJellyfinBindingsJson = updatedBindingsJson;
-        return true;
     }
 
     internal static bool TryUnbind(

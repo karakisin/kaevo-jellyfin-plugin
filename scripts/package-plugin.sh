@@ -18,7 +18,13 @@ if [[ -n "${KAEVO_RELEASE_TIMESTAMP:-}" ]]; then
     TIMESTAMP="$KAEVO_RELEASE_TIMESTAMP"
 else
     RELEASE_EPOCH="$(git -C "$PROJECT_ROOT" show -s --format=%ct HEAD)"
-    TIMESTAMP="$(date -u -r "$RELEASE_EPOCH" '+%Y-%m-%dT%H:%M:%SZ')"
+    TIMESTAMP="$(python3 - "$RELEASE_EPOCH" <<'PY'
+import datetime
+import sys
+
+print(datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
 fi
 
 test -f "$BUILD_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" || {
@@ -31,32 +37,9 @@ command -v python3 >/dev/null 2>&1 || {
     exit 1
 }
 
-rm -rf "$PLUGIN_DIR" "$ZIP_PATH"
-mkdir -p "$PLUGIN_DIR"
-
-cp "$BUILD_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/"
-cp "$BUILD_DIR/QRCoder.dll" "$PLUGIN_DIR/"
-cp "$BUILD_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/"
-
-cat > "$PLUGIN_DIR/meta.json" <<EOF
-{
-  "category": "General",
-  "changelog": "Repairs a Kaevo household connector without replacing any profile's immutable Jellyfin user, adds local-only SABnzbd and qBittorrent health access, and explains safe reconnection after plugin removal.",
-  "description": "Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
-  "guid": "80c77b84-7f2d-4b52-84c7-7dfe68cd95ae",
-  "name": "Kaevo",
-  "overview": "Secure Kaevo Cloud access for Jellyfin",
-  "owner": "Kaevo",
-  "targetAbi": "10.11.0.0",
-  "timestamp": "$TIMESTAMP",
-  "version": "$PLUGIN_VERSION.0"
-}
-EOF
-
-NORMALIZED_TIMESTAMP="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$TIMESTAMP" '+%Y%m%d%H%M.%S')"
-touch -t "$NORMALIZED_TIMESTAMP" "$PLUGIN_DIR/Kaevo.Plugin.KaevoForJellyfin.dll" "$PLUGIN_DIR/QRCoder.dll" "$PLUGIN_DIR/BouncyCastle.Cryptography.dll" "$PLUGIN_DIR/meta.json"
-
-python3 "$SCRIPT_DIR/create-deterministic-plugin-zip.py" "$PLUGIN_DIR" "$ZIP_PATH"
+# Preserve previous artifacts. Use a fresh KAEVO_PACKAGE_ROOT for each candidate.
+python3 "$SCRIPT_DIR/package-plugin-dependencies.py" "$BUILD_DIR" "$PLUGIN_DIR" "$ZIP_PATH" \
+    --version "$PLUGIN_VERSION" --timestamp "$TIMESTAMP"
 
 echo "Packaged directory: $PLUGIN_DIR"
 echo "Packaged archive:   $ZIP_PATH"
