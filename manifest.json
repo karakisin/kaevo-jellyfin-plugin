@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.40.0",
+        "changelog": "Avoid long relay-ticket retry sleeps during the first 30 seconds of an authorized Firebase playback start. Normal backoff resumes afterward; demand and idle lifetimes are unchanged. Physical speed improvement remains to be verified.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.40/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "71012d4fb16a81e70b549feaea3b7026",
+        "timestamp": "2026-09-10T03:25:00Z"
+      },
+      {
         "version": "0.3.39.0",
         "changelog": "Keep the shared relay connection alive when the player cancels a video range request. In-progress frames finish with a bounded deadline; cancelled requests stop. Physical playback and cold-start timing require verification after installation.",
         "targetAbi": "10.11.0.0",
