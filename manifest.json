@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.42.0",
+        "changelog": "Bind Firebase connector request signatures to the exact Firebase project and gateway. Retain the existing key, pairing, profiles and provider connections. Enables verified server-side migration finalization after installation; no playback performance change.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.42/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "621b1ce22aef02250f9095764b2f23dd",
+        "timestamp": "2026-09-11T08:05:35Z"
+      },
+      {
         "version": "0.3.41.0",
         "changelog": "Add optional, bounded playback diagnostics to separate connector preparation, Jellyfin response and relay delivery delays. Off by default; one preparation and up to 16 media requests within five minutes. Playback behavior is unchanged; faster startup is not claimed.",
         "targetAbi": "10.11.0.0",
