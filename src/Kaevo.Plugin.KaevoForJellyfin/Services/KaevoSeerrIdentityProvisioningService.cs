@@ -40,6 +40,24 @@ public sealed class KaevoSeerrIdentityProvisioningService
     public static bool IsSafeRequestPermissionMask(int permissions) =>
         permissions >= 0 && (permissions & ~RequestMask) == 0;
 
+    internal async Task<bool> VerifyExactRequestAccessAsync(
+        KaevoConnectorSecrets secrets, string jellyfinUserId, int seerrUserId,
+        CancellationToken cancellationToken)
+    {
+        if (seerrUserId <= 0 || !KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
+                jellyfinUserId, out var exact)) return false;
+        try
+        {
+            var response = await SendAsync(secrets, HttpMethod.Get,
+                $"/api/v1/user/{seerrUserId}", null, cancellationToken).ConfigureAwait(false);
+            var user = ParseSingleUser(response.Body);
+            return response.StatusCode == 200 && user is not null && user.Id == seerrUserId
+                && user.JellyfinUserId == exact && (user.Permissions & (RequestMask | Administrator)) != 0;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch { return false; }
+    }
+
     public async Task<KaevoSeerrJellyfinUserProvisionResponse> EnsureJellyfinUserAccessAsync(
         KaevoConnectorSecrets secrets,
         string jellyfinUserId,

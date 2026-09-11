@@ -26,7 +26,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1", "download_controls_v1",
                     "playback_tunnel_v1", "direct_play", "hls_remux", "hls_transcode",
                     "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
-                    "local_provider_configuration_v1", "connector_control_push_v2", "profile_artwork_v1"
+                    "local_provider_configuration_v1", "connector_control_push_v2", "profile_artwork_v1",
+                    "profile_media_access_v1"
                 };
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
@@ -952,6 +953,35 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     throw new InvalidOperationException("binding_capacity_reached"),
                 _ => throw new InvalidOperationException("profileJellyfinBindingReassignmentInvalid")
             };
+        }
+
+        if (operation == "jellyfin.verify_profile_media_access")
+        {
+            var exact = RequireBoundJellyfinUserId(configuration, request, "profileJellyfinBindingMissing");
+            if (RequireString(parameters, "jellyfin_user_id", "providerIdentityInvalid") != exact
+                || !parameters.TryGetValue("requests_required", out var requested)
+                || requested.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+                || parameters.Keys.Any(key => key is not ("jellyfin_user_id" or "requests_required" or "seerr_user_id")))
+                throw new InvalidOperationException("providerIdentityMismatch");
+            var seerrId = 0;
+            if (parameters.TryGetValue("seerr_user_id", out var seerr)
+                && (!requested.GetBoolean() || !seerr.TryGetInt32(out seerrId) || seerrId <= 0))
+                throw new InvalidOperationException("providerIdentityMismatch");
+            var user = await SendLocalAsync(configuration, secrets, HttpMethod.Get,
+                $"/Users/{exact}", null, null, cancellationToken).ConfigureAwait(false);
+            var playbackReady = !user.Truncated && KaevoProfileMediaAccessPolicy.PlaybackReady(user.Payload, exact);
+            var requestsState = !requested.GetBoolean() ? "not_required" : seerrId == 0 ? "not_linked"
+                : await _seerrIdentityProvisioning.VerifyExactRequestAccessAsync(
+                    secrets, exact, seerrId, cancellationToken).ConfigureAwait(false) ? "verified" : "needs_review";
+            // Recheck the local binding after provider reads, too.
+            if (RequireBoundJellyfinUserId(configuration, request, "profileJellyfinBindingMissing") != exact)
+                throw new InvalidOperationException("providerIdentityMismatch");
+            return CompleteCommand(request, operation, new
+            {
+                provider = "jellyfin", provider_user_id = exact,
+                playback_access = playbackReady ? "verified" : "needs_review",
+                requests_access = requestsState
+            });
         }
 
         if (operation == "jellyfin.recover_profile_binding")
