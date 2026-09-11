@@ -53,6 +53,9 @@ public sealed class PluginConfiguration : BasePluginConfiguration
 
     public bool RemotePlaybackEnabled { get; set; }
 
+    // Administrator opt-in. Expired/default windows collect nothing.
+    public long PlaybackDiagnosticExpiresAtUnixSeconds { get; set; }
+
     // Explicit server-administrator consent for integrations that consume
     // standard Jellyfin capabilities published by other installed plugins.
     public bool JellyfinPluginIntegrationsEnabled { get; set; }

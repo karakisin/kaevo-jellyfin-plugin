@@ -71,6 +71,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private readonly KaevoSeerrIdentityProvisioningService _seerrIdentityProvisioning;
     private volatile bool _pairingV3Active;
     private readonly HttpClient _jellyfin = new() { Timeout = TimeSpan.FromSeconds(45) };
+    private readonly PlaybackDiagnosticCapture _playbackDiagnostics = new();
+    private readonly AsyncLocal<PlaybackDiagnosticTrace?> _playbackDiagnostic = new();
+    private static long PlaybackDiagnosticExpiry(PluginConfiguration configuration)
+        => RuntimeConfiguration(configuration).PlaybackDiagnosticExpiresAtUnixSeconds;
+    private void WritePlaybackDiagnostic(string value) => _logger.LogInformation("Kaevo playback diagnostic {Diagnostic}", value);
 
     public KaevoCloudConnectorService(
         KaevoSecretStore secretStore,
@@ -472,6 +477,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         string requestId,
         CancellationToken cancellationToken)
     {
+        var diagnosticClaimStarted = _playbackDiagnostics.Timestamp;
         try
         {
             var claim = await SendCloudAsync<CloudClaimResponse>(
@@ -485,6 +491,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     connector_control_protocol = ConnectorControlProtocolVersion,
                 },
                 cancellationToken).ConfigureAwait(false);
+            if (claim.State == "claimed" && claim.Request?.Operation == "jellyfin.prepare_playback")
+                _playbackDiagnostics.RememberClaim(PlaybackDiagnosticExpiry(configuration), requestId, diagnosticClaimStarted);
             return claim.State == "claimed" ? claim.Request : null;
         }
         catch (InvalidOperationException exception) when (exception.Message is
@@ -588,6 +596,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         CancellationToken cancellationToken)
     {
         var stage = "prepare";
+        PlaybackDiagnosticTrace? diagnostic = null;
+        var previousDiagnostic = _playbackDiagnostic.Value;
         try
         {
             // Re-read the saved configuration for every command as well as
@@ -603,11 +613,16 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             // already online. Re-read the owner-only secret file for every claim
             // so health checks, searches, and mutations all use the same current
             // provider configuration without requiring a Jellyfin restart.
+            if (request.Operation == "jellyfin.prepare_playback" && request.Method == "COMMAND")
+                diagnostic = _playbackDiagnostics.BeginCommand(PlaybackDiagnosticExpiry(configuration), request.RequestId, WritePlaybackDiagnostic);
+            _playbackDiagnostic.Value = diagnostic;
             var currentSecrets = await _secretStore.ReadAsync(cancellationToken).ConfigureAwait(false) ?? secrets;
+            diagnostic?.Mark(PlaybackDiagnosticStep.SecretsReady);
             stage = "execute";
             var result = request.Method == "GET"
                 ? await ExecuteReadAsync(runtimeConfiguration, currentSecrets, request, cancellationToken).ConfigureAwait(false)
                 : await ExecuteCommandAsync(runtimeConfiguration, currentSecrets, request, cancellationToken).ConfigureAwait(false);
+            diagnostic?.Mark(PlaybackDiagnosticStep.ExecuteComplete);
             stage = "deliver";
             await SendCloudAsync<JsonElement>(
                 runtimeConfiguration,
@@ -616,9 +631,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 $"/v1/remote-requests/{Uri.EscapeDataString(request.RequestId)}/complete",
                 new { connector_id = runtimeConfiguration.ConnectorId, http_status = result.Status, response = result.Payload, truncated = result.Truncated },
                 cancellationToken).ConfigureAwait(false);
+            diagnostic?.Mark(PlaybackDiagnosticStep.CompletionSent);
         }
         catch (Exception exception)
         {
+            diagnostic?.Fail(exception);
             // Fixed categories only: never log request data, credentials,
             // provider bodies, exception messages or stack traces.
             if (request.Method == "GET" && request.Path == "/kaevo/internal/main-snapshot")
@@ -630,6 +647,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 $"/v1/remote-requests/{Uri.EscapeDataString(request.RequestId)}/fail",
                 new { connector_id = configuration.ConnectorId, message = SanitizeError(exception), details = new { } },
                 cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _playbackDiagnostic.Value = previousDiagnostic;
+            diagnostic?.Dispose();
         }
     }
 
@@ -3057,6 +3079,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             throw new InvalidOperationException("playbackIdentifiersMissing");
         }
 
+        if (_playbackDiagnostic.Value is not null)
+            _playbackDiagnostics.BindSession(PlaybackDiagnosticExpiry(configuration), _playbackDiagnostic.Value, playSessionId);
         var mode = KaevoPlaybackProfilePolicy.SelectMode(
             source, preferDirectPlay, forceTranscode, compatibilityPlayer);
         var tracks = KaevoPlaybackTrackCatalog.FromMediaSource(source);
@@ -3450,8 +3474,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             message.Content = new StringContent(JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json");
         }
 
+        var diagnostic = _playbackDiagnostic.Value;
+        var resource = PlaybackDiagnosticTrace.Resource(path);
+        diagnostic?.Mark(PlaybackDiagnosticStep.UpstreamRequest, resource);
         using var response = await _jellyfin.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        diagnostic?.Mark(PlaybackDiagnosticStep.UpstreamHeaders, resource, (int)response.StatusCode);
         var bounded = await ReadBoundedAsync(response.Content, configuration.MaximumRemoteResponseBytes, cancellationToken).ConfigureAwait(false);
+        diagnostic?.Mark(PlaybackDiagnosticStep.UpstreamBody, resource);
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException($"jellyfinHttp{(int)response.StatusCode}");
@@ -3460,6 +3489,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var payload = bounded.Data.Length == 0
             ? JsonSerializer.SerializeToElement(new { state = "ok" }, JsonOptions)
             : JsonSerializer.Deserialize<JsonElement>(bounded.Data, JsonOptions);
+        diagnostic?.Mark(PlaybackDiagnosticStep.UpstreamParsed, resource);
         return new CommandResult((int)response.StatusCode, payload, bounded.Truncated);
     }
 
@@ -3628,6 +3658,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         RelayRequestContext context)
     {
         var cancellationToken = context.Token;
+        var received = _playbackDiagnostics.Timestamp;
+        PlaybackDiagnosticTrace? diagnostic = null;
         try
         {
             var grant = KaevoPlaybackSecurity.VerifyGrant(
@@ -3641,6 +3673,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             // Only verified grant + exact resource activity can keep an admitted
             // preview pool warm. Ping/pong, malformed requests and auth failures
             // never reach this hook. It does not grant playback permission.
+            diagnostic = _playbackDiagnostics.BeginMedia(PlaybackDiagnosticExpiry(configuration), grant.PlaybackSessionId, message.RequestId, WritePlaybackDiagnostic, received);
+            diagnostic?.Mark(PlaybackDiagnosticStep.Authorized);
             using var activity = context.BeginVerifiedActivity();
             if (ShouldSynthesizeRelayManifestHead(resolved.Method, resolved.PathAndQuery))
             {
@@ -3673,7 +3707,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 local.Headers.TryAddWithoutValidation("Range", resolved.RangeHeader);
             }
 
+            diagnostic?.Mark(PlaybackDiagnosticStep.UpstreamRequest);
             using var response = await _jellyfin.SendAsync(local, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            diagnostic?.Mark(PlaybackDiagnosticStep.UpstreamHeaders, status: (int)response.StatusCode);
             var safeHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var header in response.Content.Headers.Concat(response.Headers))
             {
@@ -3694,8 +3730,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 type = "response_start",
                 request_id = message.RequestId,
                 status = (int)response.StatusCode,
-                headers = safeHeaders
+                headers = safeHeaders,
+                diagnostic_version = diagnostic is null ? 0 : 1
             }, JsonOptions), context).ConfigureAwait(false);
+            diagnostic?.Mark(PlaybackDiagnosticStep.HeadersSent);
 
             if (isPlaylist)
             {
@@ -3708,18 +3746,21 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     throw new InvalidOperationException("playlistTooLarge");
                 }
 
+                diagnostic?.Mark(PlaybackDiagnosticStep.UpstreamBody);
                 var rewritten = KaevoPlaybackPlaylistRewriter.Rewrite(
                     Encoding.UTF8.GetString(playlist.Data),
                     message.Grant!,
                     grant.ItemId,
                     grant.MediaSourceId,
                     resolved.PathAndQuery);
+                diagnostic?.Mark(PlaybackDiagnosticStep.PlaylistRewritten);
                 var prefix = Encoding.ASCII.GetBytes(message.RequestId);
                 var body = Encoding.UTF8.GetBytes(rewritten);
                 var payload = new byte[prefix.Length + body.Length];
                 prefix.CopyTo(payload, 0);
                 body.CopyTo(payload, prefix.Length);
                 await SendRelayBodyAsync(socket, sendGate, payload, context).ConfigureAwait(false);
+                diagnostic?.Mark(PlaybackDiagnosticStep.FirstBodySent);
             }
             else
             {
@@ -3733,11 +3774,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                         break;
                     }
 
+                    diagnostic?.Mark(PlaybackDiagnosticStep.FirstBodyRead);
                     var prefix = Encoding.ASCII.GetBytes(message.RequestId);
                     var payload = new byte[prefix.Length + count];
                     prefix.CopyTo(payload, 0);
                     buffer.AsSpan(0, count).CopyTo(payload.AsSpan(prefix.Length));
                     await SendRelayBodyAsync(socket, sendGate, payload, context).ConfigureAwait(false);
+                    diagnostic?.Mark(PlaybackDiagnosticStep.FirstBodySent);
                 }
             }
 
@@ -3746,9 +3789,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
         catch (OperationCanceledException)
         {
+            if (diagnostic is not null) diagnostic.Outcome = PlaybackDiagnosticOutcome.Cancelled;
         }
         catch (Exception exception)
         {
+            diagnostic?.Fail(exception);
             try
             {
                 await SendRelayTextAsync(socket, sendGate, JsonSerializer.Serialize(new
@@ -3764,6 +3809,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 // supervisor owns reconnecting the shared socket if needed.
             }
         }
+        finally { diagnostic?.Dispose(); }
     }
 
     internal static bool ShouldSynthesizeRelayManifestHead(HttpMethod method, string pathAndQuery)

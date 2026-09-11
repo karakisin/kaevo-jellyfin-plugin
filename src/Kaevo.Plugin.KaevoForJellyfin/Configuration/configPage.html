@@ -351,6 +351,12 @@
                         <p class="fieldDescription">Pausing stops Kaevo cloud requests and playback. Your saved pairing, profiles and provider settings stay in place.</p>
                         <button id="KaevoPauseCloud" type="button" is="emby-button" class="emby-button kaevo-cloud-action" disabled><span>Pause Cloud Connection</span></button>
                         <button id="KaevoResumeCloud" type="button" is="emby-button" class="emby-button kaevo-cloud-action" hidden disabled><span>Resume Cloud Connection</span></button>
+                        <details style="margin-top:1.5em">
+                            <summary>Playback diagnostics</summary>
+                            <p class="fieldDescription">Capture timing for one playback attempt to help diagnose a slow start. Stops after five minutes or sixteen media requests. Video URLs, credentials and profile details are not recorded.</p>
+                            <button id="KaevoCapturePlayback" type="button" is="emby-button" class="emby-button kaevo-cloud-action"><span>Capture Next Playback</span></button>
+                            <p id="KaevoPlaybackDiagnosticStatus" class="fieldDescription" aria-live="polite">Diagnostics are off unless a capture is armed.</p>
+                        </details>
                         <button id="KaevoMigrateFirebase" type="button" is="emby-button" class="emby-button kaevo-cloud-action" hidden disabled><span>Prepare Firebase Connection</span></button>
                         <p id="KaevoMigrationStatus" class="fieldDescription" aria-live="polite"></p>
                     </section>
@@ -837,6 +843,30 @@
                     headers: { 'X-Kaevo-Admin-Action': 'lifecycle' } }).then(reconcile, reconcile);
             }
             document.querySelector('#KaevoMigrateFirebase').addEventListener('click', migrateFirebase);
+            function captureNextPlayback() {
+                var button = document.querySelector('#KaevoCapturePlayback');
+                if (button.disabled) return Promise.resolve();
+                button.disabled = true;
+                var status = document.querySelector('#KaevoPlaybackDiagnosticStatus');
+                status.textContent = 'Arming the next playback capture…';
+                var expires = Math.floor(Date.now() / 1000) + 300;
+                // Fresh read, change only the diagnostic window, one write.
+                // A lost write response is reconciled, never automatically replayed.
+                return ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId).then(function (config) {
+                    config.PlaybackDiagnosticExpiresAtUnixSeconds = expires;
+                    return ApiClient.updatePluginConfiguration(KaevoConfig.pluginUniqueId, config);
+                }).catch(function () {}).then(function () {
+                    return ApiClient.getPluginConfiguration(KaevoConfig.pluginUniqueId);
+                }).then(function (config) {
+                    status.textContent = config.PlaybackDiagnosticExpiresAtUnixSeconds === expires
+                        ? 'Capture armed. Play one video within five minutes. Playback behavior is unchanged; timing is saved in the Jellyfin log.'
+                        : 'The capture could not be confirmed. No playback test has been started.';
+                }).catch(function () {
+                    status.textContent = 'The capture could not be confirmed. Check the connection before trying again.';
+                }).finally(function () { button.disabled = false; });
+            }
+            document.querySelector('#KaevoCapturePlayback').addEventListener('click', captureNextPlayback);
+
             document.querySelector('#KaevoPauseCloud').addEventListener('click', function () {
                 if (!this.disabled) changeCloudControl(false);
             });
