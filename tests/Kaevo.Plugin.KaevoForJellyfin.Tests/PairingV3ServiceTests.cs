@@ -422,6 +422,42 @@ public sealed class PairingV3ServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task FirebaseConnectorProofCannotBeReplayedAtLegacyBackend()
+    {
+        var capture = new ConnectorCaptureHandler();
+        var service = new KaevoPairingV3Service(Store(), new FakeCloud(), () => true,
+            () => JsonSerializer.Serialize(new Dictionary<string, string> { ["cloud-test"] = KaevoPairingV3Crypto.Base64Url(KaevoPairingV3Crypto.PublicKeyFromSeed(CloudSeed)) }),
+            () => "kaevo-cloud-dev", connectorHttp: new HttpClient(capture));
+        var start = await service.StartAsync("server-v3-01", "Jellyfin", "https://local", "user-1");
+        var token = Authorization(start, "user-1");
+        var challenge = await service.ChallengeAsync(start.TicketId, Attempt, KaevoPairingV3Crypto.HashText(token), Correlation);
+        await service.CompleteAsync(new Uri("https://cloud.example"), ValidCompletion(start, challenge, token));
+        using var response = await service.SendConnectorRequestAsync(
+            new Uri("https://kaevo-development-mobile-9z2mf5rz.wl.gateway.dev"), HttpMethod.Post,
+            "/v3/home-connectors/connector-1/heartbeat", new { connector_id = "connector-1", value = "a\u2060b" });
+        Assert.Equal("3", capture.Headers["X-Kaevo-Plugin-Signature-Version"]);
+        var fields = new List<(string, string)>
+        {
+            ("httpMethod", "POST"), ("canonicalRoute", capture.Path),
+            ("bodyDigest", KaevoPairingV3Crypto.Base64Url(SHA256.HashData(Encoding.UTF8.GetBytes(capture.Body)))),
+            ("timestamp", capture.Headers["X-Kaevo-Plugin-Timestamp"]), ("nonce", capture.Headers["X-Kaevo-Plugin-Nonce"]),
+            ("connectorId", "connector-1"), ("pluginInstanceId", start.PluginInstanceId),
+            ("pluginKeyId", "1"), ("pluginPublicKeyFingerprint", start.PluginFingerprint)
+        };
+        var publicKey = KaevoPairingV3Crypto.Base64UrlDecode(start.PluginPublicKey);
+        var signature = capture.Headers["X-Kaevo-Plugin-Signature"];
+        Assert.False(KaevoPairingV3Crypto.Verify(publicKey, KaevoPairingV3Crypto.Transcript("connector-request", fields.ToArray()), signature));
+        fields.Add(("targetProject", "project-d2d72828-62c4-48d1-8ca"));
+        fields.Add(("targetOrigin", "https://kaevo-development-mobile-9z2mf5rz.wl.gateway.dev"));
+        Assert.True(KaevoPairingV3Crypto.Verify(publicKey, KaevoPairingV3Crypto.Transcript("connector-request", fields.ToArray()), signature));
+        fields[^1] = ("targetOrigin", "https://cloud.example");
+        Assert.False(KaevoPairingV3Crypto.Verify(publicKey, KaevoPairingV3Crypto.Transcript("connector-request", fields.ToArray()), signature));
+        Assert.Equal("connector-1", await service.GetActiveConnectorIdAsync());
+        Assert.DoesNotContain("Authorization", capture.Headers.Keys);
+        Assert.DoesNotContain(token, capture.Body);
+    }
+
+    [Fact]
     public async Task ObservationsAreAllowlistedAndDoNotContainPairingSecrets()
     {
         var observations = new List<string>();

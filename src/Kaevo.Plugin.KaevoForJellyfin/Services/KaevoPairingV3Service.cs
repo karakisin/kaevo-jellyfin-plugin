@@ -335,7 +335,8 @@ public sealed partial class KaevoPairingV3Service
         string method,
         string canonicalRoute,
         string digest,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool firebaseTarget = false)
     {
         if (string.IsNullOrWhiteSpace(method) || string.IsNullOrWhiteSpace(canonicalRoute) || !canonicalRoute.StartsWith("/", StringComparison.Ordinal)
             || canonicalRoute.Contains('\r') || canonicalRoute.Contains('\n')) throw new KaevoPairingV3Exception("malformed_request");
@@ -350,9 +351,15 @@ public sealed partial class KaevoPairingV3Service
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture);
         var nonce = KaevoPairingV3Crypto.Base64Url(RandomNumberGenerator.GetBytes(32));
         var keyId = context.identity.KeyVersion.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var transcript = KaevoPairingV3Crypto.Transcript("connector-request", ("httpMethod", method.ToUpperInvariant()), ("canonicalRoute", canonicalRoute),
+        var fields = new List<(string, string)> { ("httpMethod", method.ToUpperInvariant()), ("canonicalRoute", canonicalRoute),
             ("bodyDigest", digest), ("timestamp", timestamp), ("nonce", nonce), ("connectorId", context.connector.ConnectorId),
-            ("pluginInstanceId", context.identity.PluginInstanceId), ("pluginKeyId", keyId), ("pluginPublicKeyFingerprint", context.identity.Fingerprint));
+            ("pluginInstanceId", context.identity.PluginInstanceId), ("pluginKeyId", keyId), ("pluginPublicKeyFingerprint", context.identity.Fingerprint) };
+        if (firebaseTarget)
+        {
+            fields.Add(("targetProject", KaevoFirebaseRuntime.ProjectId));
+            fields.Add(("targetOrigin", KaevoFirebaseRuntime.Endpoint));
+        }
+        var transcript = KaevoPairingV3Crypto.Transcript("connector-request", fields.ToArray());
         var privateSeed = KaevoPairingV3Crypto.Base64UrlDecode(context.identity.PrivateKeyBase64Url);
         try
         {
@@ -379,11 +386,12 @@ public sealed partial class KaevoPairingV3Service
     {
         var serializedBody = JsonSerializer.SerializeToUtf8Bytes(body, new JsonSerializerOptions(JsonSerializerDefaults.Web));
         var exactBodyDigest = KaevoPairingV3Crypto.Base64Url(SHA256.HashData(serializedBody));
+        var firebaseTarget = KaevoFirebaseRuntime.IsConnectorTarget(cloudBase);
         var proof = await PrepareConnectorRequestDigestAsync(
             method.Method,
             canonicalRoute,
             exactBodyDigest,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken, firebaseTarget).ConfigureAwait(false);
         var uri = new Uri(new Uri(cloudBase.ToString().TrimEnd('/') + "/"), canonicalRoute.TrimStart('/'));
         var request = new HttpRequestMessage(method, uri)
         {
@@ -395,7 +403,7 @@ public sealed partial class KaevoPairingV3Service
         request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Timestamp", proof.Timestamp);
         request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Nonce", proof.Nonce);
         request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Signature", proof.Signature);
-        request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Signature-Version", "2");
+        request.Headers.TryAddWithoutValidation("X-Kaevo-Plugin-Signature-Version", firebaseTarget ? "3" : "2");
         try
         {
             return await _connectorHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
