@@ -40,6 +40,26 @@ public sealed class KaevoSeerrIdentityProvisioningService
     public static bool IsSafeRequestPermissionMask(int permissions) =>
         permissions >= 0 && (permissions & ~RequestMask) == 0;
 
+    internal async Task<bool> VerifyConnectionOwnerRequestAccessAsync(
+        KaevoConnectorSecrets secrets, CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Seerr resolves this account from the saved API key. Do not
+            // impersonate a user, discover by name, import, or change policy.
+            var response = await SendAsync(secrets, HttpMethod.Get,
+                "/api/v1/auth/me", null, cancellationToken).ConfigureAwait(false);
+            var user = response.Body;
+            return response.StatusCode == 200 && user.ValueKind == JsonValueKind.Object
+                && user.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number
+                && id.TryGetInt32(out var userId) && userId > 0
+                && user.TryGetProperty("permissions", out var permissions) && permissions.ValueKind == JsonValueKind.Number
+                && permissions.TryGetInt32(out var mask) && mask >= 0 && (mask & (RequestMask | Administrator)) != 0;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch { return false; }
+    }
+
     internal async Task<bool> VerifyExactRequestAccessAsync(
         KaevoConnectorSecrets secrets, string jellyfinUserId, int seerrUserId,
         CancellationToken cancellationToken)

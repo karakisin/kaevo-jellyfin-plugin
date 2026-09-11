@@ -9,15 +9,15 @@ metadata access without requiring a separate Kaevo server installation.
 - Jellyfin: `10.11.x`
 - .NET target: `net8.0`
 - Foundation baseline: `0.1.0`
-- Current repository build: `0.3.43`
+- Current repository build: `0.3.44`
 - Supported phase: local metadata, app-guided Cloud activation, and guarded remote playback
 
-Version 0.3.43 adds a signed, exact-profile media-access check for Firebase
-Repair Media Access. Jellyfin playback policy and the saved Seerr identity are
-read on the paired server; administrator credentials stay there. The check
-preserves disabled accounts, library restrictions and provider permissions.
-It requires the corresponding Kaevo app and Firebase update. This release does
-not change the player, promise faster startup, or complete every migration feature.
+Version 0.3.44 corrects Repair Media Access for a verified household owner who
+uses the Seerr connection saved in the plugin. It checks the authenticated Seerr
+account with a read-only request. Household members still require their exact
+saved Seerr identity; no users, permissions or profile bindings are changed.
+It requires the corresponding Firebase update. Playback startup and the player
+interface are unchanged.
 
 Current endpoints:
 

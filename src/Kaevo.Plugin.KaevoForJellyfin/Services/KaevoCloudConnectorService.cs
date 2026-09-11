@@ -27,7 +27,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     "playback_tunnel_v1", "direct_play", "hls_remux", "hls_transcode",
                     "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
                     "local_provider_configuration_v1", "connector_control_push_v2", "profile_artwork_v1",
-                    "profile_media_access_v1"
+                    "profile_media_access_v1", "profile_media_access_owner_v1"
                 };
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
@@ -961,8 +961,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             if (RequireString(parameters, "jellyfin_user_id", "providerIdentityInvalid") != exact
                 || !parameters.TryGetValue("requests_required", out var requested)
                 || requested.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
-                || parameters.Keys.Any(key => key is not ("jellyfin_user_id" or "requests_required" or "seerr_user_id")))
+                || parameters.Keys.Any(key => key is not ("jellyfin_user_id" or "requests_required" or "seerr_user_id" or "requester_mode")))
                 throw new InvalidOperationException("providerIdentityMismatch");
+            var connectionOwner = KaevoProfileMediaAccessPolicy.UsesConnectionOwner(parameters, request.ProfileId, configuration.ProfileId);
             var seerrId = 0;
             if (parameters.TryGetValue("seerr_user_id", out var seerr)
                 && (!requested.GetBoolean() || !seerr.TryGetInt32(out seerrId) || seerrId <= 0))
@@ -970,17 +971,22 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             var user = await SendLocalAsync(configuration, secrets, HttpMethod.Get,
                 $"/Users/{exact}", null, null, cancellationToken).ConfigureAwait(false);
             var playbackReady = !user.Truncated && KaevoProfileMediaAccessPolicy.PlaybackReady(user.Payload, exact);
-            var requestsState = !requested.GetBoolean() ? "not_required" : seerrId == 0 ? "not_linked"
+            var requestsState = connectionOwner
+                ? await _seerrIdentityProvisioning.VerifyConnectionOwnerRequestAccessAsync(secrets, cancellationToken).ConfigureAwait(false)
+                    ? "verified" : "needs_review"
+                : !requested.GetBoolean() ? "not_required" : seerrId == 0 ? "not_linked"
                 : await _seerrIdentityProvisioning.VerifyExactRequestAccessAsync(
                     secrets, exact, seerrId, cancellationToken).ConfigureAwait(false) ? "verified" : "needs_review";
             // Recheck the local binding after provider reads, too.
-            if (RequireBoundJellyfinUserId(configuration, request, "profileJellyfinBindingMissing") != exact)
+            if (RequireBoundJellyfinUserId(configuration, request, "profileJellyfinBindingMissing") != exact
+                || KaevoProfileMediaAccessPolicy.UsesConnectionOwner(parameters, request.ProfileId, configuration.ProfileId) != connectionOwner)
                 throw new InvalidOperationException("providerIdentityMismatch");
             return CompleteCommand(request, operation, new
             {
                 provider = "jellyfin", provider_user_id = exact,
                 playback_access = playbackReady ? "verified" : "needs_review",
-                requests_access = requestsState
+                requests_access = requestsState,
+                requests_identity_mode = connectionOwner ? "authenticated_connection_owner" : null
             });
         }
 
