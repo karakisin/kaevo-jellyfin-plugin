@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.41.0",
+        "changelog": "Add optional, bounded playback diagnostics to separate connector preparation, Jellyfin response and relay delivery delays. Off by default; one preparation and up to 16 media requests within five minutes. Playback behavior is unchanged; faster startup is not claimed.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.41/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "a0070fe0aa5c71d33c86ce43af51f65a",
+        "timestamp": "2026-09-11T05:45:00Z"
+      },
+      {
         "version": "0.3.40.0",
         "changelog": "Avoid long relay-ticket retry sleeps during the first 30 seconds of an authorized Firebase playback start. Normal backoff resumes afterward; demand and idle lifetimes are unchanged. Physical speed improvement remains to be verified.",
         "targetAbi": "10.11.0.0",
