@@ -9,8 +9,16 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.51.0",
+        "changelog": "Hardens exact deletion verification after a lost completion reply or plugin restart. Fresh provider absence and current administrator permission remain required. Preserves the accepted Firebase playback, native player, resume and Family Sync. Passed 704 plugin tests and isolated Jellyfin 10.11.11 compatibility/provider-recovery checks. Firebase account deletion is not enabled by this release.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.51/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "a713d69044d0e27e7dd13a1cd7de9cfd",
+        "timestamp": "2026-09-12T21:00:00Z"
+      },
+      {
         "version": "0.3.50.0",
-        "changelog": "Removes failure backoff during normal Firebase connection renewal, which caused a measured 18.5-second command-connection gap. Fresh signed credentials, failure recovery, hardware playback, native player, resume and Family Sync are preserved. Passed 693 plugin tests and isolated Jellyfin 10.11.11 compatibility checks. Consistent physical 2–4-second startup remains unverified.",
+        "changelog": "Removes failure backoff during normal Firebase connection renewal, which caused a measured 18.5-second command-connection gap. Fresh signed credentials, failure recovery, hardware playback, native player, resume and Family Sync are preserved. Passed 693 plugin tests and isolated Jellyfin 10.11.11 compatibility checks. Consistent physical 2\u20134-second startup remains unverified.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.50/Kaevo.Plugin.KaevoForJellyfin.zip",
         "checksum": "3906f316975d949175811235e8937b3f",
@@ -18,7 +26,7 @@
       },
       {
         "version": "0.3.49.0",
-        "changelog": "Delivers explicit Play commands and signed results through the existing Firebase connection, avoiding separate HTTP claim and completion calls. Preserves hardware playback, profiles, resume, Family Sync and security. Passed 690 plugin tests and isolated Jellyfin 10.11.11 compatibility checks. Physical 2–4 second startup is not yet verified.",
+        "changelog": "Delivers explicit Play commands and signed results through the existing Firebase connection, avoiding separate HTTP claim and completion calls. Preserves hardware playback, profiles, resume, Family Sync and security. Passed 690 plugin tests and isolated Jellyfin 10.11.11 compatibility checks. Physical 2\u20134 second startup is not yet verified.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.49/Kaevo.Plugin.KaevoForJellyfin.zip",
         "checksum": "f6e42e6075319588e4e1175d17e96c80",
@@ -34,7 +42,7 @@
       },
       {
         "version": "0.3.47.0",
-        "changelog": "Adds bounded, opt-in observations of the exact FFmpeg job input, hardware-driver and output startup phases. No encoder, quality, player, authorization or Firebase capacity changes. Diagnostic release; the 2–4 second playback target remains unmet.",
+        "changelog": "Adds bounded, opt-in observations of the exact FFmpeg job input, hardware-driver and output startup phases. No encoder, quality, player, authorization or Firebase capacity changes. Diagnostic release; the 2\u20134 second playback target remains unmet.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.47/Kaevo.Plugin.KaevoForJellyfin.zip",
         "checksum": "116370d30c1381083c23ca6651c63cff",
@@ -42,7 +50,7 @@
       },
       {
         "version": "0.3.46.0",
-        "changelog": "Adds opt-in, bounded encoder startup timing for one exact playback session. Measures job/process progress and initial segment availability without changing quality, playback authorization or Firebase capacity. Diagnostic update; 2–4 second startup target remains unmet.",
+        "changelog": "Adds opt-in, bounded encoder startup timing for one exact playback session. Measures job/process progress and initial segment availability without changing quality, playback authorization or Firebase capacity. Diagnostic update; 2\u20134 second startup target remains unmet.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.46/Kaevo.Plugin.KaevoForJellyfin.zip",
         "checksum": "f2a2f01d3edd0c1e3a1ca2a22ee4a2cf",
@@ -50,7 +58,7 @@
       },
       {
         "version": "0.3.45.0",
-        "changelog": "Starts the exact on-demand Jellyfin hardware stream during the authorized Play handoff. Keeps native playback, direct-play priority, quality, resume and profile authorization. Requires app build 207 or later. Includes bounded abandoned-start cleanup. Physical 2–4 second startup acceptance remains pending.",
+        "changelog": "Starts the exact on-demand Jellyfin hardware stream during the authorized Play handoff. Keeps native playback, direct-play priority, quality, resume and profile authorization. Requires app build 207 or later. Includes bounded abandoned-start cleanup. Physical 2\u20134 second startup acceptance remains pending.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.45/Kaevo.Plugin.KaevoForJellyfin.zip",
         "checksum": "bde791ecbe44dead4fe11602f2068159",
@@ -58,7 +66,7 @@
       },
       {
         "version": "0.3.44.0",
-        "changelog": "Verify the household owner’s saved Seerr connection during Repair Media Access; preserve exact member accounts and provider permissions.",
+        "changelog": "Verify the household owner\u2019s saved Seerr connection during Repair Media Access; preserve exact member accounts and provider permissions.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.44/Kaevo.Plugin.KaevoForJellyfin.zip",
         "checksum": "94d697fa109822eb8afd0cecc38da972",
