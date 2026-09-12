@@ -12,7 +12,7 @@ internal enum OriginLogPhase
 
 // Observes Jellyfin's existing, line-flushed log; never consumes StandardError.
 // No log text, command, source path, or credentials leave this object.
-internal sealed class OriginEncoderLogObservation(string? directory)
+internal sealed class OriginEncoderLogObservation(string? directory) : IDisposable
 {
     internal const int MaximumBytes = 512 * 1024;
     internal const int HeaderBytes = 128 * 1024;
@@ -26,7 +26,8 @@ internal sealed class OriginEncoderLogObservation(string? directory)
     private OriginLogPhase _phases;
     private TranscodingJob? _job;
     private int? _pid;
-    private DateTime? _processStarted, _created;
+    private DateTime? _processStarted;
+    private FileStream? _tail;
 
     internal OriginLogPhase Read(TranscodingJob job)
     {
@@ -68,32 +69,37 @@ internal sealed class OriginEncoderLogObservation(string? directory)
                     var info = new FileInfo(candidate);
                     if ((info.Attributes & FileAttributes.ReparsePoint) != 0
                         || Math.Abs((info.CreationTimeUtc - start).TotalSeconds) > 3) continue;
-                    using var stream = Open(candidate);
-                    var bytes = ReadBounded(stream, HeaderBytes);
-                    // Jellyfin writes this exact command on its own line after
-                    // the JSON media source. Merely matching a movie is unsafe.
-                    if (!Encoding.UTF8.GetString(bytes).Split('\n')
-                        .Any(line => line.TrimEnd('\r') == command)) continue;
-                    if (match is not null) return Unavailable();
-                    match = candidate; matchedHeader = bytes;
+                    var stream = Open(candidate);
+                    try
+                    {
+                        var bytes = ReadBounded(stream, HeaderBytes);
+                        // Jellyfin writes this exact command on its own line after
+                        // the JSON media source. Merely matching a movie is unsafe.
+                        if (!Encoding.UTF8.GetString(bytes).Split('\n')
+                            .Any(line => line.TrimEnd('\r') == command)) continue;
+                        if (match is not null) return Unavailable();
+                        match = candidate; matchedHeader = bytes; _tail = stream;
+                    }
+                    finally { if (!ReferenceEquals(stream, _tail)) stream.Dispose(); }
                 }
                 if (match is null) return _bytes >= MaximumBytes ? Unavailable() : _phases;
                 _path = match; _command = command; _offset = matchedHeader!.Length;
-                _created = File.GetCreationTimeUtc(_path);
                 _phases |= OriginLogPhase.Attached;
                 // Ignore all content before the exact command, including JSON
                 // metadata that could contain text resembling an FFmpeg phase.
                 Consume(matchedHeader, skipHeader: true);
+                if (_phases.HasFlag(OriginLogPhase.Progress)) Dispose();
                 return _phases;
             }
-            if ((File.GetAttributes(_path) & FileAttributes.ReparsePoint) != 0
-                || File.GetCreationTimeUtc(_path) != _created) return Unavailable();
-            using var tail = Open(_path);
-            if (tail.Length < _offset) return Unavailable();
-            tail.Position = _offset;
-            var appended = ReadBounded(tail, ReadBytes);
+            // Keep the verified handle: pathname replacement must not switch
+            // jobs. On Linux without birth time, CreationTimeUtc can change on
+            // append, so it cannot be a subsequent file-identity check.
+            if (_tail is null || _tail.Length < _offset) return Unavailable();
+            _tail.Position = _offset;
+            var appended = ReadBounded(_tail, ReadBytes);
             _offset += appended.Length;
             Consume(appended, skipHeader: false);
+            if (_phases.HasFlag(OriginLogPhase.Progress)) Dispose();
             return _bytes >= MaximumBytes && (_phases & OriginLogPhase.Progress) == 0 ? Unavailable() : _phases;
         }
         catch (Exception) { return Unavailable(); }
@@ -140,5 +146,6 @@ internal sealed class OriginEncoderLogObservation(string? directory)
         return OriginLogPhase.None;
     }
 
-    private OriginLogPhase Unavailable() { _phases |= OriginLogPhase.Unavailable; _line.Clear(); return _phases; }
+    private OriginLogPhase Unavailable() { _phases |= OriginLogPhase.Unavailable; Dispose(); return _phases; }
+    public void Dispose() { _tail?.Dispose(); _tail = null; _line.Clear(); }
 }

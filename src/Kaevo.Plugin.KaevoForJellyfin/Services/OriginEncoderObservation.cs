@@ -4,7 +4,7 @@ using MediaBrowser.Controller.MediaEncoding;
 namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 // Read-only samples of the one already-authorized Jellyfin job. Never opens the
-// source movie, consumes FFmpeg output, launches a process or changes job state.
+// source movie, consumes FFmpeg pipes, launches a process or changes job state.
 internal sealed record OriginEncoderSnapshot(bool ProcessStarted, bool ProgressReported,
     bool SegmentExists, bool NextSegmentExists, bool Exited, OriginLogPhase LogPhases = OriginLogPhase.None);
 

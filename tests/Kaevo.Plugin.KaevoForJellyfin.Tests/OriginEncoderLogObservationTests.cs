@@ -8,14 +8,15 @@ public sealed class OriginEncoderLogObservationTests : IDisposable
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "kaevo-log-observation-" + Guid.NewGuid().ToString("N"));
     private const string Command = "/usr/bin/ffmpeg -i \"file:/Media/private movie.mkv\" -y \"/cache/exact-session.m3u8\"";
     private readonly DateTime _start = DateTime.UtcNow;
+    private readonly List<OriginEncoderLogObservation> _readers = [];
     public OriginEncoderLogObservationTests() => Directory.CreateDirectory(_directory);
-    public void Dispose() => Directory.Delete(_directory, true);
+    public void Dispose() { foreach (var reader in _readers) reader.Dispose(); Directory.Delete(_directory, true); }
     private string Log(string suffix, string text, string source = "source")
     {
         var path = Path.Combine(_directory, $"FFmpeg.Transcode-2026-09-12_00-00-00_{source}_{suffix}.log");
         File.WriteAllText(path, text); return path;
     }
-    private OriginEncoderLogObservation Reader() => new(_directory);
+    private OriginEncoderLogObservation Reader() { var reader = new OriginEncoderLogObservation(_directory); _readers.Add(reader); return reader; }
 
     [Fact]
     public void BindsExactCommandAndReadsIncrementalCompleteLinesOnly()
@@ -115,6 +116,19 @@ public sealed class OriginEncoderLogObservationTests : IDisposable
         var actual = Path.Combine(_directory, "outside.log"); File.WriteAllText(actual, Command + "\nInput #0, private\n");
         File.CreateSymbolicLink(Path.Combine(_directory, "FFmpeg.Transcode-now_source_link.log"), actual);
         Assert.Equal(OriginLogPhase.None, Reader().Read(Command, "source", _start));
+    }
+
+    [Fact]
+    public void PathReplacementCannotSwitchTheVerifiedOpenLog()
+    {
+        var path = Log("a", Command + "\nInput #0, matroska\n");
+        using var reader = Reader();
+        Assert.True(reader.Read(Command, "source", _start).HasFlag(OriginLogPhase.InputOpened));
+        File.Move(path, path + ".old");
+        File.WriteAllText(path, Command + "\nOutput #0, hls, wrong job\nframe=48 time=00:00:00.00\n");
+        Assert.False(reader.Read(Command, "source", _start).HasFlag(OriginLogPhase.OutputOpened));
+        File.AppendAllText(path + ".old", "Stream mapping:\n");
+        Assert.True(reader.Read(Command, "source", _start).HasFlag(OriginLogPhase.StreamsMapped));
     }
 
     [Theory]

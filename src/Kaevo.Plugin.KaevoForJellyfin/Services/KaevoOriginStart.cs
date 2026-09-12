@@ -22,7 +22,8 @@ internal sealed class KaevoOriginStart
     internal bool TryStart(PlaybackOriginScope scope, long deadline, Func<string, CancellationToken, Task<string>> playlist,
         Func<string, CancellationToken, Task> segment, Func<Task> stop, Action<string> diagnostic,
         CancellationToken lifetime, DateTimeOffset? now = null,
-        Func<PlaybackDiagnosticTrace?>? beginCapture = null, Func<int, OriginEncoderSnapshot?>? snapshot = null)
+        Func<PlaybackDiagnosticTrace?>? beginCapture = null, Func<int, OriginEncoderSnapshot?>? snapshot = null,
+        IDisposable? observationResource = null)
     {
         var instant = now ?? DateTimeOffset.UtcNow;
         if (deadline <= instant.ToUnixTimeSeconds() || deadline > instant.ToUnixTimeSeconds() + 30
@@ -41,18 +42,19 @@ internal sealed class KaevoOriginStart
         PlaybackDiagnosticTrace? capture = null;
         try { capture = beginCapture?.Invoke(); }
         catch { } // Diagnostics cannot strand the admitted origin operation.
-        _ = RunAsync(entry, remaining, playlist, segment, stop, diagnostic, lifetime, capture, snapshot);
+        _ = RunAsync(entry, remaining, playlist, segment, stop, diagnostic, lifetime, capture, snapshot, observationResource);
         return true;
     }
 
     private async Task RunAsync(Entry entry, TimeSpan remaining, Func<string, CancellationToken, Task<string>> playlist,
         Func<string, CancellationToken, Task> segment, Func<Task> stop, Action<string> diagnostic, CancellationToken lifetime,
-        PlaybackDiagnosticTrace? capture, Func<int, OriginEncoderSnapshot?>? snapshot)
+        PlaybackDiagnosticTrace? capture, Func<int, OriginEncoderSnapshot?>? snapshot, IDisposable? observationResource)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
         timeout.CancelAfter(remaining);
         using var observation = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
         using var ownedCapture = capture;
+        using var ownedObservationResource = observationResource;
         Task observer = Task.CompletedTask;
         try
         {
