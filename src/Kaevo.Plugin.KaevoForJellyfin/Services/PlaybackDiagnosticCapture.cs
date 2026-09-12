@@ -90,7 +90,9 @@ internal enum PlaybackDiagnosticStep
     ClaimReceived, CommandReceived, SecretsReady, ExecuteComplete, CompletionSent,
     UpstreamRequest, UpstreamHeaders, UpstreamBody, UpstreamParsed,
     Authorized, HeadersSent, FirstBodyRead, FirstBodySent, PlaylistRewritten, OriginStarted, OriginSegmentSelected, EncoderJobObserved, EncoderProcessObserved,
-    EncoderProgressObserved, SegmentFileObserved, NextSegmentFileObserved, EncoderExited, ObservationUnavailable, Finished
+    EncoderProgressObserved, SegmentFileObserved, NextSegmentFileObserved, EncoderExited, ObservationUnavailable, Finished,
+    EncoderLogObserved, EncoderDriverOpenedObserved, EncoderInputOpenedObserved, EncoderStreamsMappedObserved,
+    EncoderOutputOpenedObserved, EncoderLogProgressObserved, EncoderLogUnavailable
 }
 internal enum PlaybackDiagnosticResource { None, Authority, PlaybackInfo, Trickplay, MediaSegments, Other, OriginMaster, OriginMedia, OriginSegment }
 internal enum PlaybackDiagnosticOutcome { Complete, Cancelled, Http, Invalid, Socket, Other }

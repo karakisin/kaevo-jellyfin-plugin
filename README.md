@@ -9,16 +9,17 @@ metadata access without requiring a separate Kaevo server installation.
 - Jellyfin: `10.11.x`
 - .NET target: `net8.0`
 - Foundation baseline: `0.1.0`
-- Current repository build: `0.3.46`
+- Current repository build: `0.3.47`
 - Supported phase: local metadata, app-guided Cloud activation, and guarded remote playback
 
-Version 0.3.46 adds opt-in timing for the existing on-demand Jellyfin encoder:
-job/process observation, initial progress, and the first two segment files.
-It helps distinguish encoder startup from media delivery delay. Capture uses the
-existing five-minute diagnostic window for one exact playback session and ends
-with the bounded origin operation. It does not change the player, quality,
-hardware settings, authentication, or Firebase capacity. The 2–4 second playback
-startup target remains unverified for this release.
+Version 0.3.47 extends the opt-in startup capture with observations from the
+exact job's existing FFmpeg log: driver opening, input discovery, stream mapping,
+output initialization and first progress. It reads at most 512 KiB within the
+existing bounded origin operation and emits phase names and timings only.
+Capture remains off until armed for one exact playback session. It does not
+change the encoder, player, quality, authentication or Firebase capacity.
+These are sampled log observations, not exact GPU timings or a speed fix.
+The 2–4 second playback startup target remains unmet.
 
 Current endpoints:
 

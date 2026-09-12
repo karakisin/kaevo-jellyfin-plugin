@@ -19,6 +19,7 @@ public sealed class KaevoPlugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public KaevoPlugin(IApplicationPaths applicationPaths, IXmlSerializer xmlSerializer)
         : base(applicationPaths, xmlSerializer)
     {
+        DiagnosticLogDirectory = applicationPaths.LogDirectoryPath;
         PackageIntegrityValid = KaevoPackageIntegrity.IsValidVersion(
             typeof(KaevoPlugin).Assembly.GetName().Version, typeof(KaevoPlugin).Assembly.Location);
         Instance = this;
@@ -27,6 +28,8 @@ public sealed class KaevoPlugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public static KaevoPlugin? Instance { get; private set; }
 
     public bool PackageIntegrityValid { get; }
+
+    internal string DiagnosticLogDirectory { get; }
 
     public override string Name => "Kaevo";
 

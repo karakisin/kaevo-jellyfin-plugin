@@ -3168,6 +3168,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             var began = System.Diagnostics.Stopwatch.StartNew();
             var commandCapture = _playbackDiagnostic.Value;
             PlaybackDiagnosticTrace? originCapture = null;
+            var originLog = commandCapture is null ? null : new OriginEncoderLogObservation(KaevoPlugin.Instance?.DiagnosticLogDirectory);
             if (_originStarts.TryStart(originScope, request.OriginStartExpiresAt.Value,
                 async (path, token) =>
                 {
@@ -3197,7 +3198,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 cancellationToken,
                 beginCapture: () => originCapture = commandCapture is null ? null : _playbackDiagnostics.BeginOrigin(
                     PlaybackDiagnosticExpiry(configuration), commandCapture, playSessionId, WritePlaybackDiagnostic),
-                snapshot: index => OriginEncoderObservation.Read(_transcodeManager.GetTranscodingJob(playSessionId), originScope, index)))
+                snapshot: index => OriginEncoderObservation.Read(_transcodeManager.GetTranscodingJob(playSessionId), originScope, index, originLog)))
                 originStartTicks = positionTicks;
         }
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
