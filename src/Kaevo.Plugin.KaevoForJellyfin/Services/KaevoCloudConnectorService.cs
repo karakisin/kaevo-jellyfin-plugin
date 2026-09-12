@@ -73,6 +73,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private volatile bool _pairingV3Active;
     private readonly HttpClient _jellyfin = new() { Timeout = TimeSpan.FromSeconds(45) };
     private readonly PlaybackDiagnosticCapture _playbackDiagnostics = new();
+    private readonly KaevoOriginStart _originStarts = new();
+    private readonly HttpClient _originHttp = new(new HttpClientHandler { AllowAutoRedirect = false })
+        { Timeout = TimeSpan.FromSeconds(30) };
     private readonly AsyncLocal<PlaybackDiagnosticTrace?> _playbackDiagnostic = new();
     private static long PlaybackDiagnosticExpiry(PluginConfiguration configuration)
         => RuntimeConfiguration(configuration).PlaybackDiagnosticExpiresAtUnixSeconds;
@@ -3153,6 +3156,40 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             && parsedRuntime > 0
                 ? parsedRuntime
                 : (long?)null;
+        long? originStartTicks = null;
+        if (mode == "transcode" && subtitleStreamIndex is null && maxBitrate > 192_000
+            && request.OriginStartExpiresAt is > 0
+            && parameters.TryGetValue("origin_start_ticks", out var originPosition)
+            && originPosition.TryGetInt64(out var positionTicks) && positionTicks >= 0
+            && runTimeTicks is > 0 && positionTicks < runTimeTicks)
+        {
+            var originScope = new PlaybackOriginScope(configuration.ConnectorId, deviceId, itemId,
+                mediaSourceId, playSessionId, maxBitrate, audioStreamIndex ?? tracks.SelectedAudioStreamIndex, positionTicks);
+            var began = System.Diagnostics.Stopwatch.StartNew();
+            if (_originStarts.TryStart(originScope, request.OriginStartExpiresAt.Value,
+                async (path, token) =>
+                {
+                    using var localRequest = new HttpRequestMessage(HttpMethod.Get, BuildLocalUri(configuration, path, null));
+                    localRequest.Headers.Add("X-Emby-Token", secrets.JellyfinApiKey);
+                    using var response = await _originHttp.SendAsync(localRequest, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+                    response.EnsureSuccessStatusCode();
+                    var data = await ReadBoundedAsync(response.Content, 2 * 1_048_576, token).ConfigureAwait(false);
+                    if (data.Truncated) throw new InvalidOperationException("originPlaylistTooLarge");
+                    return Encoding.UTF8.GetString(data.Data);
+                }, async (path, token) =>
+                {
+                    using var localRequest = new HttpRequestMessage(HttpMethod.Get, BuildLocalUri(configuration, path, null));
+                    localRequest.Headers.Add("X-Emby-Token", secrets.JellyfinApiKey);
+                    localRequest.Headers.Range = new RangeHeaderValue(0, 1);
+                    using var response = await _originHttp.SendAsync(localRequest, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+                    response.EnsureSuccessStatusCode();
+                    await using var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+                    var prefix = new byte[2];
+                    await stream.ReadExactlyAsync(prefix, token).ConfigureAwait(false);
+                }, () => _transcodeManager.KillTranscodingJobs(deviceId, playSessionId, _ => true),
+                stage => _logger.LogInformation("Kaevo origin start stage={Stage} elapsed_ms={ElapsedMs}", stage, began.ElapsedMilliseconds),
+                cancellationToken)) originStartTicks = positionTicks;
+        }
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
         {
             requestId = request.RequestId,
@@ -3165,6 +3202,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 playback_session_id = playSessionId,
                 mode,
                 max_bitrate = maxBitrate,
+                origin_start_ticks = originStartTicks,
                 audio_tracks = tracks.AudioTracks,
                 subtitle_tracks = tracks.SubtitleTracks,
                 selected_audio_stream_index = audioStreamIndex ?? tracks.SelectedAudioStreamIndex,
@@ -3817,6 +3855,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     buffer.AsSpan(0, count).CopyTo(payload.AsSpan(prefix.Length));
                     await SendRelayBodyAsync(socket, sendGate, payload, context).ConfigureAwait(false);
                     diagnostic?.Mark(PlaybackDiagnosticStep.FirstBodySent);
+                    _originStarts.Delivered(grant, resolved.PathAndQuery);
                 }
             }
 

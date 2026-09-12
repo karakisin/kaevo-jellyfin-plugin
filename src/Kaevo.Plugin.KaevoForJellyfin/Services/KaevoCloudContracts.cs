@@ -38,7 +38,8 @@ internal sealed record CloudRequest(
     [property: JsonPropertyName("operation")] string? Operation,
     [property: JsonPropertyName("parameters")] Dictionary<string, JsonElement>? Parameters,
     [property: JsonPropertyName("profile_id")] string? ProfileId = null,
-    [property: JsonPropertyName("profile_provider_binding")] CloudProfileProviderBinding? ProfileProviderBinding = null);
+    [property: JsonPropertyName("profile_provider_binding")] CloudProfileProviderBinding? ProfileProviderBinding = null,
+    [property: JsonPropertyName("origin_start_expires_at")] long? OriginStartExpiresAt = null);
 
 internal sealed record CloudProfileProviderBinding(
     [property: JsonPropertyName("provider")] string Provider,
