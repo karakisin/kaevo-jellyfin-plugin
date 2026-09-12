@@ -34,7 +34,7 @@ internal sealed record FirebaseControlRecovery(IReadOnlyList<string> RequestIds,
     }
 }
 
-// Preview-only. One dispatcher lives across all channel replacements so already
+// One dispatcher lives across all channel replacements so already
 // claimed work is neither cancelled nor duplicated merely by lease renewal.
 // All retry state is bounded; persistent server checkpoints additionally prevent
 // a plugin process restart from resetting recovery query throttles.
@@ -65,6 +65,7 @@ internal static class FirebaseControlSupervisor
         {
             cancellationToken.ThrowIfCancellationRequested();
             long? listeningBegan = null;
+            var normalLeaseRenewal = false;
             FirebaseControlAdmission? admission = null;
             try
             {
@@ -82,9 +83,9 @@ internal static class FirebaseControlSupervisor
             if (admission is not null)
             {
                 Emit(evidence, "channel_admitted");
-                using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 var leaseRemaining = admission.ExpiresAt - DateTimeOffset.UtcNow;
-                session.CancelAfter(leaseRemaining > TimeSpan.Zero ? leaseRemaining : TimeSpan.Zero);
+                using var lease = new CancellationTokenSource(leaseRemaining > TimeSpan.Zero ? leaseRemaining : TimeSpan.Zero);
+                using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.Token);
                 IAsyncEnumerator<string>? reader = null;
                 Task<bool>? read = null;
                 var recoverMore = true;
@@ -205,8 +206,22 @@ internal static class FirebaseControlSupervisor
                         try { await reader.DisposeAsync().ConfigureAwait(false); }
                         catch (Exception) { Emit(evidence, "channel_cleanup_failed"); }
                 }
+                // Expiration is a planned credential boundary, not a failed
+                // connection. After disposing the old listener, request fresh
+                // signed admission immediately. Never reuse or extend a token.
+                // Require a healthy listening interval so short leases/flaps
+                // cannot turn this path into an unbounded admission loop.
+                normalLeaseRenewal = (lease.IsCancellationRequested || DateTimeOffset.UtcNow >= admission.ExpiresAt)
+                    && listeningBegan is not null
+                    && clock.GetElapsedTime(listeningBegan.Value) >= TimeSpan.FromSeconds(30);
             }
             cancellationToken.ThrowIfCancellationRequested();
+            if (normalLeaseRenewal)
+            {
+                failures = 0;
+                Emit(evidence, "lease_renewal");
+                continue;
+            }
             // Token exchange/recovery latency cannot reset the backoff. A
             // listener must survive at least 30 seconds; short flaps keep backing off.
             failures = listeningBegan is not null && clock.GetElapsedTime(listeningBegan.Value) >= TimeSpan.FromSeconds(30)

@@ -73,6 +73,75 @@ public sealed class FirebaseControlSupervisorTests
         Assert.Equal(1, listens);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task LeaseExpirationRenewsHealthyListenerWithoutFailureDelay(bool healthy)
+    {
+        using var stop = new CancellationTokenSource();
+        var clock = new Clock(); var admits = 0; var disposed = false;
+        var waits = new List<double>(); var events = new List<string>();
+        var recoveries = 0;
+        async IAsyncEnumerable<string> Listen(FirebaseControlAdmission a,
+            [EnumeratorCancellation] CancellationToken token)
+        {
+            try
+            {
+                clock.Advance(TimeSpan.FromSeconds(healthy ? 299 : 1));
+                await Task.Delay(Timeout.Infinite, token);
+                yield break;
+            }
+            finally { disposed = true; }
+        }
+        var source = FirebaseControlSupervisor.ReadAsync(_ =>
+        {
+            if (++admits == 2)
+            {
+                Assert.True(disposed);
+                stop.Cancel();
+                return Task.FromCanceled<FirebaseControlAdmission>(stop.Token);
+            }
+            return Task.FromResult(new FirebaseControlAdmission
+            {
+                Channel = new string('a', 43), Epoch = new string('a', 32),
+                CustomToken = "synthetic.custom.token", PushUid = "connector-push-" + new string('z', 43),
+                ExpiresAt = DateTimeOffset.UtcNow.AddMilliseconds(200),
+            });
+        }, Listen, (_, _) => { recoveries++; return Task.FromResult(new FirebaseControlRecovery([], false)); },
+            events.Add, stop.Token, clock, (duration, _) =>
+            { waits.Add(duration.TotalSeconds); clock.Advance(duration); return Task.CompletedTask; }, () => 15);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        { await foreach (var _ in source.WithCancellation(stop.Token)) { } });
+        Assert.Equal(2, admits); Assert.Equal(1, recoveries); Assert.True(disposed);
+        if (healthy)
+        {
+            Assert.Empty(waits);
+            Assert.Contains("lease_renewal", events);
+            Assert.DoesNotContain("renewal_wait", events);
+        }
+        else
+        {
+            Assert.Equal(new double[] { 20 }, waits);
+            Assert.DoesNotContain("lease_renewal", events);
+        }
+    }
+
+    [Fact]
+    public async Task HealthyEarlyDisconnectStillUsesBoundedFailureRecovery()
+    {
+        using var stop = new CancellationTokenSource(); var clock = new Clock();
+        var events = new List<string>(); var waits = new List<double>();
+        async IAsyncEnumerable<string> Disconnect(FirebaseControlAdmission a,
+            [EnumeratorCancellation] CancellationToken token)
+        { clock.Advance(TimeSpan.FromSeconds(35)); await Task.FromException(new InvalidOperationException()); yield break; }
+        var source = FirebaseControlSupervisor.ReadAsync(_ => Task.FromResult(Admission()), Disconnect,
+            (_, _) => Task.FromResult(new FirebaseControlRecovery([], false)), events.Add, stop.Token,
+            clock, (duration, _) => { waits.Add(duration.TotalSeconds); stop.Cancel(); return Task.CompletedTask; }, () => 15);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => { await foreach (var _ in source) { } });
+        Assert.Equal(new double[] { 20 }, waits);
+        Assert.DoesNotContain("lease_renewal", events);
+    }
+
     [Fact]
     public async Task ReconnectAndRecoveryFailureCannotResetRecoveryInterval()
     {
