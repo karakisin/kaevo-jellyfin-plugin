@@ -9,15 +9,16 @@ metadata access without requiring a separate Kaevo server installation.
 - Jellyfin: `10.11.x`
 - .NET target: `net8.0`
 - Foundation baseline: `0.1.0`
-- Current repository build: `0.3.44`
+- Current repository build: `0.3.46`
 - Supported phase: local metadata, app-guided Cloud activation, and guarded remote playback
 
-Version 0.3.44 corrects Repair Media Access for a verified household owner who
-uses the Seerr connection saved in the plugin. It checks the authenticated Seerr
-account with a read-only request. Household members still require their exact
-saved Seerr identity; no users, permissions or profile bindings are changed.
-It requires the corresponding Firebase update. Playback startup and the player
-interface are unchanged.
+Version 0.3.46 adds opt-in timing for the existing on-demand Jellyfin encoder:
+job/process observation, initial progress, and the first two segment files.
+It helps distinguish encoder startup from media delivery delay. Capture uses the
+existing five-minute diagnostic window for one exact playback session and ends
+with the bounded origin operation. It does not change the player, quality,
+hardware settings, authentication, or Firebase capacity. The 2–4 second playback
+startup target remains unverified for this release.
 
 Current endpoints:
 

@@ -52,6 +52,28 @@ public sealed class PlaybackDiagnosticCaptureTests
         Assert.Equal(16, count);
     }
     [Fact]
+    public void OriginCaptureRequiresTheAdmittedCommandExactSessionAndCanRunOnlyOnce()
+    {
+        var clock = new Clock(); var gate = new PlaybackDiagnosticCapture(clock); var expiry = clock.Expiry;
+        var command = gate.BeginCommand(expiry, "one", _ => {})!;
+        Assert.Null(gate.BeginOrigin(expiry, command, "session", _ => {}));
+        gate.BindSession(expiry, command, "session");
+        Assert.Null(gate.BeginOrigin(expiry, command, "other", _ => {}));
+        var otherGate = new PlaybackDiagnosticCapture(clock);
+        var unrelated = otherGate.BeginCommand(expiry, "two", _ => {})!;
+        Assert.Null(gate.BeginOrigin(expiry, unrelated, "session", _ => {}));
+        var count = 0;
+        Parallel.For(0, 100, _ => { using var origin = gate.BeginOrigin(expiry, command, "session", _ => {}); if (origin is not null) Interlocked.Increment(ref count); });
+        Assert.Equal(1, count);
+        clock.Milliseconds = 1000;
+        var current = gate.BeginCommand(clock.Expiry, "new", _ => {})!;
+        gate.BindSession(clock.Expiry, current, "session");
+        Assert.Null(gate.BeginOrigin(clock.Expiry, command, "session", _ => {}));
+        using var next = gate.BeginOrigin(clock.Expiry, current, "session", _ => {});
+        Assert.NotNull(next);
+    }
+
+    [Fact]
     public void RearmingCannotAttachAnOldCommandToNewWindow()
     {
         var clock = new Clock(); var gate = new PlaybackDiagnosticCapture(clock); var first = gate.BeginCommand(clock.Expiry, "first", _ => {})!;

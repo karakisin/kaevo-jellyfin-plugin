@@ -12,7 +12,7 @@ internal sealed class PlaybackDiagnosticCapture(TimeProvider? clock = null)
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly object _sync = new();
     private long _window, _armed;
-    private bool _commandUsed;
+    private bool _commandUsed, _originUsed;
     private PlaybackDiagnosticTrace? _commandTrace;
     private int _mediaUsed;
     private string? _session, _claimedRequest;
@@ -29,7 +29,7 @@ internal sealed class PlaybackDiagnosticCapture(TimeProvider? clock = null)
         if (_window != expires)
         {
             _window = expires; _armed = Timestamp; _commandUsed = false;
-            _mediaUsed = 0; _session = null; _claimedRequest = null; _commandTrace = null;
+            _originUsed = false; _mediaUsed = 0; _session = null; _claimedRequest = null; _commandTrace = null;
         }
         return _clock.GetElapsedTime(_armed, Timestamp) < TimeSpan.FromMinutes(5);
     }
@@ -64,6 +64,16 @@ internal sealed class PlaybackDiagnosticCapture(TimeProvider? clock = null)
         lock (_sync) { if (Open(expires) && ReferenceEquals(_commandTrace, trace) && _session is null) _session = Tag(session); }
     }
 
+    public PlaybackDiagnosticTrace? BeginOrigin(long expires, PlaybackDiagnosticTrace command, string session, Action<string> sink)
+    {
+        lock (_sync)
+        {
+            if (!Open(expires) || !ReferenceEquals(_commandTrace, command) || _session != Tag(session) || _originUsed) return null;
+            _originUsed = true;
+            return new PlaybackDiagnosticTrace(_clock, "origin", Tag(session), sink, Timestamp);
+        }
+    }
+
     public PlaybackDiagnosticTrace? BeginMedia(long expires, string session, string requestId, Action<string> sink, long received)
     {
         lock (_sync)
@@ -79,9 +89,10 @@ internal enum PlaybackDiagnosticStep
 {
     ClaimReceived, CommandReceived, SecretsReady, ExecuteComplete, CompletionSent,
     UpstreamRequest, UpstreamHeaders, UpstreamBody, UpstreamParsed,
-    Authorized, HeadersSent, FirstBodyRead, FirstBodySent, PlaylistRewritten, Finished
+    Authorized, HeadersSent, FirstBodyRead, FirstBodySent, PlaylistRewritten, OriginStarted, OriginSegmentSelected, EncoderJobObserved, EncoderProcessObserved,
+    EncoderProgressObserved, SegmentFileObserved, NextSegmentFileObserved, EncoderExited, ObservationUnavailable, Finished
 }
-internal enum PlaybackDiagnosticResource { None, Authority, PlaybackInfo, Trickplay, MediaSegments, Other }
+internal enum PlaybackDiagnosticResource { None, Authority, PlaybackInfo, Trickplay, MediaSegments, Other, OriginMaster, OriginMedia, OriginSegment }
 internal enum PlaybackDiagnosticOutcome { Complete, Cancelled, Http, Invalid, Socket, Other }
 
 internal sealed class PlaybackDiagnosticTrace(TimeProvider clock, string kind, string requestTag, Action<string> sink, long started) : IDisposable

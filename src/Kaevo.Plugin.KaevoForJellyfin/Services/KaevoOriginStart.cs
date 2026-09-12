@@ -21,7 +21,8 @@ internal sealed class KaevoOriginStart
 
     internal bool TryStart(PlaybackOriginScope scope, long deadline, Func<string, CancellationToken, Task<string>> playlist,
         Func<string, CancellationToken, Task> segment, Func<Task> stop, Action<string> diagnostic,
-        CancellationToken lifetime, DateTimeOffset? now = null)
+        CancellationToken lifetime, DateTimeOffset? now = null,
+        Func<PlaybackDiagnosticTrace?>? beginCapture = null, Func<int, OriginEncoderSnapshot?>? snapshot = null)
     {
         var instant = now ?? DateTimeOffset.UtcNow;
         if (deadline <= instant.ToUnixTimeSeconds() || deadline > instant.ToUnixTimeSeconds() + 30
@@ -37,34 +38,56 @@ internal sealed class KaevoOriginStart
         }
         // Tracked, bounded by both the authenticated claim deadline and the
         // connector lifetime. Completion/cleanup is owned by RunAsync.
-        _ = RunAsync(entry, remaining, playlist, segment, stop, diagnostic, lifetime);
+        PlaybackDiagnosticTrace? capture = null;
+        try { capture = beginCapture?.Invoke(); }
+        catch { } // Diagnostics cannot strand the admitted origin operation.
+        _ = RunAsync(entry, remaining, playlist, segment, stop, diagnostic, lifetime, capture, snapshot);
         return true;
     }
 
     private async Task RunAsync(Entry entry, TimeSpan remaining, Func<string, CancellationToken, Task<string>> playlist,
-        Func<string, CancellationToken, Task> segment, Func<Task> stop, Action<string> diagnostic, CancellationToken lifetime)
+        Func<string, CancellationToken, Task> segment, Func<Task> stop, Action<string> diagnostic, CancellationToken lifetime,
+        PlaybackDiagnosticTrace? capture, Func<int, OriginEncoderSnapshot?>? snapshot)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
         timeout.CancelAfter(remaining);
+        using var observation = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+        using var ownedCapture = capture;
+        Task observer = Task.CompletedTask;
         try
         {
+            capture?.Mark(PlaybackDiagnosticStep.OriginStarted);
             diagnostic("started");
             var masterPath = entry.Scope.MasterPath;
+            capture?.Mark(PlaybackDiagnosticStep.UpstreamRequest, PlaybackDiagnosticResource.OriginMaster);
             var master = await playlist(masterPath, timeout.Token).ConfigureAwait(false);
+            capture?.Mark(PlaybackDiagnosticStep.UpstreamBody, PlaybackDiagnosticResource.OriginMaster);
             var mediaPath = entry.Scope.FirstVariant(master, masterPath);
+            capture?.Mark(PlaybackDiagnosticStep.UpstreamRequest, PlaybackDiagnosticResource.OriginMedia);
             var media = await playlist(mediaPath, timeout.Token).ConfigureAwait(false);
+            capture?.Mark(PlaybackDiagnosticStep.UpstreamBody, PlaybackDiagnosticResource.OriginMedia);
             var segmentPath = entry.Scope.ResumeSegment(media, mediaPath);
             lock (_gate) entry.Segment = segmentPath.Split('?', 2)[0];
+            capture?.Mark(PlaybackDiagnosticStep.OriginSegmentSelected);
+            if (capture is not null && snapshot is not null
+                && int.TryParse(Path.GetFileNameWithoutExtension(entry.Segment), NumberStyles.None,
+                    CultureInfo.InvariantCulture, out var index) && index is >= 0 and < int.MaxValue)
+                observer = Task.Run(() => OriginEncoderObservation.ObserveAsync(
+                    () => snapshot(index), capture, observation.Token));
             // Only a two-byte local read. Normal Jellyfin HLS files are reused
             // by AVPlayer; no complete movie or cloud prefetch is created.
+            capture?.Mark(PlaybackDiagnosticStep.UpstreamRequest, PlaybackDiagnosticResource.OriginSegment);
             await segment(segmentPath, timeout.Token).ConfigureAwait(false);
+            capture?.Mark(PlaybackDiagnosticStep.UpstreamBody, PlaybackDiagnosticResource.OriginSegment);
+            observation.Cancel();
             diagnostic("segment_ready");
             await entry.Handoff.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) { diagnostic("cancelled"); }
-        catch (Exception) { diagnostic("unavailable"); }
+        catch (OperationCanceledException) { if (capture is not null) capture.Outcome = PlaybackDiagnosticOutcome.Cancelled; diagnostic("cancelled"); }
+        catch (Exception exception) { capture?.Fail(exception); diagnostic("unavailable"); }
         finally
         {
+            observation.Cancel();
             bool promoted;
             lock (_gate)
             {
@@ -83,6 +106,7 @@ internal sealed class KaevoOriginStart
             finally
             {
                 lock (_gate) _pending.Remove(entry.Scope.PlaySessionId);
+                await observer.ConfigureAwait(false);
             }
         }
     }

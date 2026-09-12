@@ -127,6 +127,34 @@ public sealed class OriginStartTests
     }
 
     [Fact]
+    public async Task DisabledCaptureDoesNotReadEncoderAndRejectedAdmissionDoesNotOpenCapture()
+    {
+        var owner = new KaevoOriginStart(); using var lifetime = new CancellationTokenSource();
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var captures = 0;
+        Assert.True(owner.TryStart(Scope(), Deadline, async (_, token) =>
+        { await Task.Delay(Timeout.InfiniteTimeSpan, token); return ""; }, (_, _) => Task.CompletedTask,
+            () => { stopped.TrySetResult(); return Task.CompletedTask; }, _ => {}, lifetime.Token,
+            beginCapture: () => { captures++; return null; }, snapshot: _ => throw new Exception("disabled")));
+        Assert.False(owner.TryStart(Scope(), Deadline, Playlist, (_, _) => Task.CompletedTask,
+            () => Task.CompletedTask, _ => {}, lifetime.Token,
+            beginCapture: () => throw new Exception("duplicate capture")));
+        Assert.Equal(1, captures);
+        lifetime.Cancel(); await stopped.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task CaptureCreationFailureStillCleansUpTheAdmittedJob()
+    {
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.True(new KaevoOriginStart().TryStart(Scope(), Deadline,
+            (_, _) => throw new InvalidOperationException("origin unavailable"), (_, _) => Task.CompletedTask,
+            () => { stopped.TrySetResult(); return Task.CompletedTask; }, _ => {}, default,
+            beginCapture: () => throw new IOException("capture unavailable")));
+        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
     public void RecipeKeepsExistingQualityAndConfiguredHardwareSelection()
     {
         var query = Scope().Rendition();
