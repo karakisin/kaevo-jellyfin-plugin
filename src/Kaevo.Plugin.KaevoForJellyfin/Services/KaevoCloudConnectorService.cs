@@ -27,7 +27,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     "playback_tunnel_v1", "direct_play", "hls_remux", "hls_transcode",
                     "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
                     "local_provider_configuration_v1", "connector_control_push_v2", "profile_artwork_v1",
-                    "profile_media_access_v1", "profile_media_access_owner_v1", FirebasePlaybackMailbox.Capability
+                    "profile_media_access_v1", "profile_media_access_owner_v1", FirebasePlaybackMailbox.Capability,
+                    "account_lifecycle_verification_recovery_v1"
                 };
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
@@ -710,6 +711,12 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         string? pairedJellyfinUserId,
         CloudRequest request)
     {
+        // Destructive lifecycle commands must prove an existing local binding.
+        // Recreating a removed binding from the incoming claim would bypass
+        // that check and make a lost verification reply look like new authority.
+        var operation = request.Operation ?? request.Path.Replace("/commands/", string.Empty, StringComparison.Ordinal);
+        if (IsAccountLifecycleV2Operation(operation))
+            return (bindingsJson ?? string.Empty, false);
         var binding = request.ProfileProviderBinding;
         if (binding is null)
         {

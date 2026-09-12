@@ -28,7 +28,8 @@ public sealed partial class KaevoCloudConnectorService
         PluginConfiguration configuration,
         CloudRequest request,
         string operation,
-        IReadOnlyDictionary<string, JsonElement> parameters)
+        IReadOnlyDictionary<string, JsonElement> parameters,
+        KaevoAccountDeletionVerificationStore? verificationStore = null)
     {
         if (!IsAccountLifecycleV2Operation(operation))
         {
@@ -45,7 +46,9 @@ public sealed partial class KaevoCloudConnectorService
             null,
             "accountLifecycleV2BindingIdInvalid");
         var profileId = request.ProfileId;
-        if (string.IsNullOrWhiteSpace(profileId) || profileId.Length > 256)
+        if (string.IsNullOrWhiteSpace(profileId) || profileId.Length > 256
+            || (parameters.ContainsKey("profile_id") && RequireString(parameters, "profile_id",
+                "accountLifecycleV2ProfileIdInvalid") != profileId))
         {
             throw new InvalidOperationException("accountLifecycleV2ProfileIdInvalid");
         }
@@ -58,10 +61,6 @@ public sealed partial class KaevoCloudConnectorService
             throw new InvalidOperationException("accountLifecycleV2ProviderBindingInvalid");
         }
 
-        var boundJellyfinUserId = RequireBoundJellyfinUserId(
-            configuration,
-            profileId,
-            "accountLifecycleV2ProviderBindingMissing");
         var requestedJellyfinUserId = RequireString(
             parameters,
             "jellyfin_user_id",
@@ -69,11 +68,10 @@ public sealed partial class KaevoCloudConnectorService
         if (!KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
                 requestedJellyfinUserId,
                 out var normalizedRequestedUserId)
-            || !string.Equals(boundJellyfinUserId, normalizedRequestedUserId, StringComparison.Ordinal)
             || !KaevoProfileJellyfinBindingStore.TryNormalizeJellyfinUserId(
                 binding.ProviderUserId,
                 out var normalizedAuthoritativeUserId)
-            || !string.Equals(boundJellyfinUserId, normalizedAuthoritativeUserId, StringComparison.Ordinal))
+            || !string.Equals(normalizedRequestedUserId, normalizedAuthoritativeUserId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("accountLifecycleV2ProviderIdentityMismatch");
         }
@@ -90,13 +88,25 @@ public sealed partial class KaevoCloudConnectorService
             seerrUserId = parsedSeerrUserId;
         }
 
-        return new(
+        var context = new AccountLifecycleV2CommandContext(
             operationId,
             lifecycleBindingId,
             profileId,
             configuration.ConnectorId,
-            boundJellyfinUserId,
+            normalizedRequestedUserId,
             seerrUserId);
+        if (KaevoProfileJellyfinBindingStore.TryResolve(configuration, profileId, out var boundUser))
+        {
+            if (boundUser != context.JellyfinUserId)
+                throw new InvalidOperationException("accountLifecycleV2ProviderIdentityMismatch");
+        }
+        else if (operation != LifecycleV2JellyfinVerify
+            || KaevoProfileJellyfinBindingStore.ProfileBindingState(configuration) != "ready"
+            || verificationStore?.Contains(context) != true)
+        {
+            throw new InvalidOperationException("accountLifecycleV2ProviderBindingMissing");
+        }
+        return context;
     }
 
     private async Task<CommandResult> ExecuteAccountLifecycleV2CommandAsync(
@@ -107,7 +117,9 @@ public sealed partial class KaevoCloudConnectorService
         IReadOnlyDictionary<string, JsonElement> parameters,
         CancellationToken cancellationToken)
     {
-        var context = ValidateAccountLifecycleV2Command(configuration, request, operation, parameters);
+        var verificationStore = new KaevoAccountDeletionVerificationStore(
+            Path.Combine(_lifecycleStore.DirectoryPath, "account-deletion-verifications"));
+        var context = ValidateAccountLifecycleV2Command(configuration, request, operation, parameters, verificationStore);
 
         if (operation == LifecycleV2SeerrDelete)
         {
@@ -173,22 +185,9 @@ public sealed partial class KaevoCloudConnectorService
                 false);
         }
 
-        if (occurrences != 0)
-        {
-            throw new InvalidOperationException("accountLifecycleV2JellyfinIdentityStillPresent");
-        }
-
-        lock (ProfileBindingSync)
-        {
-            if (!KaevoProfileJellyfinBindingStore.TryUnbind(
-                    configuration,
-                    context.ProfileId,
-                    context.JellyfinUserId))
-            {
-                throw new InvalidOperationException("accountLifecycleV2ProviderBindingConflict");
-            }
-            KaevoPlugin.Instance?.SaveConfiguration();
-        }
+        CompleteAccountLifecycleV2Unbind(RuntimeConfiguration(configuration), request, parameters,
+            verificationStore, occurrences, () =>
+                (KaevoPlugin.Instance ?? throw new InvalidOperationException("pluginConfigurationUnavailable")).SaveConfiguration());
         return CompleteAccountLifecycleV2Command(
             request,
             operation,
@@ -196,6 +195,37 @@ public sealed partial class KaevoCloudConnectorService
             "jellyfin",
             "absence_confirmed",
             true);
+    }
+
+    internal static void CompleteAccountLifecycleV2Unbind(
+        PluginConfiguration configuration, CloudRequest request,
+        IReadOnlyDictionary<string, JsonElement> parameters,
+        KaevoAccountDeletionVerificationStore verificationStore,
+        int observedOccurrences, Action saveConfiguration)
+    {
+        if (observedOccurrences != 0)
+            throw new InvalidOperationException("accountLifecycleV2JellyfinIdentityStillPresent");
+        lock (ProfileBindingSync)
+        {
+            var context = ValidateAccountLifecycleV2Command(configuration, request,
+                LifecycleV2JellyfinVerify, parameters, verificationStore);
+            var previous = configuration.ProfileJellyfinBindingsJson;
+            // Save the recovery record before the local authority can disappear.
+            // A failed save leaves the original binding available for a new read.
+            verificationStore.RecordBeforeUnbind(context);
+            try
+            {
+                if (!KaevoProfileJellyfinBindingStore.TryUnbind(configuration,
+                        context.ProfileId, context.JellyfinUserId))
+                    throw new InvalidOperationException("accountLifecycleV2ProviderBindingConflict");
+                saveConfiguration();
+            }
+            catch
+            {
+                configuration.ProfileJellyfinBindingsJson = previous;
+                throw;
+            }
+        }
     }
 
     private static CommandResult CompleteAccountLifecycleV2Command(
