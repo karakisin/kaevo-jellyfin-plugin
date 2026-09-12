@@ -23,7 +23,7 @@ internal sealed class KaevoOriginStart
         Func<string, CancellationToken, Task> segment, Func<Task> stop, Action<string> diagnostic,
         CancellationToken lifetime, DateTimeOffset? now = null,
         Func<PlaybackDiagnosticTrace?>? beginCapture = null, Func<int, OriginEncoderSnapshot?>? snapshot = null,
-        IDisposable? observationResource = null)
+        IDisposable? observationResource = null, Func<IDisposable?>? beginProducerPlan = null)
     {
         var instant = now ?? DateTimeOffset.UtcNow;
         if (deadline <= instant.ToUnixTimeSeconds() || deadline > instant.ToUnixTimeSeconds() + 30
@@ -42,19 +42,23 @@ internal sealed class KaevoOriginStart
         PlaybackDiagnosticTrace? capture = null;
         try { capture = beginCapture?.Invoke(); }
         catch { } // Diagnostics cannot strand the admitted origin operation.
-        _ = RunAsync(entry, remaining, playlist, segment, stop, diagnostic, lifetime, capture, snapshot, observationResource);
+        IDisposable? producerPlan = null;
+        try { producerPlan = beginProducerPlan?.Invoke(); }
+        catch { } // An unavailable planner leaves Jellyfin's original command intact.
+        _ = RunAsync(entry, remaining, playlist, segment, stop, diagnostic, lifetime, capture, snapshot, observationResource, producerPlan);
         return true;
     }
 
     private async Task RunAsync(Entry entry, TimeSpan remaining, Func<string, CancellationToken, Task<string>> playlist,
         Func<string, CancellationToken, Task> segment, Func<Task> stop, Action<string> diagnostic, CancellationToken lifetime,
-        PlaybackDiagnosticTrace? capture, Func<int, OriginEncoderSnapshot?>? snapshot, IDisposable? observationResource)
+        PlaybackDiagnosticTrace? capture, Func<int, OriginEncoderSnapshot?>? snapshot, IDisposable? observationResource, IDisposable? producerPlan)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
         timeout.CancelAfter(remaining);
         using var observation = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
         using var ownedCapture = capture;
         using var ownedObservationResource = observationResource;
+        using var ownedProducerPlan = producerPlan;
         Task observer = Task.CompletedTask;
         try
         {

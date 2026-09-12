@@ -3199,7 +3199,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 beginCapture: () => originCapture = commandCapture is null ? null : _playbackDiagnostics.BeginOrigin(
                     PlaybackDiagnosticExpiry(configuration), commandCapture, playSessionId, WritePlaybackDiagnostic),
                 snapshot: index => OriginEncoderObservation.Read(_transcodeManager.GetTranscodingJob(playSessionId), originScope, index, originLog),
-                observationResource: originLog))
+                observationResource: originLog,
+                beginProducerPlan: () => (_transcodeManager as KaevoHardwareTranscodeManager)?.Admit(
+                    originScope, jellyfinUserId, request.OriginStartExpiresAt.Value, cancellationToken,
+                    () => _logger.LogInformation("Kaevo hardware plan omitted_unused_opencl=true"))))
                 originStartTicks = positionTicks;
             else originLog?.Dispose();
         }

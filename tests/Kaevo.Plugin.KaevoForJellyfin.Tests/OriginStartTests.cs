@@ -155,6 +155,35 @@ public sealed class OriginStartTests
     }
 
     [Fact]
+    public async Task HardwarePlanLeaseIsOnlyOpenedForAdmissionAndReleasedAfterCancelledJobCleanup()
+    {
+        var owner = new KaevoOriginStart(); using var lifetime = new CancellationTokenSource();
+        var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopped = false; var opened = 0;
+        Func<IDisposable?> plan = () => { opened++; return new TestLease(() => { Assert.True(stopped); released.SetResult(); }); };
+        Assert.True(owner.TryStart(Scope(), Deadline, async (_, token) =>
+        { await Task.Delay(Timeout.InfiniteTimeSpan, token); return ""; }, (_, _) => Task.CompletedTask,
+            () => { stopped = true; return Task.CompletedTask; }, _ => { }, lifetime.Token, beginProducerPlan: plan));
+        Assert.False(owner.TryStart(Scope(), Deadline, Playlist, (_, _) => Task.CompletedTask,
+            () => Task.CompletedTask, _ => { }, lifetime.Token, beginProducerPlan: plan));
+        Assert.Equal(1, opened);
+        lifetime.Cancel(); await released.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task HardwarePlanFailureStillUsesOriginalOriginAndCleansUp()
+    {
+        var read = false; var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.True(new KaevoOriginStart().TryStart(Scope(), Deadline,
+            (_, _) => { read = true; throw new IOException("original read failed"); }, (_, _) => Task.CompletedTask,
+            () => { stopped.SetResult(); return Task.CompletedTask; }, _ => { }, default,
+            beginProducerPlan: () => throw new IOException("planner unavailable")));
+        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(2)); Assert.True(read);
+    }
+
+    private sealed class TestLease(Action release) : IDisposable { public void Dispose() => release(); }
+
+    [Fact]
     public void RecipeKeepsExistingQualityAndConfiguredHardwareSelection()
     {
         var query = Scope().Rendition();

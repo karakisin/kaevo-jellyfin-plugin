@@ -9,6 +9,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
 {
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
+        KaevoHardwareTranscodeManager.Register(serviceCollection);
         serviceCollection.AddSingleton<KaevoCloudState>();
         serviceCollection.AddSingleton<KaevoSecretStore>();
         serviceCollection.AddSingleton<KaevoJellyfinApiKeyProvisioner>();
