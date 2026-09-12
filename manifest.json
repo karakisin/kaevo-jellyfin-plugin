@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.49.0",
+        "changelog": "Delivers explicit Play commands and signed results through the existing Firebase connection, avoiding separate HTTP claim and completion calls. Preserves hardware playback, profiles, resume, Family Sync and security. Passed 690 plugin tests and isolated Jellyfin 10.11.11 compatibility checks. Physical 2–4 second startup is not yet verified.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.49/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "f6e42e6075319588e4e1175d17e96c80",
+        "timestamp": "2026-09-12T12:02:20Z"
+      },
+      {
         "version": "0.3.48.0",
         "changelog": "Skips a verified unused OpenCL initialization for exact Kaevo Intel VAAPI/QSV HDR playback jobs. Preserves encoder, quality, native player, resume and authorization; other pipelines stay unchanged. Passed675tests and isolated Jellyfin10.11.11 checks. Physical speed improvement is not yet verified.",
         "targetAbi": "10.11.0.0",
@@ -18,7 +26,7 @@
       },
       {
         "version": "0.3.47.0",
-        "changelog": "Adds bounded, opt-in observations of the exact FFmpeg job input, hardware-driver and output startup phases. No encoder, quality, player, authorization or Firebase capacity changes. Diagnostic release; the 2\u20134 second playback target remains unmet.",
+        "changelog": "Adds bounded, opt-in observations of the exact FFmpeg job input, hardware-driver and output startup phases. No encoder, quality, player, authorization or Firebase capacity changes. Diagnostic release; the 2–4 second playback target remains unmet.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.47/Kaevo.Plugin.KaevoForJellyfin.zip",
         "checksum": "116370d30c1381083c23ca6651c63cff",
@@ -26,7 +34,7 @@
       },
       {
         "version": "0.3.46.0",
-        "changelog": "Adds opt-in, bounded encoder startup timing for one exact playback session. Measures job/process progress and initial segment availability without changing quality, playback authorization or Firebase capacity. Diagnostic update; 2\u20134 second startup target remains unmet.",
+        "changelog": "Adds opt-in, bounded encoder startup timing for one exact playback session. Measures job/process progress and initial segment availability without changing quality, playback authorization or Firebase capacity. Diagnostic update; 2–4 second startup target remains unmet.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.46/Kaevo.Plugin.KaevoForJellyfin.zip",
         "checksum": "f2a2f01d3edd0c1e3a1ca2a22ee4a2cf",
@@ -34,7 +42,7 @@
       },
       {
         "version": "0.3.45.0",
-        "changelog": "Starts the exact on-demand Jellyfin hardware stream during the authorized Play handoff. Keeps native playback, direct-play priority, quality, resume and profile authorization. Requires app build 207 or later. Includes bounded abandoned-start cleanup. Physical 2\u20134 second startup acceptance remains pending.",
+        "changelog": "Starts the exact on-demand Jellyfin hardware stream during the authorized Play handoff. Keeps native playback, direct-play priority, quality, resume and profile authorization. Requires app build 207 or later. Includes bounded abandoned-start cleanup. Physical 2–4 second startup acceptance remains pending.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.45/Kaevo.Plugin.KaevoForJellyfin.zip",
         "checksum": "bde791ecbe44dead4fe11602f2068159",
@@ -42,7 +50,7 @@
       },
       {
         "version": "0.3.44.0",
-        "changelog": "Verify the household owner\u2019s saved Seerr connection during Repair Media Access; preserve exact member accounts and provider permissions.",
+        "changelog": "Verify the household owner’s saved Seerr connection during Repair Media Access; preserve exact member accounts and provider permissions.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.44/Kaevo.Plugin.KaevoForJellyfin.zip",
         "checksum": "94d697fa109822eb8afd0cecc38da972",
