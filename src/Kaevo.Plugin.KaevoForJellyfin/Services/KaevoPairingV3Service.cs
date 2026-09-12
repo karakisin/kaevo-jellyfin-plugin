@@ -377,6 +377,23 @@ public sealed partial class KaevoPairingV3Service
             : string.Empty;
     }, cancellationToken);
 
+    internal async Task<(byte[] Body, Dictionary<string, string> Headers)> PrepareFirebaseMailboxResultAsync(
+        string requestId, string operation, object body, CancellationToken cancellationToken)
+    {
+        if (!FirebaseFirestoreControlListener.IsRequestId(requestId) || operation is not ("complete" or "fail"))
+            throw new InvalidOperationException("firebasePlaybackMailboxInvalid");
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(body, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        if (bytes.Length > 131072) throw new InvalidOperationException("firebasePlaybackMailboxInvalid");
+        var proof = await PrepareConnectorRequestDigestAsync("POST", $"/v3/remote-requests/{requestId}/{operation}",
+            KaevoPairingV3Crypto.Base64Url(SHA256.HashData(bytes)), cancellationToken, firebaseTarget: true).ConfigureAwait(false);
+        return (bytes, new Dictionary<string, string>
+        {
+            ["x-kaevo-plugin-key-id"] = proof.PluginKeyId, ["x-kaevo-plugin-timestamp"] = proof.Timestamp,
+            ["x-kaevo-plugin-nonce"] = proof.Nonce, ["x-kaevo-plugin-signature-version"] = "3",
+            ["x-kaevo-plugin-signature"] = proof.Signature,
+        });
+    }
+
     internal async Task<HttpResponseMessage> SendConnectorRequestAsync(
         Uri cloudBase,
         HttpMethod method,

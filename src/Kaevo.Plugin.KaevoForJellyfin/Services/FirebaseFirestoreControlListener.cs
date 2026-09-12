@@ -16,13 +16,13 @@ internal static class FirebaseFirestoreControlListener
     {
         Endpoint = "firestore.googleapis.com:443",
         ChannelCredentials = new SslCredentials(), // Explicit TLS, never ADC.
-        GrpcChannelOptions = GrpcChannelOptions.Empty.WithMaxReceiveMessageSize(32768),
+        GrpcChannelOptions = GrpcChannelOptions.Empty.WithMaxReceiveMessageSize(131072),
     }.Build();
 
     internal static async IAsyncEnumerable<string> ReadAsync(
         FirestoreClient client, string project, string channel, string epoch,
         string idToken, DateTimeOffset leaseExpiry,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default, Action<Document>? acceptSnapshot = null)
     {
         var remaining = leaseExpiry - DateTimeOffset.UtcNow;
         if (project is not (DevelopmentProject or DemoProject)
@@ -97,7 +97,9 @@ internal static class FirebaseFirestoreControlListener
                     || change.TargetIds.Count != 1 || change.TargetIds[0] != 1 || change.RemovedTargetIds.Count != 0)
                     throw Failure("firebaseControlSignalInvalid");
                 // Validate the entire snapshot before exposing even its first ID.
-                foreach (var id in state.Accept(change.Document))
+                var added = state.Accept(change.Document);
+                acceptSnapshot?.Invoke(change.Document);
+                foreach (var id in added)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     if (deadline.IsCancellationRequested || DateTimeOffset.UtcNow >= leaseExpiry)
@@ -140,10 +142,12 @@ internal sealed class FirebaseFirestoreSignalState(string path, string epoch)
 {
     private long revision = -1;
     private string[] previous = [];
+    private Dictionary<string, string> previousCommands = new(StringComparer.Ordinal);
 
     internal IReadOnlyList<string> Accept(Document document)
     {
-        if (document.Name != path || document.Fields.Count != 3
+        if (document.Name != path || document.Fields.Count is < 3 or > 4
+            || document.Fields.Keys.Any(k => k is not ("epoch" or "revision" or "request_ids" or "playback_commands"))
             || !document.Fields.TryGetValue("epoch", out var actualEpoch)
             || actualEpoch.ValueTypeCase != Value.ValueTypeOneofCase.StringValue || actualEpoch.StringValue != epoch
             || !document.Fields.TryGetValue("revision", out var version)
@@ -154,12 +158,21 @@ internal sealed class FirebaseFirestoreSignalState(string path, string epoch)
             || ids.ArrayValue.Values.Any(id => id.ValueTypeCase != Value.ValueTypeOneofCase.StringValue
                 || !FirebaseFirestoreControlListener.IsRequestId(id.StringValue)))
             throw FirebaseFirestoreControlListener.Failure("firebaseControlSignalInvalid");
+        var channel = path.Split('/').Last();
+        FirebasePlaybackMailbox.Parse(document, channel, epoch);
+        var commandValues = document.Fields.TryGetValue("playback_commands", out var payload)
+            ? payload.MapValue.Fields.ToDictionary(p => p.Key, p => p.Value.StringValue, StringComparer.Ordinal)
+            : new Dictionary<string, string>(StringComparer.Ordinal);
+        if (version.IntegerValue == revision && (previousCommands.Count != commandValues.Count
+            || previousCommands.Any(p => !commandValues.TryGetValue(p.Key, out var value) || value != p.Value)))
+            throw FirebaseFirestoreControlListener.Failure("firebaseControlSignalInvalid");
         var current = ids.ArrayValue.Values.Select(id => id.StringValue).ToArray();
         if (current.Distinct(StringComparer.Ordinal).Count() != current.Length
             || (version.IntegerValue == revision && !previous.SequenceEqual(current, StringComparer.Ordinal)))
             throw FirebaseFirestoreControlListener.Failure("firebaseControlSignalInvalid");
         var added = current.Except(previous, StringComparer.Ordinal).ToArray();
         previous = current;
+        previousCommands = commandValues;
         revision = version.IntegerValue;
         return added;
     }

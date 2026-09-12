@@ -31,12 +31,14 @@ public sealed partial class KaevoCloudConnectorService
         if (!_pairingV3Active) throw new InvalidOperationException("lifecycle_upgrade_required");
         using var exchange = FirebaseControlTokenExchange.CreateClient();
         var client = FirebaseFirestoreControlListener.CreateDevelopmentClient();
+        var mailbox = new FirebasePlaybackMailbox(client, _pairingV3);
         await RunFirebaseControlSupervisorCoreAsync(configuration, secrets,
             FirebaseControlAdmission.Parse,
             (admission, token) => FirebaseControlTokenExchange.ExchangeAsync(exchange, firebaseApiKey, admission, token),
             (admission, idToken, token) => FirebaseFirestoreControlListener.ReadAsync(client,
                 FirebaseFirestoreControlListener.DevelopmentProject, admission.Channel, admission.Epoch,
-                idToken, admission.ExpiresAt, token), cancellationToken).ConfigureAwait(false);
+                idToken, admission.ExpiresAt, token, document => mailbox.Accept(document, admission, idToken)),
+            cancellationToken, mailbox).ConfigureAwait(false);
     }
 
     // Transport dependencies are explicit so the same owner can be exercised
@@ -47,9 +49,10 @@ public sealed partial class KaevoCloudConnectorService
         KaevoConnectorSecrets secrets, Func<JsonElement, FirebaseControlAdmission> parseAdmission,
         Func<FirebaseControlAdmission, CancellationToken, Task<string>> exchangeToken,
         Func<FirebaseControlAdmission, string, CancellationToken, IAsyncEnumerable<string>> listen,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, FirebasePlaybackMailbox? mailbox = null)
     {
         if (!_pairingV3Active) throw new InvalidOperationException("lifecycle_upgrade_required");
+        var mailboxClaims = new System.Collections.Concurrent.ConcurrentDictionary<string, FirebasePlaybackMailbox.Delivery>();
         using var owner = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         string currentToken = string.Empty;
         FirebaseControlAdmission? currentAdmission = null;
@@ -136,8 +139,23 @@ public sealed partial class KaevoCloudConnectorService
             }
         }
         var tasks = new List<Task> { PumpAsync(), HeartbeatsAsync(), FirebaseControlDispatch.RunAsync(commands.Reader.ReadAllAsync(owner.Token),
-            (id, token) => ClaimExactAsync(configuration, secrets, id, token),
-            (request, token) => HandleClaimAsync(configuration, secrets, request, token),
+            async (id, token) =>
+            {
+                var direct = mailbox?.Take(id);
+                if (direct is null) return await ClaimExactAsync(configuration, secrets, id, token).ConfigureAwait(false);
+                if (direct.Request.ProfileProviderBinding?.ConnectorId != configuration.ConnectorId)
+                    throw new InvalidOperationException("firebasePlaybackMailboxScopeMismatch");
+                _playbackDiagnostics.RememberClaim(PlaybackDiagnosticExpiry(configuration), id, _playbackDiagnostics.Timestamp);
+                mailboxClaims[id] = direct;
+                return direct.Request;
+            },
+            async (request, token) =>
+            {
+                if (mailbox is not null && mailboxClaims.TryRemove(request.RequestId, out var direct))
+                    await HandleClaimAsync(configuration, secrets, request, token,
+                        (operation, body, ct) => mailbox.DeliverAsync(direct, operation, body, ct)).ConfigureAwait(false);
+                else await HandleClaimAsync(configuration, secrets, request, token).ConfigureAwait(false);
+            },
             request => request.RequestId, ControlRequestConcurrency, cancellationToken) };
         if (configuration.RemotePlaybackEnabled)
             tasks.Add(RunFirebaseRelayDemandAsync(configuration, secrets,

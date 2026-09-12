@@ -27,7 +27,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     "playback_tunnel_v1", "direct_play", "hls_remux", "hls_transcode",
                     "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
                     "local_provider_configuration_v1", "connector_control_push_v2", "profile_artwork_v1",
-                    "profile_media_access_v1", "profile_media_access_owner_v1"
+                    "profile_media_access_v1", "profile_media_access_owner_v1", FirebasePlaybackMailbox.Capability
                 };
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
@@ -597,7 +597,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
         CloudRequest request,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, object, CancellationToken, Task<bool>>? deliverMailbox = null)
     {
         var stage = "prepare";
         PlaybackDiagnosticTrace? diagnostic = null;
@@ -628,13 +629,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 : await ExecuteCommandAsync(runtimeConfiguration, currentSecrets, request, cancellationToken).ConfigureAwait(false);
             diagnostic?.Mark(PlaybackDiagnosticStep.ExecuteComplete);
             stage = "deliver";
-            await SendCloudAsync<JsonElement>(
-                runtimeConfiguration,
-                secrets,
-                HttpMethod.Post,
-                $"/v1/remote-requests/{Uri.EscapeDataString(request.RequestId)}/complete",
-                new { connector_id = runtimeConfiguration.ConnectorId, http_status = result.Status, response = result.Payload, truncated = result.Truncated },
-                cancellationToken).ConfigureAwait(false);
+            var completion = new { connector_id = runtimeConfiguration.ConnectorId, http_status = result.Status, response = result.Payload, truncated = result.Truncated };
+            if (deliverMailbox is null || !await deliverMailbox("complete", completion, cancellationToken).ConfigureAwait(false))
+                await SendCloudAsync<JsonElement>(runtimeConfiguration, secrets, HttpMethod.Post,
+                    $"/v1/remote-requests/{Uri.EscapeDataString(request.RequestId)}/complete", completion,
+                    cancellationToken).ConfigureAwait(false);
             diagnostic?.Mark(PlaybackDiagnosticStep.CompletionSent);
         }
         catch (Exception exception)
@@ -644,13 +643,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             // provider bodies, exception messages or stack traces.
             if (request.Method == "GET" && request.Path == "/kaevo/internal/main-snapshot")
                 _logger.LogWarning("Kaevo Home snapshot failed Stage={Stage} Category={Category}", stage, FailureCategory(exception));
-            await SendCloudAsync<JsonElement>(
-                configuration,
-                secrets,
-                HttpMethod.Post,
-                $"/v1/remote-requests/{Uri.EscapeDataString(request.RequestId)}/fail",
-                new { connector_id = configuration.ConnectorId, message = SanitizeError(exception), details = new { } },
-                cancellationToken).ConfigureAwait(false);
+            var failure = new { connector_id = configuration.ConnectorId, message = SanitizeError(exception), details = new { } };
+            if (deliverMailbox is null || !await deliverMailbox("fail", failure, cancellationToken).ConfigureAwait(false))
+                await SendCloudAsync<JsonElement>(configuration, secrets, HttpMethod.Post,
+                    $"/v1/remote-requests/{Uri.EscapeDataString(request.RequestId)}/fail", failure,
+                    cancellationToken).ConfigureAwait(false);
         }
         finally
         {
