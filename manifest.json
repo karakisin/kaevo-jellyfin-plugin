@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.52.0",
+        "changelog": "Fixes audio-only playback by honoring Kaevo's protected forced-transcode recovery, adds item-scoped audio and video synchronization, and adds profile-authorized artwork batching for faster cover loading. Passed 715 plugin tests. Physical Evil S1E13 playback remains pending installation and device verification.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.52/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "180aac69c9055fe810cd812ce35dc9b6",
+        "timestamp": "2026-09-29T11:28:06Z"
+      },
+      {
         "version": "0.3.51.0",
         "changelog": "Hardens exact deletion verification after a lost completion reply or plugin restart. Fresh provider absence and current administrator permission remain required. Preserves the accepted Firebase playback, native player, resume and Family Sync. Passed 704 plugin tests and isolated Jellyfin 10.11.11 compatibility/provider-recovery checks. Firebase account deletion is not enabled by this release.",
         "targetAbi": "10.11.0.0",
