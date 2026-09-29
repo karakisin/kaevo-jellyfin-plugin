@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.54.0",
+        "changelog": "Prepares compatible fMP4 playback at the saved position during an authorized Play request, preserving video and scoped media checks. Passed 729 plugin tests. Physical two-second startup acceptance remains pending.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-09-29T23:38:58Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.54/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "c93384bbe3358f124ffee7a2fe20d78b"
+      },
+      {
         "version": "0.3.53.0",
         "changelog": "Repackages validated HEVC hev1 sources for Apple playback and preserves native codec capability during streaming negotiation to avoid unnecessary video encoding. Physical startup-speed acceptance remains pending.",
         "targetAbi": "10.11.0.0",
