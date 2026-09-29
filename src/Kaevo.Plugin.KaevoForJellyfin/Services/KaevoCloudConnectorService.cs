@@ -3181,14 +3181,15 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 ? parsedRuntime
                 : (long?)null;
         long? nativeOriginStartTicks = null;
-        if (mode == "transcode" && subtitleStreamIndex is null && maxBitrate > 192_000
+        if ((mode is "transcode" or "remux") && audioOffsetMilliseconds is null
+            && subtitleStreamIndex is null && maxBitrate > 192_000
             && request.OriginStartExpiresAt is > 0
             && parameters.TryGetValue("origin_start_ticks", out var originPosition)
             && originPosition.TryGetInt64(out var positionTicks) && positionTicks >= 0
             && runTimeTicks is > 0 && positionTicks < runTimeTicks)
         {
             var originScope = new PlaybackOriginScope(configuration.ConnectorId, deviceId, itemId,
-                mediaSourceId, playSessionId, maxBitrate, audioStreamIndex ?? tracks.SelectedAudioStreamIndex, positionTicks);
+                mediaSourceId, playSessionId, maxBitrate, audioStreamIndex ?? tracks.SelectedAudioStreamIndex, positionTicks, mode);
             var began = System.Diagnostics.Stopwatch.StartNew();
             var commandCapture = _playbackDiagnostic.Value;
             PlaybackDiagnosticTrace? originCapture = null;
@@ -3224,10 +3225,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     PlaybackDiagnosticExpiry(configuration), commandCapture, playSessionId, WritePlaybackDiagnostic),
                 snapshot: index => OriginEncoderObservation.Read(_transcodeManager.GetTranscodingJob(playSessionId), originScope, index, originLog),
                 observationResource: originLog,
-                beginProducerPlan: () => (_transcodeManager as KaevoHardwareTranscodeManager)?.Admit(
+                beginProducerPlan: () => mode != "transcode" ? null : (_transcodeManager as KaevoHardwareTranscodeManager)?.Admit(
                     originScope, jellyfinUserId, request.OriginStartExpiresAt.Value, cancellationToken,
                     () => _logger.LogInformation("Kaevo hardware plan omitted_unused_opencl=true"))))
-                nativeOriginStartTicks = positionTicks;
+            {
+                // Existing Cloud acknowledgement is transcode-only. Remux
+                // scheduling is best-effort and never bypasses native readiness.
+                if (mode == "transcode") nativeOriginStartTicks = positionTicks;
+            }
             else originLog?.Dispose();
         }
         return new CommandResult(200, JsonSerializer.SerializeToElement(new

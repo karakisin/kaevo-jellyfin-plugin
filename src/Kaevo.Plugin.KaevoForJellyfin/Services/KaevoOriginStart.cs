@@ -26,7 +26,8 @@ internal sealed class KaevoOriginStart
         IDisposable? observationResource = null, Func<IDisposable?>? beginProducerPlan = null)
     {
         var instant = now ?? DateTimeOffset.UtcNow;
-        if (deadline <= instant.ToUnixTimeSeconds() || deadline > instant.ToUnixTimeSeconds() + 30
+        if (scope.Mode is not ("transcode" or "remux")
+            || deadline <= instant.ToUnixTimeSeconds() || deadline > instant.ToUnixTimeSeconds() + 30
             || lifetime.IsCancellationRequested)
             return false;
         var remaining = DateTimeOffset.FromUnixTimeSeconds(deadline) - instant;
@@ -125,6 +126,7 @@ internal sealed class KaevoOriginStart
             if (!_pending.TryGetValue(grant.PlaybackSessionId, out var entry) || entry.Closing
                 || entry.Scope.ConnectorId != grant.ConnectorId || entry.Scope.DeviceId != grant.DeviceId
                 || entry.Scope.ItemId != grant.ItemId || entry.Scope.MediaSourceId != grant.MediaSourceId
+                || entry.Scope.Mode != grant.Mode
                 || entry.Segment != path.Split('?', 2)[0]) return;
             entry.Promoted = true;
             entry.Handoff.TrySetResult(true);
@@ -133,12 +135,12 @@ internal sealed class KaevoOriginStart
 }
 
 internal sealed record PlaybackOriginScope(string ConnectorId, string DeviceId, string ItemId,
-    string MediaSourceId, string PlaySessionId, int MaximumBitrate, int? AudioIndex, long PositionTicks)
+    string MediaSourceId, string PlaySessionId, int MaximumBitrate, int? AudioIndex, long PositionTicks, string Mode = "transcode")
 {
     internal string MasterPath => $"/Videos/{Uri.EscapeDataString(ItemId)}/master.m3u8?" + string.Join('&',
         Rendition().Select(pair => $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
 
-    // Same conservative native transcode recipe. The encoder implementation
+    // Match the selected delivery recipe. The encoder implementation
     // remains Jellyfin's configured QSV/VAAPI/NVENC/other supported backend.
     internal Dictionary<string, string> Rendition()
     {
@@ -153,6 +155,16 @@ internal sealed record PlaybackOriginScope(string ConnectorId, string DeviceId, 
             ["enableSubtitlesInManifest"] = "true", ["mediaSourceId"] = MediaSourceId,
             ["playSessionId"] = PlaySessionId, ["deviceId"] = DeviceId
         };
+        if (Mode == "remux")
+        {
+            query["videoCodec"] = "h264,hevc";
+            query["videoBitRate"] = Math.Max(MaximumBitrate - 192_000, 1).ToString(CultureInfo.InvariantCulture);
+            query["allowVideoStreamCopy"] = "true";
+            query["segmentContainer"] = "mp4";
+            query["segmentLength"] = "2";
+            query.Remove("maxWidth");
+            query.Remove("maxHeight");
+        }
         if (AudioIndex is not null) query["audioStreamIndex"] = AudioIndex.Value.ToString(CultureInfo.InvariantCulture);
         return query;
     }
@@ -174,11 +186,23 @@ internal sealed record PlaybackOriginScope(string ConnectorId, string DeviceId, 
         double? duration = null;
         var position = PositionTicks / 10_000_000.0;
         var lines = Lines(text);
-        // v1 handles simple full-timeline TS VOD only. Encrypted, mapped,
-        // discontinuous or ranged media remains the normal native path.
+        // Only full-timeline VOD is eligible. fMP4 has one scoped initialization
+        // map; requesting the resume segment produces that header alongside the
+        // correct segment, avoiding a separate encoder start at time zero.
         if (!lines.Contains("#EXT-X-ENDLIST") || lines.Any(line => line.StartsWith("#EXT-X-KEY:")
-            || line.StartsWith("#EXT-X-MAP:") || line.StartsWith("#EXT-X-BYTERANGE:")
+            || line.StartsWith("#EXT-X-BYTERANGE:")
             || line.StartsWith("#EXT-X-DISCONTINUITY"))) throw new InvalidOperationException("originPlaylistUnsupported");
+        var maps = lines.Where(line => line.StartsWith("#EXT-X-MAP:", StringComparison.Ordinal)).ToArray();
+        if (Mode == "remux")
+        {
+            const string prefix = "#EXT-X-MAP:URI=\"";
+            if (maps.Length != 1 || !maps[0].StartsWith(prefix, StringComparison.Ordinal)
+                || !maps[0].EndsWith('"')) throw new InvalidOperationException("originPlaylistUnsupported");
+            var map = maps[0][prefix.Length..^1];
+            if (map.Contains('"')) throw new InvalidOperationException("originPlaylistUnsupported");
+            _ = Child(map, source, ".mp4");
+        }
+        else if (maps.Length != 0) throw new InvalidOperationException("originPlaylistUnsupported");
         foreach (var line in lines)
         {
             if (line.StartsWith("#EXTINF:", StringComparison.Ordinal))
@@ -191,7 +215,7 @@ internal sealed record PlaybackOriginScope(string ConnectorId, string DeviceId, 
             else if (!line.StartsWith('#'))
             {
                 if (duration is null) throw new InvalidOperationException("originPlaylistInvalid");
-                var child = Child(line, source, ".ts");
+                var child = Child(line, source, Mode == "remux" ? ".mp4" : ".ts");
                 if (start <= position && position < start + duration.Value) return child;
                 start += duration.Value;
                 duration = null;
@@ -229,7 +253,7 @@ internal sealed record PlaybackOriginScope(string ConnectorId, string DeviceId, 
         // Reuse the same exact item/source/session/query bounds as real media
         // delivery. This is validation only, not a signed grant or receipt.
         var scope = new PlaybackGrant(ConnectorId, DeviceId, ItemId, MediaSourceId, PlaySessionId,
-            "transcode", MaximumBitrate, 0);
+            Mode, MaximumBitrate, 0);
         return KaevoPlaybackSecurity.Resolve(scope, "GET", resolved.AbsolutePath, query, null).PathAndQuery;
     }
 }

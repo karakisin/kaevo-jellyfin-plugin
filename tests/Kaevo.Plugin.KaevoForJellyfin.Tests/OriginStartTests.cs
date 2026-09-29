@@ -16,6 +16,66 @@ public sealed class OriginStartTests
     private static PlaybackGrant Grant(PlaybackOriginScope scope) => new(scope.ConnectorId, scope.DeviceId, scope.ItemId,
         scope.MediaSourceId, scope.PlaySessionId, "transcode", scope.MaximumBitrate, Deadline);
 
+    private const string RemuxMedia = "#EXTM3U\n#EXT-X-MAP:URI=\"hls1/main/-1.mp4?runtimeTicks=0&actualSegmentLengthTicks=0\"\n#EXTINF:2,\nhls1/main/0.mp4\n#EXTINF:2,\nhls1/main/1.mp4\n#EXTINF:2,\nhls1/main/2.mp4\n#EXT-X-ENDLIST\n";
+
+    [Fact]
+    public void RemuxStartsAtResumeSegmentAndPreservesSourceVideo()
+    {
+        var scope = Scope() with { Mode = "remux" };
+        var query = scope.Rendition();
+        Assert.Equal("h264,hevc", query["videoCodec"]);
+        Assert.Equal("39808000", query["videoBitRate"]);
+        Assert.Equal("true", query["allowVideoStreamCopy"]);
+        Assert.Equal("mp4", query["segmentContainer"]);
+        Assert.Equal("2", query["segmentLength"]);
+        Assert.Equal("1", query["minSegments"]);
+        Assert.False(query.ContainsKey("maxWidth"));
+        Assert.False(query.ContainsKey("maxHeight"));
+        Assert.Contains("/2.mp4?", scope.ResumeSegment(RemuxMedia, scope.MasterPath));
+    }
+
+    [Theory]
+    [InlineData("https://evil.invalid/init.mp4")]
+    [InlineData("//evil.invalid/init.mp4")]
+    [InlineData("../other/init.mp4")]
+    [InlineData("hls1/main/-1.mp4?playSessionId=other")]
+    [InlineData("hls1/main/-1.mp4?mediaSourceId=other")]
+    [InlineData("hls1/main/-1.mp4?token=secret")]
+    public void RemuxInitializationMustStayInsideTheExactPlaybackScope(string map)
+    {
+        var scope = Scope() with { Mode = "remux" };
+        Assert.Throws<InvalidOperationException>(() => scope.ResumeSegment(
+            RemuxMedia.Replace("hls1/main/-1.mp4?runtimeTicks=0&actualSegmentLengthTicks=0", map), scope.MasterPath));
+    }
+
+    [Fact]
+    public void RemuxRejectsAmbiguousMapsAndEncryptedOrRangedMedia()
+    {
+        var scope = Scope() with { Mode = "remux" };
+        foreach (var tag in new[] { "#EXT-X-MAP:URI=\"hls1/main/-1.mp4\"", "#EXT-X-KEY:METHOD=AES-128,URI=\"key\"", "#EXT-X-BYTERANGE:100@0", "#EXT-X-DISCONTINUITY" })
+            Assert.Throws<InvalidOperationException>(() => scope.ResumeSegment(RemuxMedia.Replace("#EXTM3U", "#EXTM3U\n" + tag), scope.MasterPath));
+    }
+
+    [Fact]
+    public async Task RemuxDeliveryPromotesTheExactPreparedSegment()
+    {
+        var owner = new KaevoOriginStart(); var scope = Scope() with { Mode = "remux" };
+        using var lifetime = new CancellationTokenSource();
+        var entered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopped = false;
+        Assert.True(owner.TryStart(scope, Deadline,
+            (path, _) => Task.FromResult(path.Contains("master.m3u8") ? Master : RemuxMedia),
+            (path, _) => { entered.SetResult(path); return Task.CompletedTask; },
+            () => { stopped = true; return Task.CompletedTask; },
+            stage => { if (stage == "segment_ready") ready.TrySetResult(); }, lifetime.Token));
+        var path = await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        owner.Delivered(Grant(scope) with { Mode = "remux" }, path);
+        await ready.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        lifetime.Cancel();
+        Assert.False(stopped);
+    }
+
     [Theory]
     [InlineData(0, "0.ts")]
     [InlineData(39_999_999, "0.ts")]
