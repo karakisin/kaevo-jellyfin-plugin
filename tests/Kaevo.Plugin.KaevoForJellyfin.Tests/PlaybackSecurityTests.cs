@@ -127,6 +127,39 @@ public sealed class PlaybackSecurityTests
     }
 
     [Fact]
+    public void AudioSyncRouteRequiresAndBindsSignedOffsetAndOrigin()
+    {
+        KaevoPlaybackSecurity.ResetActiveGrantsForTests();
+        var grant = KaevoPlaybackSecurity.VerifyGrant(
+            Token(mode: "transcode", audioOffsetMilliseconds: -350, originStartTicks: 987_000_000),
+            GrantKey,
+            ConnectorId);
+        var request = KaevoPlaybackSecurity.Resolve(
+            grant,
+            "GET",
+            $"/Videos/{ItemId}/hls99/main.m3u8",
+            new Dictionary<string, JsonElement>
+            {
+                ["audioOffsetMs"] = JsonSerializer.SerializeToElement(-350),
+                ["startTimeTicks"] = JsonSerializer.SerializeToElement(987_000_000)
+            },
+            null);
+
+        Assert.Contains("audioOffsetMs=-350", request.PathAndQuery, StringComparison.Ordinal);
+        Assert.Contains("startTimeTicks=987000000", request.PathAndQuery, StringComparison.Ordinal);
+        Assert.Throws<InvalidOperationException>(() => KaevoPlaybackSecurity.Resolve(
+            grant,
+            "GET",
+            $"/Videos/{ItemId}/hls99/main.m3u8",
+            new Dictionary<string, JsonElement>
+            {
+                ["audioOffsetMs"] = JsonSerializer.SerializeToElement(500),
+                ["startTimeTicks"] = JsonSerializer.SerializeToElement(987_000_000)
+            },
+            null));
+    }
+
+    [Fact]
     public void GeneratedHlsPlaylistAcceptsJellyfinQueryCasingAndBindsSession()
     {
         KaevoPlaybackSecurity.ResetActiveGrantsForTests();
@@ -282,7 +315,9 @@ public sealed class PlaybackSecurityTests
         long? now = null,
         long? expiresAt = null,
         string grantId = "grant-1",
-        string mode = "direct_play")
+        string mode = "direct_play",
+        int? audioOffsetMilliseconds = null,
+        long? originStartTicks = null)
     {
         var issuedAt = now ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var payload = new SortedDictionary<string, object>(StringComparer.Ordinal)
@@ -303,6 +338,11 @@ public sealed class PlaybackSecurityTests
             ["profile_id"] = "profile-1",
             ["v"] = 1
         };
+        if (audioOffsetMilliseconds is int offset)
+        {
+            payload["audio_offset_ms"] = offset;
+            payload["origin_start_ticks"] = originStartTicks ?? 0;
+        }
         var canonical = JsonSerializer.Serialize(payload);
         using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(GrantKey));
         var signature = Base64Url(hmac.ComputeHash(Encoding.UTF8.GetBytes(canonical)));

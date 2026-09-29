@@ -28,10 +28,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
                     "local_provider_configuration_v1", "connector_control_push_v2", "profile_artwork_v1",
                     "profile_media_access_v1", "profile_media_access_owner_v1", FirebasePlaybackMailbox.Capability,
-                    "account_lifecycle_verification_recovery_v1"
+                    "account_lifecycle_verification_recovery_v1", "audio_sync_v1", "remote_artwork_batch_v1"
                 };
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
+    private const int RemoteArtworkBatchItemMaximumBytes = 150_000;
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
     private const int ControlRequestConcurrency = 4;
@@ -817,6 +818,16 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             }
 
             return await ReadArtworkAsync(configuration, secrets, request.ProfileId, request.Query, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (request.Path == "/kaevo/internal/images")
+        {
+            if (!configuration.RemoteArtworkEnabled)
+            {
+                throw new InvalidOperationException("remoteArtworkDisabled");
+            }
+
+            return await ReadArtworkBatchAsync(configuration, secrets, request.ProfileId, request.Query, cancellationToken).ConfigureAwait(false);
         }
 
         if (request.Path == "/kaevo/internal/main-snapshot")
@@ -3058,6 +3069,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             && nativePreference.ValueKind == JsonValueKind.True;
         var forceTranscode = parameters.TryGetValue("force_transcode", out var transcodePreference)
             && transcodePreference.ValueKind == JsonValueKind.True;
+        var audioOffsetMilliseconds = OptionalSignedInt(
+            parameters,
+            "audio_offset_ms",
+            KaevoAudioSyncTranscoder.MaximumOffsetMilliseconds);
+        var requestedOriginStartTicks = OptionalNonNegativeLong(parameters, "origin_start_ticks") ?? 0;
         var body = new
         {
             UserId = jellyfinUserId,
@@ -3065,11 +3081,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             SubtitleStreamIndex = subtitleStreamIndex,
             MaxStreamingBitrate = maxBitrate,
             EnableDirectPlay = preferDirectPlay && !forceTranscode
+                && audioOffsetMilliseconds is null
                 && audioStreamIndex is null && subtitleStreamIndex is null,
-            EnableDirectStream = !forceTranscode,
+            EnableDirectStream = !forceTranscode && audioOffsetMilliseconds is null,
             EnableTranscoding = true,
-            AllowVideoStreamCopy = !forceTranscode,
-            AllowAudioStreamCopy = preferDirectPlay && !forceTranscode,
+            AllowVideoStreamCopy = !forceTranscode && audioOffsetMilliseconds is null,
+            AllowAudioStreamCopy = preferDirectPlay && !forceTranscode
+                && audioOffsetMilliseconds is null,
             EnableAutoStreamCopy = false,
             DeviceProfile = KaevoPlaybackProfilePolicy.BuildAppleHlsDeviceProfile(maxBitrate, preferDirectPlay)
         };
@@ -3124,8 +3142,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
         if (_playbackDiagnostic.Value is not null)
             _playbackDiagnostics.BindSession(PlaybackDiagnosticExpiry(configuration), _playbackDiagnostic.Value, playSessionId);
-        var mode = KaevoPlaybackProfilePolicy.SelectMode(
-            source, preferDirectPlay, forceTranscode, compatibilityPlayer);
+        var mode = audioOffsetMilliseconds is not null
+            ? "transcode"
+            : KaevoPlaybackProfilePolicy.SelectMode(
+                source, preferDirectPlay, forceTranscode, compatibilityPlayer);
         var tracks = KaevoPlaybackTrackCatalog.FromMediaSource(source);
         var mediaSegmentsRequested = parameters.TryGetValue("media_segments_enabled", out var mediaSegmentsValue)
             && mediaSegmentsValue.ValueKind is JsonValueKind.True or JsonValueKind.False
@@ -3160,7 +3180,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             && parsedRuntime > 0
                 ? parsedRuntime
                 : (long?)null;
-        long? originStartTicks = null;
+        long? nativeOriginStartTicks = null;
         if (mode == "transcode" && subtitleStreamIndex is null && maxBitrate > 192_000
             && request.OriginStartExpiresAt is > 0
             && parameters.TryGetValue("origin_start_ticks", out var originPosition)
@@ -3207,7 +3227,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 beginProducerPlan: () => (_transcodeManager as KaevoHardwareTranscodeManager)?.Admit(
                     originScope, jellyfinUserId, request.OriginStartExpiresAt.Value, cancellationToken,
                     () => _logger.LogInformation("Kaevo hardware plan omitted_unused_opencl=true"))))
-                originStartTicks = positionTicks;
+                nativeOriginStartTicks = positionTicks;
             else originLog?.Dispose();
         }
         return new CommandResult(200, JsonSerializer.SerializeToElement(new
@@ -3222,11 +3242,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 playback_session_id = playSessionId,
                 mode,
                 max_bitrate = maxBitrate,
-                origin_start_ticks = originStartTicks,
                 audio_tracks = tracks.AudioTracks,
                 subtitle_tracks = tracks.SubtitleTracks,
                 selected_audio_stream_index = audioStreamIndex ?? tracks.SelectedAudioStreamIndex,
                 selected_subtitle_stream_index = subtitleStreamIndex,
+                audio_offset_ms = audioOffsetMilliseconds,
+                origin_start_ticks = audioOffsetMilliseconds is not null
+                    ? requestedOriginStartTicks
+                    : nativeOriginStartTicks,
                 item_kind = itemKind == "series" ? "show" : itemKind,
                 series_id = seriesId,
                 season_id = seasonId,
@@ -3235,6 +3258,47 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 media_segments = mediaSegments
             }
         }, JsonOptions), false);
+    }
+
+    internal static string PlaybackMode(
+        bool hasAudioOffset,
+        bool forceTranscoding,
+        bool preferDirectPlay,
+        bool supportsDirectStream)
+    {
+        if (hasAudioOffset || forceTranscoding) return "transcode";
+        if (preferDirectPlay) return "direct_play";
+        return supportsDirectStream ? "remux" : "transcode";
+    }
+
+    private static bool BooleanParameter(IReadOnlyDictionary<string, JsonElement> parameters, string key) =>
+        parameters.TryGetValue(key, out var value)
+        && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+        && value.GetBoolean();
+
+    private static int? OptionalSignedInt(
+        IReadOnlyDictionary<string, JsonElement> parameters,
+        string key,
+        int absoluteMaximum)
+    {
+        if (!parameters.TryGetValue(key, out var value)) return null;
+        if (!value.TryGetInt32(out var parsed) || parsed == 0 || Math.Abs(parsed) > absoluteMaximum)
+        {
+            throw new InvalidOperationException("audioSyncOffsetInvalid");
+        }
+        return parsed;
+    }
+
+    private static long? OptionalNonNegativeLong(
+        IReadOnlyDictionary<string, JsonElement> parameters,
+        string key)
+    {
+        if (!parameters.TryGetValue(key, out var value)) return null;
+        if (!value.TryGetInt64(out var parsed) || parsed < 0 || parsed > 100_000_000_000_000)
+        {
+            throw new InvalidOperationException("playbackStartTimeInvalid");
+        }
+        return parsed;
     }
 
     private async Task<IReadOnlyList<KaevoMediaSegmentProjection>> ReadPlaybackMediaSegmentsAsync(
@@ -3303,12 +3367,27 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
     }
 
-    private async Task<CommandResult> ReadArtworkAsync(
+    private Task<CommandResult> ReadArtworkAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
         string? cloudProfileId,
         IReadOnlyDictionary<string, JsonElement>? query,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        ReadArtworkWithLimitAsync(
+            configuration,
+            secrets,
+            cloudProfileId,
+            query,
+            cancellationToken,
+            RemoteArtworkMaximumBytes);
+
+    private async Task<CommandResult> ReadArtworkWithLimitAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string? cloudProfileId,
+        IReadOnlyDictionary<string, JsonElement>? query,
+        CancellationToken cancellationToken,
+        int maximumBytes)
     {
         var itemId = QueryString(query, "item_id");
         var imageType = NormalizeRemoteArtworkImageType(QueryString(query, "image_type"));
@@ -3331,10 +3410,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var attempts = new[]
         {
             (Width: requestedWidth, Height: requestedHeight, Quality: requestedQuality),
-            (Width: Math.Min(requestedWidth, 1920), Height: Math.Min(requestedHeight, 1920), Quality: Math.Min(requestedQuality, 88)),
-            (Width: Math.Min(requestedWidth, 1600), Height: Math.Min(requestedHeight, 1600), Quality: Math.Min(requestedQuality, 85)),
-            (Width: Math.Min(requestedWidth, 1440), Height: Math.Min(requestedHeight, 1440), Quality: Math.Min(requestedQuality, 82)),
-            (Width: Math.Min(requestedWidth, 1200), Height: Math.Min(requestedHeight, 1200), Quality: Math.Min(requestedQuality, 80))
+            (Width: Math.Max(1, requestedWidth * 3 / 4), Height: Math.Max(1, requestedHeight * 3 / 4), Quality: Math.Min(requestedQuality, 78)),
+            (Width: Math.Max(1, requestedWidth / 2), Height: Math.Max(1, requestedHeight / 2), Quality: Math.Min(requestedQuality, 74)),
+            (Width: Math.Max(1, requestedWidth * 3 / 8), Height: Math.Max(1, requestedHeight * 3 / 8), Quality: Math.Min(requestedQuality, 70))
         }.Distinct();
 
         foreach (var attempt in attempts)
@@ -3357,7 +3435,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 throw new InvalidOperationException("remoteArtworkContentTypeInvalid");
             }
 
-            var bytes = await ReadBoundedAsync(response.Content, byteLimit, cancellationToken).ConfigureAwait(false);
+            var bytes = await ReadBoundedAsync(response.Content, Math.Min(byteLimit, maximumBytes), cancellationToken).ConfigureAwait(false);
             if (bytes.Truncated)
             {
                 continue;
@@ -3371,6 +3449,138 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
 
         throw new InvalidOperationException("remoteArtworkPayloadTooLarge");
+    }
+
+    private async Task<CommandResult> ReadArtworkBatchAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string? cloudProfileId,
+        IReadOnlyDictionary<string, JsonElement>? query,
+        CancellationToken cancellationToken)
+    {
+        if (query is null || query.Count != 1 || !query.TryGetValue("items", out var items)
+            || !IsValidRemoteArtworkBatch(items))
+        {
+            throw new InvalidOperationException("remoteArtworkBatchRequestInvalid");
+        }
+
+        using var concurrency = new SemaphoreSlim(4, 4);
+        var tasks = items.EnumerateArray().Select((item, index) => ReadArtworkBatchItemAsync(
+            configuration,
+            secrets,
+            cloudProfileId,
+            item,
+            index,
+            concurrency,
+            cancellationToken)).ToArray();
+        var results = await Task.WhenAll(tasks).ConfigureAwait(false);
+        return new CommandResult(200, JsonSerializer.SerializeToElement(new { items = results }, JsonOptions), false);
+    }
+
+    internal static bool IsValidRemoteArtworkBatch(JsonElement items)
+    {
+        if (items.ValueKind != JsonValueKind.Array || items.GetArrayLength() is < 1 or > 10)
+        {
+            return false;
+        }
+
+        var allowed = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "item_id", "image_type", "tag", "max_width", "max_height", "quality"
+        };
+        foreach (var item in items.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            var properties = item.EnumerateObject().ToArray();
+            if (properties.Any(property => !allowed.Contains(property.Name))
+                || properties.Select(property => property.Name).Distinct(StringComparer.Ordinal).Count() != properties.Length
+                || !item.TryGetProperty("item_id", out var itemId)
+                || itemId.ValueKind != JsonValueKind.String
+                || !ItemIdRegex().IsMatch(itemId.GetString() ?? string.Empty)
+                || !item.TryGetProperty("image_type", out var imageType)
+                || imageType.ValueKind != JsonValueKind.String
+                || string.IsNullOrEmpty(NormalizeRemoteArtworkImageType(imageType.GetString() ?? string.Empty)))
+            {
+                return false;
+            }
+
+            if (item.TryGetProperty("tag", out var tag)
+                && (tag.ValueKind != JsonValueKind.String || !ArtworkTagRegex().IsMatch(tag.GetString() ?? string.Empty)))
+            {
+                return false;
+            }
+
+            foreach (var bound in new[] { (Name: "max_width", Maximum: 1200), (Name: "max_height", Maximum: 1200), (Name: "quality", Maximum: 80) })
+            {
+                if (!item.TryGetProperty(bound.Name, out var value))
+                {
+                    continue;
+                }
+                var text = value.ValueKind switch
+                {
+                    JsonValueKind.String => value.GetString(),
+                    JsonValueKind.Number => value.GetRawText(),
+                    _ => null
+                };
+                if (!int.TryParse(text, out var number) || number < 1 || number > bound.Maximum)
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private async Task<object> ReadArtworkBatchItemAsync(
+        PluginConfiguration configuration,
+        KaevoConnectorSecrets secrets,
+        string? cloudProfileId,
+        JsonElement item,
+        int index,
+        SemaphoreSlim concurrency,
+        CancellationToken cancellationToken)
+    {
+        await concurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                return new { index, status = "failed" };
+            }
+
+            var request = item.EnumerateObject().ToDictionary(
+                property => property.Name,
+                property => property.Value.Clone(),
+                StringComparer.Ordinal);
+            var result = await ReadArtworkWithLimitAsync(
+                configuration,
+                secrets,
+                cloudProfileId,
+                request,
+                cancellationToken,
+                RemoteArtworkBatchItemMaximumBytes).ConfigureAwait(false);
+            return new { index, status = "completed", response = result.Payload };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (InvalidOperationException)
+        {
+            return new { index, status = "failed" };
+        }
+        catch (HttpRequestException)
+        {
+            return new { index, status = "failed" };
+        }
+        finally
+        {
+            concurrency.Release();
+        }
     }
 
     internal static string NormalizeRemoteArtworkImageType(string rawImageType)
@@ -4637,6 +4847,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
     [GeneratedRegex("^[A-Za-z0-9._:-]{1,128}$", RegexOptions.CultureInvariant)]
     private static partial Regex SafeIdentifierRegex();
+
+    [GeneratedRegex("^[A-Za-z0-9_-]{1,128}$", RegexOptions.CultureInvariant)]
+    private static partial Regex ArtworkTagRegex();
 
     [GeneratedRegex("^/Users/[0-9a-fA-F]{32}/Views$", RegexOptions.CultureInvariant)]
     private static partial Regex UserViewsRegex();

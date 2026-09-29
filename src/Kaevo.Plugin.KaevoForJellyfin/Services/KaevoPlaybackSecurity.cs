@@ -14,7 +14,9 @@ internal sealed record PlaybackGrant(
     string PlaybackSessionId,
     string Mode,
     int MaximumBitrate,
-    long ExpiresAt);
+    long ExpiresAt,
+    int? AudioOffsetMilliseconds = null,
+    long? OriginStartTicks = null);
 
 internal sealed record ResolvedPlaybackRequest(
     HttpMethod Method,
@@ -143,10 +145,19 @@ internal static partial class KaevoPlaybackSecurity
             RequiredString(payload, "playback_session_id"),
             mode,
             checked((int)RequiredInt64(payload, "max_bitrate")),
-            expiresAt);
+            expiresAt,
+            OptionalInt32(payload, "audio_offset_ms"),
+            OptionalInt64(payload, "origin_start_ticks"));
         if (grant.MaximumBitrate is < 1 or > 100_000_000)
         {
             throw new InvalidOperationException("playbackGrantBitrateInvalid");
+        }
+        if ((grant.AudioOffsetMilliseconds.HasValue != grant.OriginStartTicks.HasValue)
+            || grant.AudioOffsetMilliseconds is 0 or < -5_000 or > 5_000
+            || grant.OriginStartTicks is < 0 or > 100_000_000_000_000
+            || (grant.AudioOffsetMilliseconds.HasValue && grant.Mode != "transcode"))
+        {
+            throw new InvalidOperationException("playbackGrantAudioSyncInvalid");
         }
         ActiveGrants[tokenHash] = new ActivePlaybackGrant(grant, now, now);
         TrimActiveGrants(now);
@@ -285,6 +296,15 @@ internal static partial class KaevoPlaybackSecurity
         Bind(normalized, "mediaSourceId", grant.MediaSourceId);
         Bind(normalized, "playSessionId", grant.PlaybackSessionId);
         Bind(normalized, "deviceId", grant.DeviceId);
+        if (path.Contains("/hls99/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (grant.AudioOffsetMilliseconds is not int offset)
+            {
+                throw new InvalidOperationException("playbackGrantAudioSyncMissing");
+            }
+            Bind(normalized, "audioOffsetMs", offset.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Bind(normalized, "startTimeTicks", (grant.OriginStartTicks ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
 
         var audioBitrate = ParseNonNegative(normalized, "audioBitRate");
         var videoBitrate = ParseNonNegative(normalized, "videoBitRate");
@@ -467,6 +487,22 @@ internal static partial class KaevoPlaybackSecurity
         => payload.TryGetValue(key, out var value) && value.TryGetInt64(out var parsed)
             ? parsed
             : throw new InvalidOperationException("playbackGrantMalformed");
+
+    private static int? OptionalInt32(IReadOnlyDictionary<string, JsonElement> payload, string key)
+    {
+        if (!payload.TryGetValue(key, out var value)) return null;
+        return value.TryGetInt32(out var parsed)
+            ? parsed
+            : throw new InvalidOperationException("playbackGrantMalformed");
+    }
+
+    private static long? OptionalInt64(IReadOnlyDictionary<string, JsonElement> payload, string key)
+    {
+        if (!payload.TryGetValue(key, out var value)) return null;
+        return value.TryGetInt64(out var parsed)
+            ? parsed
+            : throw new InvalidOperationException("playbackGrantMalformed");
+    }
 
     private static byte[] Base64UrlDecode(string value)
     {

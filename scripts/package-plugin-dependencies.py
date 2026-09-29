@@ -115,7 +115,7 @@ def package(publish, directory, output, *, version, timestamp):
     files={k:v for k,v in collect(publish,version).items() if k not in HOST_OWNED}
     date=datetime.datetime.strptime(timestamp,"%Y-%m-%dT%H:%M:%SZ")
     if not 1980<=date.year<=2107:raise ValueError("package_timestamp_invalid")
-    metadata={"category":"General","changelog":"Includes connector transport dependencies with explicit Jellyfin assembly selection.",
+    metadata={"category":"General","changelog":"Fixes audio-only playback by honoring Kaevo's protected transcode recovery, adds item-scoped audio and video synchronization, and adds profile-authorized artwork batching for faster cover loading.",
         "description":"Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
         "guid":"80c77b84-7f2d-4b52-84c7-7dfe68cd95ae","name":"Kaevo","overview":"Secure Kaevo Cloud access for Jellyfin",
         "owner":"Kaevo","targetAbi":"10.11.0.0","timestamp":timestamp,"version":version+".0",

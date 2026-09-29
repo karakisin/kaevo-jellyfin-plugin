@@ -181,6 +181,33 @@ public sealed class RelayRequestContextTests
     }
 
     [Fact]
+    public void ArtworkBatchAcceptsTenStrictItemsAndRejectsInjectedOrOversizedInput()
+    {
+        var valid = JsonSerializer.SerializeToElement(Enumerable.Range(1, 10).Select(index => new
+        {
+            item_id = index.ToString("x32"),
+            image_type = "Primary",
+            max_width = "600",
+            max_height = 900,
+            quality = "80"
+        }));
+        Assert.True(KaevoCloudConnectorService.IsValidRemoteArtworkBatch(valid));
+
+        var tooMany = JsonSerializer.SerializeToElement(Enumerable.Range(1, 11).Select(index => new
+        {
+            item_id = index.ToString("x32"),
+            image_type = "Primary"
+        }));
+        Assert.False(KaevoCloudConnectorService.IsValidRemoteArtworkBatch(tooMany));
+
+        var injected = JsonSerializer.SerializeToElement(new[]
+        {
+            new { item_id = "11111111111111111111111111111111", image_type = "Primary", user_id = "22222222222222222222222222222222" }
+        });
+        Assert.False(KaevoCloudConnectorService.IsValidRemoteArtworkBatch(injected));
+    }
+
+    [Fact]
     public void RecoveryCommandReturnsOnlyExactProfileBinding()
     {
         const string profileId = "profile-member-1";
