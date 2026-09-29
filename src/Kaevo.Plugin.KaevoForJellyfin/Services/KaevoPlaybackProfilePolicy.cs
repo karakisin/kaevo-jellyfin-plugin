@@ -68,8 +68,31 @@ internal static class KaevoPlaybackProfilePolicy
     {
         if (forceTranscode) return "transcode";
         if (compatibilityPlayer) return "direct_play";
-        if (preferDirectPlay && Supported(source, "SupportsDirectPlay")) return "direct_play";
+        if (Supported(source, "SupportsDirectPlay"))
+        {
+            // Jellyfin has validated the codecs against our native profile.
+            // A streaming preference still needs those capability checks: an
+            // empty direct profile otherwise forces needless video encoding.
+            // Apple recommends hvc1 sample entries. Repackage hev1 rather than
+            // sending an original file that AVPlayer may play as audio only.
+            return preferDirectPlay && !RequiresAppleHevcRepackaging(source)
+                ? "direct_play" : "remux";
+        }
         return Supported(source, "SupportsDirectStream") ? "remux" : "transcode";
+    }
+
+    private static bool RequiresAppleHevcRepackaging(JsonElement source)
+    {
+        if (!source.TryGetProperty("MediaStreams", out var streams)
+            || streams.ValueKind != JsonValueKind.Array) return false;
+        return streams.EnumerateArray().Any(stream =>
+            stream.ValueKind == JsonValueKind.Object
+            && stream.TryGetProperty("Type", out var type)
+            && string.Equals(type.GetString(), "Video", StringComparison.OrdinalIgnoreCase)
+            && stream.TryGetProperty("Codec", out var codec)
+            && string.Equals(codec.GetString(), "hevc", StringComparison.OrdinalIgnoreCase)
+            && stream.TryGetProperty("CodecTag", out var tag)
+            && string.Equals(tag.GetString(), "hev1", StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool Supported(JsonElement source, string name) =>

@@ -31,6 +31,7 @@ public sealed class PlaybackProfilePolicyTests
     [InlineData(false, true, true, false, "remux")]
     [InlineData(false, false, true, false, "transcode")]
     [InlineData(true, true, false, false, "remux")]
+    [InlineData(true, false, false, false, "remux")]
     [InlineData(true, true, true, true, "transcode")]
     public void ModeUsesNegotiatedCapabilityAndExplicitFallback(
         bool direct, bool remux, bool optedIn, bool force, string expected)
@@ -66,6 +67,21 @@ public sealed class PlaybackProfilePolicyTests
 
         var legacy = JsonSerializer.SerializeToElement(KaevoPlaybackProfilePolicy.BuildAppleHlsDeviceProfile(24_000_000));
         Assert.Equal(0, legacy.GetProperty("DirectPlayProfiles").GetArrayLength());
+    }
+
+    [Theory]
+    [InlineData("hev1", true, false, "remux")]
+    [InlineData("hvc1", true, false, "direct_play")]
+    [InlineData("hev1", true, true, "transcode")]
+    [InlineData("hev1", false, false, "transcode")]
+    public void HevcPackagingDoesNotOverrideCodecValidationOrForcedEncoding(
+        string tag, bool compatible, bool force, string expected)
+    {
+        var source = JsonSerializer.SerializeToElement(new {
+            SupportsDirectPlay = compatible, SupportsDirectStream = false,
+            MediaStreams = new[] { new { Type = "Video", Codec = "hevc", CodecTag = tag } }
+        });
+        Assert.Equal(expected, KaevoPlaybackProfilePolicy.SelectMode(source, true, force, false));
     }
 
 }

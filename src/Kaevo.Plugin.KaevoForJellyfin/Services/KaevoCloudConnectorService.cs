@@ -3080,7 +3080,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             AudioStreamIndex = audioStreamIndex,
             SubtitleStreamIndex = subtitleStreamIndex,
             MaxStreamingBitrate = maxBitrate,
-            EnableDirectPlay = preferDirectPlay && !forceTranscode
+            EnableDirectPlay = !forceTranscode
                 && audioOffsetMilliseconds is null
                 && audioStreamIndex is null && subtitleStreamIndex is null,
             EnableDirectStream = !forceTranscode && audioOffsetMilliseconds is null,
@@ -3089,7 +3089,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             AllowAudioStreamCopy = preferDirectPlay && !forceTranscode
                 && audioOffsetMilliseconds is null,
             EnableAutoStreamCopy = false,
-            DeviceProfile = KaevoPlaybackProfilePolicy.BuildAppleHlsDeviceProfile(maxBitrate, preferDirectPlay)
+            DeviceProfile = KaevoPlaybackProfilePolicy.BuildAppleHlsDeviceProfile(maxBitrate, preferDirectPlay: true)
         };
         var playbackInfoQuery = new List<string>
         {
