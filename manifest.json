@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.53.0",
+        "changelog": "Repackages validated HEVC hev1 sources for Apple playback and preserves native codec capability during streaming negotiation to avoid unnecessary video encoding. Physical startup-speed acceptance remains pending.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-09-29T23:10:00Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.53/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "3804caec5a12814fccf30e2232a685e2"
+      },
+      {
         "version": "0.3.52.0",
         "changelog": "Fixes audio-only playback by honoring Kaevo's protected forced-transcode recovery, adds item-scoped audio and video synchronization, and adds profile-authorized artwork batching for faster cover loading. Passed 715 plugin tests. Physical Evil S1E13 playback remains pending installation and device verification.",
         "targetAbi": "10.11.0.0",
