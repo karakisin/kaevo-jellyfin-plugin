@@ -1,16 +1,18 @@
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Streaming;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Kaevo.Plugin.KaevoForJellyfin.Services;
 
 // All Jellyfin lifecycle methods remain delegated to its original singleton.
 // A short-lived, locally registered exact Kaevo scope is required to change a
 // startup plan. Query strings/client names cannot opt other clients into it.
-internal sealed class KaevoHardwareTranscodeManager(ITranscodeManager inner) : ITranscodeManager
+internal sealed class KaevoHardwareTranscodeManager(ITranscodeManager inner, IMediaEncoder? mediaEncoder = null, ILogger<KaevoHardwareTranscodeManager>? logger = null) : ITranscodeManager
 {
     private sealed record Admission(PlaybackOriginScope Scope, Guid User, long Deadline,
         CancellationToken Lifetime, Action Applied);
+    private readonly KaevoValidatedTransportProbe _probe = new();
     private readonly object _gate = new();
     private readonly Dictionary<string, Admission> _admissions = new(StringComparer.Ordinal);
 
@@ -79,7 +81,7 @@ internal sealed class KaevoHardwareTranscodeManager(ITranscodeManager inner) : I
         return plan;
     }
 
-    public Task<TranscodingJob> StartFfMpeg(StreamState state, string outputPath, string commandLineArguments,
+    public async Task<TranscodingJob> StartFfMpeg(StreamState state, string outputPath, string commandLineArguments,
         Guid userId, TranscodingJobType transcodingJobType, CancellationTokenSource cancellationTokenSource,
         string? workingDirectory = null)
     {
@@ -90,8 +92,17 @@ internal sealed class KaevoHardwareTranscodeManager(ITranscodeManager inner) : I
                 command = Plan(state, command, userId, transcodingJobType, OperatingSystem.IsLinux());
         }
         catch { } // A planner failure must keep Jellyfin's original startup behavior.
-        return inner.StartFfMpeg(state, outputPath, command, userId, transcodingJobType,
-            cancellationTokenSource, workingDirectory);
+        if (!string.Equals(command, commandLineArguments, StringComparison.Ordinal))
+        {
+            try
+            {
+                command = await _probe.ApplyAsync(state, command, mediaEncoder?.ProbePath, cancellationTokenSource.Token,
+                    result => logger?.LogInformation("Kaevo transport probe outcome={Outcome}", result)).ConfigureAwait(false);
+            }
+            catch (Exception) { } // Preserve the original full probe on any validation failure.
+        }
+        return await inner.StartFfMpeg(state, outputPath, command, userId, transcodingJobType,
+            cancellationTokenSource, workingDirectory).ConfigureAwait(false);
     }
     public TranscodingJob? GetTranscodingJob(string session) => inner.GetTranscodingJob(session);
     public TranscodingJob? GetTranscodingJob(string path, TranscodingJobType type) => inner.GetTranscodingJob(path, type);
@@ -116,7 +127,8 @@ internal sealed class KaevoHardwareTranscodeManager(ITranscodeManager inner) : I
         // Register the original separately so DI still owns its disposal.
         services.AddSingleton(original.ImplementationType!);
         services.AddSingleton<ITranscodeManager>(p => new KaevoHardwareTranscodeManager(
-            (ITranscodeManager)p.GetRequiredService(original.ImplementationType!)));
+            (ITranscodeManager)p.GetRequiredService(original.ImplementationType!),
+            p.GetRequiredService<IMediaEncoder>(), p.GetRequiredService<ILogger<KaevoHardwareTranscodeManager>>()));
     }
 
     private sealed class Lease(Action release) : IDisposable
