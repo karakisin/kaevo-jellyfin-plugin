@@ -3094,11 +3094,20 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             "audio_offset_ms",
             KaevoAudioSyncTranscoder.MaximumOffsetMilliseconds);
         var requestedOriginStartTicks = OptionalNonNegativeLong(parameters, "origin_start_ticks") ?? 0;
+        // Jellyfin applies explicit audio/subtitle indexes only to the named
+        // media source. Resolve it through the already-required authorized
+        // item read; never assume that an item ID is also its source ID.
+        var itemAuthority = await SendLocalAsync(
+            configuration, secrets, HttpMethod.Get,
+            $"/Users/{Uri.EscapeDataString(jellyfinUserId)}/Items/{Uri.EscapeDataString(itemId)}?Fields=MediaSources,SeriesId,SeasonId,Trickplay&EnableImages=false",
+            null, null, cancellationToken).ConfigureAwait(false);
+        var negotiation = KaevoPlaybackNegotiationPolicy.FromAuthorizedItem(itemAuthority.Payload, subtitleStreamIndex);
         var body = new
         {
             UserId = jellyfinUserId,
             AudioStreamIndex = audioStreamIndex,
-            SubtitleStreamIndex = subtitleStreamIndex,
+            MediaSourceId = negotiation.MediaSourceId,
+            SubtitleStreamIndex = negotiation.SubtitleStreamIndex,
             MaxStreamingBitrate = maxBitrate,
             EnableDirectPlay = !forceTranscode
                 && audioOffsetMilliseconds is null
@@ -3113,24 +3122,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         };
         var playbackInfoQuery = new List<string>
         {
-            $"UserId={Uri.EscapeDataString(jellyfinUserId)}"
+            $"UserId={Uri.EscapeDataString(jellyfinUserId)}",
+            $"MediaSourceId={Uri.EscapeDataString(negotiation.MediaSourceId)}",
+            $"SubtitleStreamIndex={negotiation.SubtitleStreamIndex}"
         };
         if (audioStreamIndex is not null)
         {
             playbackInfoQuery.Add($"AudioStreamIndex={audioStreamIndex.Value}");
         }
-        if (subtitleStreamIndex is not null)
-        {
-            playbackInfoQuery.Add($"SubtitleStreamIndex={subtitleStreamIndex.Value}");
-        }
-        var itemAuthorityTask = SendLocalAsync(
-            configuration,
-            secrets,
-            HttpMethod.Get,
-            $"/Users/{Uri.EscapeDataString(jellyfinUserId)}/Items/{Uri.EscapeDataString(itemId)}?Fields=SeriesId,SeasonId,Trickplay&EnableImages=false",
-            null,
-            null,
-            cancellationToken);
         var local = await SendLocalAsync(
             configuration,
             secrets,
@@ -3139,7 +3138,6 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             null,
             body,
             cancellationToken).ConfigureAwait(false);
-        var itemAuthority = await itemAuthorityTask.ConfigureAwait(false);
         var root = local.Payload;
         var source = root.TryGetProperty("MediaSources", out var sources) && sources.ValueKind == JsonValueKind.Array
             ? sources.EnumerateArray().FirstOrDefault()
@@ -3155,7 +3153,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
 
         var mediaSourceId = source.TryGetProperty("Id", out var sourceId) ? sourceId.GetString() : null;
         var playSessionId = root.TryGetProperty("PlaySessionId", out var sessionId) ? sessionId.GetString() : null;
-        if (string.IsNullOrWhiteSpace(mediaSourceId) || string.IsNullOrWhiteSpace(playSessionId))
+        if (!string.Equals(mediaSourceId, negotiation.MediaSourceId, StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(playSessionId))
         {
             throw new InvalidOperationException("playbackIdentifiersMissing");
         }
@@ -3173,7 +3172,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var mediaSegmentsTask = configuration.JellyfinPluginIntegrationsEnabled && mediaSegmentsRequested
             ? ReadPlaybackMediaSegmentsAsync(configuration, secrets, itemId, cancellationToken)
             : Task.FromResult<IReadOnlyList<KaevoMediaSegmentProjection>>(Array.Empty<KaevoMediaSegmentProjection>());
-        // The authority read is already required and runs beside PlaybackInfo.
+        // Reuse the authorized item read that resolved the playback source.
         // Reuse its sprite catalog before making another serial local request.
         var trickplay = KaevoPlaybackTrickplayCatalog.FromItem(root, mediaSourceId)
             ?? KaevoPlaybackTrickplayCatalog.FromItem(itemAuthority.Payload, mediaSourceId)
