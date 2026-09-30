@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.55.0",
+        "changelog": "Corrects audio sync by delaying or trimming audio samples without shifting the video clock, bounds adjusted video to 720p, and releases replaced custom encoders. Requires the matching Kaevo app timeline update. Passed 729 plugin tests and real audio-sample timing checks; physical live-preview acceptance remains pending.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-09-30T01:18:21Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.55/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "20afd3c8f4557387e3e84eedc43d35a8"
+      },
+      {
         "version": "0.3.54.0",
         "changelog": "Prepares compatible fMP4 playback at the saved position during an authorized Play request, preserving video and scoped media checks. Passed 729 plugin tests. Physical two-second startup acceptance remains pending.",
         "targetAbi": "10.11.0.0",
