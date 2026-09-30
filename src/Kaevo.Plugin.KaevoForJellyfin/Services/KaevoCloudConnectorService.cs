@@ -3222,6 +3222,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             (_transcodeManager as KaevoHardwareTranscodeManager)?.AdmitPlayerStart(
                 playerScope, jellyfinUserId, request.OriginStartExpiresAt.Value, cancellationToken,
                 () => _logger.LogInformation("Kaevo hardware plan omitted_unused_opencl=true route=compact_player"));
+            if (_playbackDiagnostic.Value is { } playerCapture)
+                _ = ObserveCompactPlayerAsync(configuration, playerScope, playerCapture,
+                    request.OriginStartExpiresAt.Value, cancellationToken);
         }
         long? nativeOriginStartTicks = null;
         if ((mode is "transcode" or "remux") && audioOffsetMilliseconds is null
@@ -3307,6 +3310,29 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 media_segments = mediaSegments
             }
         }, JsonOptions), false);
+    }
+
+    private async Task ObserveCompactPlayerAsync(PluginConfiguration configuration,
+        PlaybackOriginScope scope, PlaybackDiagnosticTrace commandCapture, long deadline,
+        CancellationToken lifetime)
+    {
+        // Observe the real compact player job only while explicit diagnostics
+        // are armed. No extra media read or encoder start is performed.
+        try
+        {
+            var remaining = DateTimeOffset.FromUnixTimeSeconds(deadline) - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero || remaining > TimeSpan.FromSeconds(30)) return;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+            timeout.CancelAfter(remaining);
+            using var capture = _playbackDiagnostics.BeginOrigin(
+                PlaybackDiagnosticExpiry(configuration), commandCapture, scope.PlaySessionId, WritePlaybackDiagnostic);
+            if (capture is null) return;
+            using var log = new OriginEncoderLogObservation(KaevoPlugin.Instance?.DiagnosticLogDirectory);
+            await OriginEncoderObservation.ObserveAsync(
+                () => OriginEncoderObservation.Read(_transcodeManager.GetTranscodingJob(scope.PlaySessionId), scope, 0, log),
+                capture, timeout.Token).ConfigureAwait(false);
+        }
+        catch (Exception) { } // Optional diagnostics never changes playback.
     }
 
     internal static string PlaybackMode(
