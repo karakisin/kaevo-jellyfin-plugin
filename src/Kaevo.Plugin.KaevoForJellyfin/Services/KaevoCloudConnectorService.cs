@@ -28,7 +28,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
                     "local_provider_configuration_v1", "connector_control_push_v2", "profile_artwork_v1",
                     "profile_media_access_v1", "profile_media_access_owner_v1", FirebasePlaybackMailbox.Capability,
-                    "account_lifecycle_verification_recovery_v1", "audio_sync_v1", "remote_artwork_batch_v1"
+                    "account_lifecycle_verification_recovery_v1", "audio_sync_v1", "remote_artwork_batch_v1", "audio_sync_preferences_v1"
                 };
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
@@ -66,6 +66,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private readonly ISessionManager _sessionManager;
     private readonly ITranscodeManager _transcodeManager;
     private readonly KaevoAudioSyncTranscoder? _audioSyncTranscoder;
+    private readonly KaevoAudioSyncPreferenceStore? _audioSyncPreferences;
     private readonly KaevoOptimizerCoordinator _optimizer;
     private readonly ILogger<KaevoCloudConnectorService> _logger;
     private readonly KaevoProviderTransport _providerTransport;
@@ -99,7 +100,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         KaevoPairingV3Service pairingV3,
         KaevoSeerrIdentityProvisioningService seerrIdentityProvisioning,
         ILogger<KaevoCloudConnectorService> logger,
-        KaevoAudioSyncTranscoder? audioSyncTranscoder = null)
+        KaevoAudioSyncTranscoder? audioSyncTranscoder = null,
+        KaevoAudioSyncPreferenceStore? audioSyncPreferences = null)
     {
         _secretStore = secretStore;
         _jellyfinApiKeyProvisioner = jellyfinApiKeyProvisioner;
@@ -116,6 +118,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         _seerrIdentityProvisioning = seerrIdentityProvisioning;
         _logger = logger;
         _audioSyncTranscoder = audioSyncTranscoder;
+        _audioSyncPreferences = audioSyncPreferences;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -1553,6 +1556,19 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 operation,
                 result = new { item_id = itemId, deleted = true }
             }, JsonOptions), false);
+        }
+
+        if (operation is "jellyfin.audio_sync_get" or "jellyfin.audio_sync_set")
+        {
+            if (!configuration.RemotePlaybackEnabled) throw new InvalidOperationException("remotePlaybackDisabled");
+            _ = RequireBoundJellyfinUserId(configuration, request, "profileJellyfinBindingMissing");
+            var store = _audioSyncPreferences ?? throw new InvalidOperationException("audioSyncStoreUnavailable");
+            var key = AudioSyncPreferenceKey(configuration.ConnectorId, request);
+            var itemId = RequireItemId(parameters);
+            var scope = parameters["scope"].GetString();
+            int? offset = operation == "jellyfin.audio_sync_set"
+                ? store.Write(key, parameters["offset_ms"].GetInt32()) : store.Read(key);
+            return CompleteCommand(request, operation, new { item_id = itemId, scope, offset_ms = offset, found = offset.HasValue });
         }
 
         if (operation is "jellyfin.playback_started" or "jellyfin.playback_progress" or "jellyfin.playback_stopped")
@@ -4513,6 +4529,24 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return !string.IsNullOrWhiteSpace(value)
             ? value
             : throw new InvalidOperationException(error);
+    }
+
+    internal static string AudioSyncPreferenceKey(string connectorId, CloudRequest request)
+    {
+        var p = request.Parameters;
+        var writing = request.Operation == "jellyfin.audio_sync_set";
+        var expected = writing ? new[] { "item_id", "scope", "offset_ms" } : new[] { "item_id", "scope" };
+        if (request.Operation is not ("jellyfin.audio_sync_get" or "jellyfin.audio_sync_set")
+            || request.Path != "/commands/" + request.Operation || request.Method != "COMMAND"
+            || request.Provider != "home_server" || request.AudioSyncAuthority is null
+            || request.ProfileProviderBinding is not { Provider: "jellyfin" } binding
+            || binding.ConnectorId != connectorId || !ItemIdRegex().IsMatch(binding.ProviderUserId)
+            || p is null || !p.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(expected)
+            || p["scope"].ValueKind != JsonValueKind.String
+            || (writing && (!p["offset_ms"].TryGetInt32(out var offset) || offset is < -5000 or > 5000)))
+            throw new InvalidOperationException("audioSyncAuthorityInvalid");
+        return KaevoAudioSyncPreferenceStore.Key(connectorId, request.AudioSyncAuthority.AccountId,
+            request.ProfileId ?? "", RequireItemId(p), p["scope"].GetString()!);
     }
 
     private static string RequireBoundJellyfinUserId(

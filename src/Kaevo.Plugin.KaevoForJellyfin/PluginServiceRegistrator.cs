@@ -23,6 +23,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<KaevoProviderPolicyAuditStore>();
         serviceCollection.AddSingleton<KaevoOptimizerCoordinator>();
         serviceCollection.AddSingleton<KaevoAudioSyncTranscoder>();
+        serviceCollection.AddSingleton<KaevoAudioSyncPreferenceStore>();
         serviceCollection.AddHostedService<KaevoCloudConnectorService>();
     }
 }

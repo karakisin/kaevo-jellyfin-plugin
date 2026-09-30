@@ -39,7 +39,11 @@ internal sealed record CloudRequest(
     [property: JsonPropertyName("parameters")] Dictionary<string, JsonElement>? Parameters,
     [property: JsonPropertyName("profile_id")] string? ProfileId = null,
     [property: JsonPropertyName("profile_provider_binding")] CloudProfileProviderBinding? ProfileProviderBinding = null,
-    [property: JsonPropertyName("origin_start_expires_at")] long? OriginStartExpiresAt = null);
+    [property: JsonPropertyName("origin_start_expires_at")] long? OriginStartExpiresAt = null,
+    [property: JsonPropertyName("audio_sync_authority")] CloudAudioSyncAuthority? AudioSyncAuthority = null);
+
+internal sealed record CloudAudioSyncAuthority(
+    [property: JsonPropertyName("account_id")] string AccountId);
 
 internal sealed record CloudProfileProviderBinding(
     [property: JsonPropertyName("provider")] string Provider,
