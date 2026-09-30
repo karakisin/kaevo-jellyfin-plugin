@@ -51,6 +51,21 @@ public sealed class ValidatedTransportProbeTests
         Assert.False(KaevoValidatedTransportProbe.Eligible(state, command));
     }
 
+    [Theory]
+    [InlineData("mkv")]
+    [InlineData("matroska")]
+    public void MatroskaRequiresMatchingDemuxerAndExactSelectedStreams(string container)
+    {
+        const string path = "/media/movie.mkv";
+        var state = State(path); state.MediaSource.Container = container;
+        var command = Command(path).Replace("-f mpegts ", "-f matroska ");
+        Assert.True(KaevoValidatedTransportProbe.Eligible(state, command));
+        Assert.False(KaevoValidatedTransportProbe.Eligible(state, Command(path)));
+        Assert.False(KaevoValidatedTransportProbe.Eligible(state, command.Replace("-map 0:1", "-map 0:2")));
+        state.MediaSource.Container = "mp4";
+        Assert.False(KaevoValidatedTransportProbe.Eligible(state, command));
+    }
+
     [Fact]
     public async Task SuccessfulProbeCachesOnlyUnchangedFileAndSelectedStreams()
     {

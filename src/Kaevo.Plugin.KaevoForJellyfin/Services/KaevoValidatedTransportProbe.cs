@@ -82,14 +82,14 @@ internal sealed class KaevoValidatedTransportProbe
         var video = state.VideoStream;
         var audio = state.AudioStream;
         var path = source?.Path;
-        return source is not null && !source.IsRemote && source.Container is "ts" or "m2ts"
+        return source is not null && !source.IsRemote && source.Container is "ts" or "m2ts" or "mkv" or "matroska"
             && !string.IsNullOrWhiteSpace(path) && Path.IsPathFullyQualified(path)
             && !path.Any(c => char.IsControl(c) || c == '"')
             && video is { Codec: "hevc", Width: > 0, Height: > 0, BitDepth: 10 }
             && audio is { SampleRate: > 0, Channels: > 0 } && !string.IsNullOrWhiteSpace(audio.Codec)
             && video.Index >= 0 && audio.Index >= 0 && video.Index != audio.Index
             && command.StartsWith(OriginalPrefix, StringComparison.Ordinal)
-            && command.Contains("-f mpegts ", StringComparison.Ordinal)
+            && command.Contains(source.Container is "mkv" or "matroska" ? "-f matroska " : "-f mpegts ", StringComparison.Ordinal)
             && command.Contains($"-map 0:{video.Index} ", StringComparison.Ordinal)
             && command.Contains($"-map 0:{audio.Index} ", StringComparison.Ordinal)
             && command.Contains("-map -0:s ", StringComparison.Ordinal)
