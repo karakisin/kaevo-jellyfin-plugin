@@ -3,152 +3,6 @@
 <head>
     <meta charset="utf-8">
     <title>Kaevo</title>
-    <style>
-        #KaevoConfigPage {
-            --kaevo-bg: #0d0f12;
-            --kaevo-card: #181b20;
-            --kaevo-card-soft: #20242b;
-            --kaevo-gold: #e7c48b;
-            --kaevo-gold-deep: #b9873f;
-            --kaevo-text: #f5ead8;
-            --kaevo-muted: #aaa5a0;
-            --kaevo-border: rgba(231, 196, 139, .22);
-            color: var(--kaevo-text);
-            background: radial-gradient(circle at 80% 0%, rgba(185, 135, 63, .12), transparent 34%), var(--kaevo-bg);
-        }
-        #KaevoConfigPage .content-primary { max-width: 880px; margin: 0 auto; }
-        #KaevoConfigPage .kaevo-hero {
-            display: flex; align-items: center; gap: 1.1rem; padding: 1.5rem 0 1.25rem;
-        }
-        #KaevoConfigPage .kaevo-hero h2 { margin: 0; color: var(--kaevo-text); font-size: 2rem; }
-        #KaevoConfigPage .kaevo-hero p { margin: .3rem 0 0; color: var(--kaevo-muted); }
-        #KaevoConfigPage .kaevo-card {
-            margin: 0 0 1.15rem; padding: 1.35rem; border: 1px solid var(--kaevo-border);
-            border-radius: 22px; background: linear-gradient(145deg, rgba(32,36,43,.96), rgba(21,24,29,.98));
-            box-shadow: 0 18px 42px rgba(0,0,0,.2);
-        }
-        #KaevoConfigPage #KaevoConfigForm > .kaevo-card + .kaevo-card { margin-top: 1.5rem !important; }
-        #KaevoConfigPage #KaevoConfigForm > .kaevo-warning + .kaevo-card { margin-top: 1.5rem !important; }
-        #KaevoConfigPage .kaevo-card h3 { margin: 0 0 .55rem; color: var(--kaevo-text); font-size: 1.25rem; }
-        #KaevoConfigPage .kaevo-card-intro { margin: 0 0 1.15rem; color: var(--kaevo-muted); line-height: 1.5; }
-        #KaevoConfigPage .fieldDescription { color: var(--kaevo-muted); }
-        #KaevoConfigPage #KaevoCreatePairing,
-        #KaevoConfigPage #KaevoConfigForm > .kaevo-card .button-submit {
-            border: 0; border-radius: 999px; min-height: 52px; color: #17191d;
-            background: linear-gradient(135deg, #f0d3a3, #d6a65f); font-weight: 750;
-            box-shadow: 0 10px 24px rgba(185, 135, 63, .17);
-        }
-        #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saving"] {
-            cursor: progress; opacity: .72; box-shadow: none;
-        }
-        #KaevoConfigPage #KaevoSaveConfiguration { width: 100%; box-sizing: border-box; }
-        #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saved"] {
-            color: var(--kaevo-gold) !important; background: #0b0d10 !important;
-            border: 1px solid rgba(231,196,139,.55) !important; box-shadow: none !important;
-            cursor: not-allowed; opacity: 1;
-        }
-        #KaevoConfigPage #KaevoSaveConfigurationStatus {
-            margin: .75rem 0 0; text-align: center; color: var(--kaevo-gold); font-weight: 700;
-        }
-        #KaevoConfigPage #KaevoSaveConfigurationStatus[data-save-state="error"] { color: #ffb4ab; }
-        #KaevoConfigPage .kaevo-provider-save {
-            display: block; width: 100%; box-sizing: border-box; min-height: 52px; margin-top: 1rem;
-            border: 0 !important; border-radius: 999px; color: #17191d !important;
-            background: linear-gradient(135deg, #f0d3a3, #d6a65f) !important;
-            font-weight: 750; box-shadow: 0 10px 24px rgba(185,135,63,.17) !important;
-        }
-        #KaevoConfigPage .kaevo-provider-save[data-save-state="saving"] {
-            cursor: progress; opacity: .72; box-shadow: none !important;
-        }
-        #KaevoConfigPage .kaevo-provider-save[data-save-state="saved"] {
-            color: var(--kaevo-gold) !important; background: #0b0d10 !important;
-            border: 1px solid rgba(231,196,139,.55) !important; box-shadow: none !important;
-            cursor: not-allowed; opacity: 1;
-        }
-        #KaevoConfigPage #KaevoCreatePairing:disabled {
-            color: var(--kaevo-gold); background: rgba(8,10,13,.52);
-            border: 1px solid rgba(231,196,139,.45); box-shadow: none;
-            cursor: not-allowed; opacity: .62;
-        }
-        #KaevoConfigPage #KaevoCreatePairing[data-connected="true"] {
-            color: var(--kaevo-gold) !important; background: #0b0d10 !important;
-            border: 1px solid rgba(231,196,139,.55) !important; box-shadow: none !important;
-            cursor: not-allowed; opacity: 1;
-        }
-        #KaevoConfigPage #KaevoRepairPairing {
-            display: block; width: 100%; margin-top: .8rem; min-height: 52px;
-            border: 1px solid rgba(231,196,139,.62) !important; border-radius: 999px;
-            color: var(--kaevo-gold) !important; background: rgba(8,10,13,.74) !important;
-            font-weight: 750; box-shadow: none !important; cursor: pointer;
-        }
-        #KaevoConfigPage #KaevoRepairPairing:hover { background: rgba(185,135,63,.16) !important; }
-        #KaevoConfigPage #KaevoRepairPairing:focus-visible { outline: 3px solid rgba(231,196,139,.55); outline-offset: 3px; }
-        #KaevoConfigPage .kaevo-warning {
-            margin-top: 1.2rem; padding: 1rem 1.1rem; border: 1px solid rgba(231,196,139,.36);
-            border-radius: 16px; background: rgba(185,135,63,.10); color: var(--kaevo-muted); line-height: 1.5;
-        }
-        #KaevoConfigPage .kaevo-warning strong { color: var(--kaevo-text); }
-        #KaevoConfigPage #KaevoPairingTicket {
-            padding: 1.4rem; margin: 1.2rem 0 0; border: 1px solid var(--kaevo-border);
-            border-radius: 18px; background: rgba(8,10,13,.52);
-        }
-        #KaevoConfigPage #KaevoPairingQr {
-            display: block; margin: 0 auto 1rem; padding: 12px; border-radius: 16px;
-            background: #fff; box-shadow: 0 12px 30px rgba(0,0,0,.3);
-        }
-        #KaevoConfigPage .kaevo-code-label { margin: .25rem 0 .45rem; color: var(--kaevo-muted); }
-        #KaevoConfigPage #KaevoPairingCode {
-            display: block; color: var(--kaevo-gold); font-size: clamp(1.65rem, 5vw, 2.35rem);
-            letter-spacing: .16em; font-variant-numeric: tabular-nums;
-        }
-        #KaevoConfigPage #KaevoCopyPairingLink {
-            display: block; width: 100%; margin-top: 1rem; min-height: 48px;
-            border: 1px solid rgba(231,196,139,.62); border-radius: 999px;
-            color: var(--kaevo-gold); background: rgba(8,10,13,.74); font-weight: 750;
-        }
-        #KaevoConfigPage .kaevo-countdown { margin: .65rem 0 0; color: var(--kaevo-muted); }
-        #KaevoConfigPage #KaevoPairingCountdown { color: var(--kaevo-text); font-variant-numeric: tabular-nums; }
-        #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingQr,
-        #KaevoConfigPage #KaevoPairingTicket[data-expired="true"] #KaevoPairingCode { opacity: .4; }
-        #KaevoConfigPage .inputContainer { margin-top: 1.15rem; }
-        #KaevoConfigPage input { border-color: rgba(255,255,255,.12); border-radius: 12px; }
-        #KaevoConfigPage .kaevo-provider-card {
-            padding: 1rem; margin: 1rem 0; border: 1px solid rgba(255,255,255,.1);
-            border-radius: 16px; background: rgba(9,11,14,.35);
-        }
-        #KaevoConfigPage .kaevo-toggle-row {
-            display: flex !important; flex-wrap: nowrap; gap: .65rem;
-            align-items: flex-start !important; position: relative !important;
-            height: auto !important; min-height: 0 !important; margin: 1rem 0 1.25rem;
-            color: var(--kaevo-text); line-height: 1.35;
-        }
-        #KaevoConfigPage .kaevo-toggle-row input[type="checkbox"] {
-            width: auto; flex: 0 0 auto; box-sizing: initial;
-        }
-        #KaevoConfigPage .kaevo-toggle-row > .kaevo-toggle-content { display: block !important; flex: 1 1 auto; min-width: 0; }
-        #KaevoConfigPage .kaevo-toggle-row .kaevo-inline-help {
-            position: static !important; display: block !important;
-            width: auto !important; max-width: none !important;
-            height: auto !important; min-height: 0 !important;
-            margin: .2rem 0 0 !important; line-height: 1.4 !important;
-            white-space: normal !important; overflow-wrap: anywhere;
-        }
-        #KaevoConfigPage .kaevo-toggle-row + h3 { margin-top: 1.5rem; }
-        #KaevoConfigPage .kaevo-toggle-description {
-            position: static !important; display: block; margin: -.55rem 0 1.5rem 3.1rem;
-            max-width: calc(100% - 3.1rem); line-height: 1.45;
-        }
-        #KaevoConfigPage .kaevo-toggle-description .kaevo-app-followup {
-            display: block; margin-top: .35rem;
-        }
-        @media (max-width: 600px) {
-            #KaevoConfigPage .kaevo-card { padding: 1rem; border-radius: 18px; }
-            #KaevoConfigPage .kaevo-hero { padding-top: .75rem; }
-        }
-    #KaevoConfigPage .kaevo-cloud-action { background: #101719 !important; color: #ecc88e !important; border: 1px solid #917a53; border-radius: 24px; padding: 14px 22px; margin: 6px; }
-        #KaevoConfigPage .kaevo-cloud-action:disabled { background: #303439 !important; color: #bababa !important; opacity: 1; }
-        #KaevoConfigPage .kaevo-cloud-action[hidden] { display: none !important; }
-        </style>
 </head>
 <body>
     <div id="KaevoConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
@@ -156,7 +10,7 @@
         <style id="KaevoInjectedStyles">
             #KaevoConfigPage {
                 --kaevo-bg: #0d0f12; --kaevo-card: #181b20; --kaevo-gold: #e7c48b;
-                --kaevo-text: #f5ead8; --kaevo-muted: #aaa5a0; --kaevo-border: rgba(231,196,139,.22);
+                --kaevo-text: #f5ead8; --kaevo-muted: #c1bcb5; --kaevo-border: rgba(231,196,139,.22);
                 color: var(--kaevo-text);
                 background: radial-gradient(circle at 80% 0%, rgba(185,135,63,.14), transparent 34%), var(--kaevo-bg);
             }
@@ -187,57 +41,10 @@
                 color:var(--kaevo-muted); line-height:1.5;
             }
             #KaevoConfigPage .kaevo-trust-summary strong { color:var(--kaevo-text); }
-            #KaevoConfigPage #KaevoCreatePairing,
-            #KaevoConfigPage #KaevoConfigForm > .kaevo-card .button-submit {
-                border:0; border-radius:999px; min-height:52px; color:#17191d;
-                background:linear-gradient(135deg,#f0d3a3,#d6a65f); font-weight:750;
-                box-shadow:0 10px 24px rgba(185,135,63,.17);
-            }
-            #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saving"] {
-                cursor:progress; opacity:.72; box-shadow:none;
-            }
-            #KaevoConfigPage #KaevoSaveConfiguration { width:100%; box-sizing:border-box; }
-            #KaevoConfigPage #KaevoSaveConfiguration[data-save-state="saved"] {
-                color:var(--kaevo-gold) !important; background:#0b0d10 !important;
-                border:1px solid rgba(231,196,139,.55) !important; box-shadow:none !important;
-                cursor:not-allowed; opacity:1;
-            }
             #KaevoConfigPage #KaevoSaveConfigurationStatus {
                 margin:.75rem 0 0; text-align:center; color:var(--kaevo-gold); font-weight:700;
             }
             #KaevoConfigPage #KaevoSaveConfigurationStatus[data-save-state="error"] { color:#ffb4ab; }
-            #KaevoConfigPage .kaevo-provider-save {
-                display:block; width:100%; box-sizing:border-box; min-height:52px; margin-top:1rem;
-                border:0 !important; border-radius:999px; color:#17191d !important;
-                background:linear-gradient(135deg,#f0d3a3,#d6a65f) !important;
-                font-weight:750; box-shadow:0 10px 24px rgba(185,135,63,.17) !important;
-            }
-            #KaevoConfigPage .kaevo-provider-save[data-save-state="saving"] {
-                cursor:progress; opacity:.72; box-shadow:none !important;
-            }
-            #KaevoConfigPage .kaevo-provider-save[data-save-state="saved"] {
-                color:var(--kaevo-gold) !important; background:#0b0d10 !important;
-                border:1px solid rgba(231,196,139,.55) !important; box-shadow:none !important;
-                cursor:not-allowed; opacity:1;
-            }
-            #KaevoConfigPage #KaevoCreatePairing:disabled {
-                color:var(--kaevo-gold); background:rgba(8,10,13,.52);
-                border:1px solid rgba(231,196,139,.45); box-shadow:none;
-                cursor:not-allowed; opacity:.62;
-            }
-            #KaevoConfigPage #KaevoCreatePairing[data-connected="true"] {
-                color:var(--kaevo-gold) !important; background:#0b0d10 !important;
-                border:1px solid rgba(231,196,139,.55) !important; box-shadow:none !important;
-                cursor:not-allowed; opacity:1;
-            }
-            #KaevoConfigPage #KaevoRepairPairing {
-            display:block; width:100%; margin-top:.8rem; min-height:52px;
-            border:1px solid rgba(231,196,139,.62) !important; border-radius:999px;
-            color:var(--kaevo-gold) !important; background:rgba(8,10,13,.74) !important;
-            font-weight:750; box-shadow:none !important; cursor:pointer;
-            }
-            #KaevoConfigPage #KaevoRepairPairing:hover { background:rgba(185,135,63,.16) !important; }
-            #KaevoConfigPage #KaevoRepairPairing:focus-visible { outline:3px solid rgba(231,196,139,.55); outline-offset:3px; }
             #KaevoConfigPage .kaevo-warning {
                 margin-top:1.2rem; padding:1rem 1.1rem; border:1px solid rgba(231,196,139,.36);
                 border-radius:16px; background:rgba(185,135,63,.10); color:var(--kaevo-muted); line-height:1.5;
@@ -255,12 +62,6 @@
             #KaevoConfigPage #KaevoPairingCode {
                 display:block; color:var(--kaevo-gold); font-size:clamp(1.65rem,5vw,2.35rem);
                 letter-spacing:.16em; font-variant-numeric:tabular-nums; text-align:center;
-            }
-            #KaevoConfigPage #KaevoCopyPairingLink {
-                display:block; width:100%; margin-top:1rem; min-height:48px;
-                border:1px solid rgba(231,196,139,.62) !important; border-radius:999px;
-                color:var(--kaevo-gold) !important; background:rgba(8,10,13,.74) !important;
-                font-weight:750; box-shadow:none !important;
             }
             #KaevoConfigPage .kaevo-countdown { margin:.65rem 0 0; color:var(--kaevo-muted); text-align:center; }
             #KaevoConfigPage #KaevoPairingCountdown { color:var(--kaevo-text); font-variant-numeric:tabular-nums; }
@@ -302,6 +103,59 @@
             @media (max-width:600px) {
                 #KaevoConfigPage .kaevo-card { padding:1rem; border-radius:18px; }
                 #KaevoConfigPage .kaevo-hero { padding-top:.75rem; }
+            }
+
+            /* One body-injected button system: Jellyfin discards document-head styles. */
+            #KaevoConfigPage button.emby-button {
+                display:block; width:100%; box-sizing:border-box; min-height:52px;
+                margin: .8rem 0 0; padding:.85rem 1.25rem; border:1px solid #b59a70 !important;
+                border-radius:16px; background:#282a2e !important; color:#f5ddb5 !important;
+                font:inherit; font-weight:700; line-height:1.4; text-transform:none;
+                white-space:normal; overflow-wrap:anywhere; cursor:pointer;
+                box-shadow:none !important; opacity:1 !important;
+                transition:background-color .15s ease, border-color .15s ease;
+            }
+            #KaevoConfigPage button.emby-button.button-submit,
+            #KaevoConfigPage button.emby-button.kaevo-provider-save {
+                background:#e7c48b !important; color:#17191d !important; border-color:#e7c48b !important;
+            }
+            #KaevoConfigPage button.emby-button:not(:disabled):hover {
+                background:#3b352e !important; border-color:#f5ddb5 !important;
+            }
+            #KaevoConfigPage button.emby-button.button-submit:not(:disabled):hover,
+            #KaevoConfigPage button.emby-button.kaevo-provider-save:not(:disabled):hover {
+                background:#f5ddb5 !important;
+            }
+            #KaevoConfigPage button.emby-button:disabled {
+                background:#23262c !important; color:#b9bdc5 !important; border-color:#626975 !important;
+                cursor:default; opacity:1 !important;
+            }
+            #KaevoConfigPage button.emby-button[data-save-state="saving"] { cursor:progress; }
+            #KaevoConfigPage button.emby-button[data-save-state="saved"],
+            #KaevoConfigPage button.emby-button[data-connected="true"] {
+                background:#23262c !important; color:#e7c48b !important; border-color:#626975 !important;
+            }
+            #KaevoConfigPage button.emby-button:focus-visible,
+            #KaevoConfigPage summary:focus-visible,
+            #KaevoConfigPage input:focus-visible {
+                outline:3px solid #f5ddb5 !important; outline-offset:3px;
+            }
+            #KaevoConfigPage [hidden] { display:none !important; }
+            #KaevoConfigPage details {
+                margin-top:1.25rem; padding:1rem; border:1px solid #626975;
+                border-radius:16px; background:#181b20;
+            }
+            #KaevoConfigPage summary {
+                min-height:24px; padding:.5rem; color:#f5ddb5; font-weight:700; cursor:pointer;
+            }
+            #KaevoConfigPage input:not([type="checkbox"]) {
+                box-sizing:border-box; width:100%; min-height:48px; padding:.75rem;
+                background:#101216; color:#f5ead8; border:1px solid #626975; border-radius:12px;
+            }
+            #KaevoConfigPage .inputLabel { color:var(--kaevo-text); }
+            #KaevoConfigPage input[type="checkbox"] { accent-color:#e7c48b; }
+            @media (prefers-reduced-motion:reduce) {
+                #KaevoConfigPage button.emby-button { transition:none; }
             }
         </style>
         <div data-role="content">
@@ -357,8 +211,6 @@
                             <button id="KaevoCapturePlayback" type="button" is="emby-button" class="emby-button kaevo-cloud-action"><span>Capture Next Playback</span></button>
                             <p id="KaevoPlaybackDiagnosticStatus" class="fieldDescription" aria-live="polite">Diagnostics are off unless a capture is armed.</p>
                         </details>
-                        <button id="KaevoMigrateFirebase" type="button" is="emby-button" class="emby-button kaevo-cloud-action" hidden disabled><span>Prepare Firebase Connection</span></button>
-                        <p id="KaevoMigrationStatus" class="fieldDescription" aria-live="polite"></p>
                     </section>
 
                     <section class="kaevo-card">
@@ -769,8 +621,6 @@
             function renderCloudControl(value) {
                 var enabled = value.Enabled === true;
                 var paused = value.Enabled === false && value.Paused === true && value.RelayChannels === 0;
-                document.querySelector('#KaevoMigrateFirebase').hidden = !paused || value.FirebaseSelected === true;
-                document.querySelector('#KaevoMigrateFirebase').disabled = !paused || value.FirebaseSelected === true;
                 document.querySelector('#KaevoPauseCloud').disabled = !enabled;
                 document.querySelector('#KaevoResumeCloud').hidden = enabled;
                 document.querySelector('#KaevoResumeCloud').disabled = !paused;
@@ -818,31 +668,6 @@
                 ApiClient.ajax({ type: 'POST', url: ApiClient.getUrl(resume ? 'kaevo/v3/pairing/reconnect' : 'kaevo/cloud/pause') })
                     .then(poll, poll);
             }
-            function migrateFirebase() {
-                var button = document.querySelector('#KaevoMigrateFirebase');
-                if (button.disabled) return;
-                stopCloudControlMonitor();
-                var generation = cloudControlGeneration;
-                button.disabled = true;
-                document.querySelector('#KaevoResumeCloud').disabled = true;
-                document.querySelector('#KaevoMigrationStatus').textContent = 'Verifying the approved Firebase transfer. The connection stays paused…';
-                function reconcile() {
-                    return ApiClient.getJSON(ApiClient.getUrl('kaevo/cloud/connection')).then(function (value) {
-                        if (generation !== cloudControlGeneration) return;
-                        renderCloudControl(value);
-                        document.querySelector('#KaevoMigrationStatus').textContent = value.FirebaseSelected === true && value.Paused === true
-                            ? 'Firebase connection prepared. Cloud connection is still paused; playback has not been verified.'
-                            : 'The Firebase transfer was not confirmed. Keep the connection paused and refresh this page.';
-                    }).catch(function () {
-                        if (generation === cloudControlGeneration)
-                            document.querySelector('#KaevoMigrationStatus').textContent = 'The transfer status could not be read. Keep the connection paused and refresh this page.';
-                    });
-                }
-                // Reconcile a lost response without sending another migration.
-                ApiClient.ajax({ type: 'POST', url: ApiClient.getUrl('kaevo/cloud/migrate-firebase'),
-                    headers: { 'X-Kaevo-Admin-Action': 'lifecycle' } }).then(reconcile, reconcile);
-            }
-            document.querySelector('#KaevoMigrateFirebase').addEventListener('click', migrateFirebase);
             function captureNextPlayback() {
                 var button = document.querySelector('#KaevoCapturePlayback');
                 if (button.disabled) return Promise.resolve();

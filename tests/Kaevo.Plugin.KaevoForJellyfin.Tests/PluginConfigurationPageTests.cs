@@ -33,15 +33,15 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("Before uninstalling:", page, StringComparison.Ordinal);
         Assert.Contains("SABnzbd", page, StringComparison.Ordinal);
         Assert.Contains("qBittorrent", page, StringComparison.Ordinal);
-        Assert.Contains("#KaevoCreatePairing:disabled", page, StringComparison.Ordinal);
-        Assert.Contains("#KaevoCreatePairing[data-connected=\"true\"]", page, StringComparison.Ordinal);
+        Assert.Contains("button.emby-button:disabled", page, StringComparison.Ordinal);
+        Assert.Contains("#KaevoConfigPage button.emby-button[data-connected=\"true\"]", page, StringComparison.Ordinal);
         Assert.Contains("button.setAttribute('data-connected', paired ? 'true' : 'false')", page, StringComparison.Ordinal);
-        Assert.Contains("background:#0b0d10 !important", page, StringComparison.Ordinal);
+        Assert.Contains("background:#23262c !important", page, StringComparison.Ordinal);
         Assert.Contains("background:rgba(8,10,13,.52)", page, StringComparison.Ordinal);
-        Assert.Contains("border:1px solid rgba(231,196,139,.45)", page, StringComparison.Ordinal);
+        Assert.Contains("border-color:#626975 !important", page, StringComparison.Ordinal);
         Assert.Contains("#KaevoRepairPairing", page, StringComparison.Ordinal);
-        Assert.Contains("background:rgba(8,10,13,.74) !important", page, StringComparison.Ordinal);
-        Assert.Contains("#KaevoRepairPairing:focus-visible", page, StringComparison.Ordinal);
+        Assert.Contains("background:#282a2e !important", page, StringComparison.Ordinal);
+        Assert.Contains("button.emby-button:focus-visible", page, StringComparison.Ordinal);
         Assert.Contains("Scan the QR or copy its one-time link for manual entry in Kaevo.", page, StringComparison.Ordinal);
         Assert.Contains("id=\"KaevoCopyPairingLink\"", page, StringComparison.Ordinal);
         Assert.Contains("Pairing Link Copied", page, StringComparison.Ordinal);
@@ -87,9 +87,9 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("Saving…", page, StringComparison.Ordinal);
         Assert.Contains("Saved ✓", page, StringComparison.Ordinal);
         Assert.Contains("Settings are saved.", page, StringComparison.Ordinal);
-        Assert.Contains("#KaevoSaveConfiguration[data-save-state=\"saved\"]", page, StringComparison.Ordinal);
-        Assert.Contains("#KaevoSaveConfiguration { width:100%; box-sizing:border-box; }", page, StringComparison.Ordinal);
-        Assert.Contains("background:#0b0d10 !important", page, StringComparison.Ordinal);
+        Assert.Contains("button.emby-button[data-save-state=\"saved\"]", page, StringComparison.Ordinal);
+        Assert.Contains("display:block; width:100%; box-sizing:border-box; min-height:52px;", page, StringComparison.Ordinal);
+        Assert.Contains("background:#23262c !important", page, StringComparison.Ordinal);
         Assert.Contains("addEventListener('input'", page, StringComparison.Ordinal);
         Assert.Contains("addEventListener('change'", page, StringComparison.Ordinal);
         Assert.Contains("savedSettings: null", page, StringComparison.Ordinal);
@@ -104,7 +104,7 @@ public sealed class PluginConfigurationPageTests
         Assert.Contains("refreshProviderSaveStateFromEvent", page, StringComparison.Ordinal);
         Assert.Contains("setProviderSaveState(provider, 'saving')", page, StringComparison.Ordinal);
         Assert.Contains("setProviderSaveState(provider, 'error')", page, StringComparison.Ordinal);
-        Assert.Contains(".kaevo-provider-save[data-save-state=\"saved\"]", page, StringComparison.Ordinal);
+        Assert.Contains("button.emby-button[data-save-state=\"saved\"]", page, StringComparison.Ordinal);
 
         Assert.Contains(assembly.GetManifestResourceNames(), name => name.EndsWith("Branding.Kaevo_LogoMark_Transparent.png", StringComparison.Ordinal));
         Assert.Contains(assembly.GetManifestResourceNames(), name => name.EndsWith("Branding.Kaevo_Wordmark_Transparent.png", StringComparison.Ordinal));
