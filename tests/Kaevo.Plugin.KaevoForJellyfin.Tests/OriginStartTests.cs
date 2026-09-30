@@ -16,6 +16,37 @@ public sealed class OriginStartTests
     private static PlaybackGrant Grant(PlaybackOriginScope scope) => new(scope.ConnectorId, scope.DeviceId, scope.ItemId,
         scope.MediaSourceId, scope.PlaySessionId, "transcode", scope.MaximumBitrate, Deadline);
 
+    [Theory]
+    [InlineData("1.ts", true)]
+    [InlineData("2.ts", true)]
+    [InlineData("-1.ts", false)]
+    [InlineData("main.m3u8", false)]
+    [InlineData("2.mp4", false)]
+    public void DeliveryRequiresRealScopedMedia(string file, bool expected)
+    {
+        var scope = Scope();
+        Assert.Equal(expected, scope.IsDeliveredMediaSegment($"/Videos/{Item}/hls1/main/{file}?playSessionId=play-session&deviceId=device&mediaSourceId=source"));
+        Assert.False(scope.IsDeliveredMediaSegment($"/Videos/{Item}/hls1/main/{file}?playSessionId=other"));
+    }
+
+    [Fact]
+    public async Task NeighboringSegmentPreventsTimeoutFromKillingActivePlayback()
+    {
+        var owner = new KaevoOriginStart(); var scope = Scope();
+        using var lifetime = new CancellationTokenSource();
+        var entered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopped = false;
+        Assert.True(owner.TryStart(scope, Deadline, Playlist,
+            (path, _) => { entered.SetResult(path); return Task.CompletedTask; },
+            () => { stopped = true; return Task.CompletedTask; }, _ => { }, lifetime.Token));
+        var path = await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Contains("/1.ts?", path);
+        owner.Delivered(Grant(scope), path.Replace("/1.ts?", "/2.ts?"));
+        lifetime.Cancel();
+        await Task.Delay(50);
+        Assert.False(stopped);
+    }
+
     [Fact]
     public void CompactSegmentMatchesRelayRenditionAndExactResume()
     {
@@ -41,7 +72,7 @@ public sealed class OriginStartTests
     }
 
     [Fact]
-    public async Task CompactStartsOnlyExactSegmentAndRejectsWrongResumeHandoff()
+    public async Task CompactPlayerSeekTakesOwnershipOfItsExactSession()
     {
         var owner = new KaevoOriginStart();
         var scope = Scope() with { CompactRuntimeTicks = 90_000_000_000 };
@@ -55,7 +86,8 @@ public sealed class OriginStartTests
         var path = await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
         owner.Delivered(Grant(scope), path.Replace("runtimeTicks=45000000", "runtimeTicks=0"));
         lifetime.Cancel();
-        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(50);
+        Assert.False(stopped.Task.IsCompleted);
     }
 
     [Fact]

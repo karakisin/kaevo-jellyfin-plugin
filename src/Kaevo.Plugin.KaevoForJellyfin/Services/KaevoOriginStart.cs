@@ -133,8 +133,7 @@ internal sealed class KaevoOriginStart
                 || entry.Scope.ConnectorId != grant.ConnectorId || entry.Scope.DeviceId != grant.DeviceId
                 || entry.Scope.ItemId != grant.ItemId || entry.Scope.MediaSourceId != grant.MediaSourceId
                 || entry.Scope.Mode != grant.Mode
-                || entry.Segment?.Split('?', 2)[0] != path.Split('?', 2)[0]
-                || !entry.Scope.MatchesCompactPosition(path)) return;
+                || !entry.Scope.IsDeliveredMediaSegment(path)) return;
             entry.Promoted = true;
             entry.Handoff.TrySetResult(true);
         }
@@ -178,6 +177,24 @@ internal sealed record PlaybackOriginScope(string ConnectorId, string DeviceId, 
         return query.TryGetValue("runtimeTicks", out var position) && position == PositionTicks.ToString(CultureInfo.InvariantCulture)
             && query.TryGetValue("actualSegmentLengthTicks", out var duration)
             && duration == Math.Min(20_000_000, CompactRuntimeTicks.Value - PositionTicks).ToString(CultureInfo.InvariantCulture);
+    }
+
+    // Delivery already passed the signed media grant and current relay admission.
+    // Any real media body in that exact session transfers encoder ownership to
+    // the player, including a neighboring keyframe segment or a user seek. The
+    // startup timeout must not kill a now-active job just because AVPlayer chose
+    // a different first segment. Manifests and initialization headers alone do
+    // not transfer ownership; abandoned preparations still expire.
+    internal bool IsDeliveredMediaSegment(string path)
+    {
+        try
+        {
+            var validated = Child(path, MasterPath, Mode == "remux" ? ".mp4" : ".ts");
+            return int.TryParse(Path.GetFileNameWithoutExtension(validated.Split('?', 2)[0]),
+                NumberStyles.None, CultureInfo.InvariantCulture, out var index) && index >= 0;
+        }
+        catch (InvalidOperationException) { return false; }
+        catch (UriFormatException) { return false; }
     }
 
     internal string MasterPath => $"/Videos/{Uri.EscapeDataString(ItemId)}/master.m3u8?" + string.Join('&',
