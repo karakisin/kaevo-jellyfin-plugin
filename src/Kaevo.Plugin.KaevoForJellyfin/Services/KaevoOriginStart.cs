@@ -137,21 +137,30 @@ internal sealed class KaevoOriginStart
 internal sealed record PlaybackOriginScope(string ConnectorId, string DeviceId, string ItemId,
     string MediaSourceId, string PlaySessionId, int MaximumBitrate, int? AudioIndex, long PositionTicks, string Mode = "transcode")
 {
+    // Longer native transcodes use the relay's compact relative-segment path,
+    // so a full-timeline origin warm-up cannot be handed to that player.
+    internal static bool CanWarmNativeRendition(string mode, long runtimeTicks) =>
+        runtimeTicks > 0 && (mode == "remux"
+            || (mode == "transcode" && runtimeTicks <= 2L * 60 * 60 * 10_000_000));
+
     internal string MasterPath => $"/Videos/{Uri.EscapeDataString(ItemId)}/master.m3u8?" + string.Join('&',
         Rendition().Select(pair => $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
 
-    // Match the selected delivery recipe. The encoder implementation
+    // Match the native app's default 720p / 2-second startup rendition.
+    // A different segment duration changes the resume segment number and can
+    // make the warm-up and real player restart each other's Jellyfin job.
+    // The encoder implementation
     // remains Jellyfin's configured QSV/VAAPI/NVENC/other supported backend.
     internal Dictionary<string, string> Rendition()
     {
         var query = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["videoCodec"] = "h264", ["audioCodec"] = "aac",
-            ["videoBitRate"] = Math.Min(Math.Max(MaximumBitrate - 192_000, 1), 11_808_000).ToString(CultureInfo.InvariantCulture),
-            ["audioBitRate"] = "192000", ["maxWidth"] = "1920", ["maxHeight"] = "1080",
+            ["videoBitRate"] = Math.Min(Math.Max(MaximumBitrate - 192_000, 1), 5_744_000).ToString(CultureInfo.InvariantCulture),
+            ["audioBitRate"] = "192000", ["maxWidth"] = "1280", ["maxHeight"] = "720",
             ["enableAdaptiveBitrateStreaming"] = "true", ["allowVideoStreamCopy"] = "false",
             ["allowAudioStreamCopy"] = "false", ["enableAutoStreamCopy"] = "false",
-            ["segmentContainer"] = "ts", ["segmentLength"] = "4", ["minSegments"] = "1",
+            ["segmentContainer"] = "ts", ["segmentLength"] = "2", ["minSegments"] = "1",
             ["enableSubtitlesInManifest"] = "true", ["mediaSourceId"] = MediaSourceId,
             ["playSessionId"] = PlaySessionId, ["deviceId"] = DeviceId
         };

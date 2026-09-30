@@ -244,15 +244,58 @@ public sealed class OriginStartTests
     private sealed class TestLease(Action release) : IDisposable { public void Dispose() => release(); }
 
     [Fact]
-    public void RecipeKeepsExistingQualityAndConfiguredHardwareSelection()
+    public void TranscodeWarmupMatchesNativeDefaultRenditionAndKeepsHardwareSelection()
     {
         var query = Scope().Rendition();
         Assert.Equal("h264", query["videoCodec"]);
-        Assert.Equal("11808000", query["videoBitRate"]);
+        Assert.Equal("5744000", query["videoBitRate"]);
         Assert.Equal("192000", query["audioBitRate"]);
-        Assert.Equal("1080", query["maxHeight"]);
-        Assert.Equal("4", query["segmentLength"]);
+        Assert.Equal("1280", query["maxWidth"]);
+        Assert.Equal("720", query["maxHeight"]);
+        Assert.Equal("2", query["segmentLength"]);
         Assert.Equal("ts", query["segmentContainer"]);
         Assert.DoesNotContain(query.Keys, key => key.Contains("encoder", StringComparison.OrdinalIgnoreCase));
     }
+
+    [Theory]
+    [InlineData(1_000_000, "808000")]
+    [InlineData(6_000_000, "5744000")]
+    [InlineData(40_000_000, "5744000")]
+    public void TranscodeWarmupRespectsTheSignedBitrateCeiling(int maximum, string videoBitrate)
+    {
+        var query = (Scope() with { MaximumBitrate = maximum }).Rendition();
+        Assert.Equal(videoBitrate, query["videoBitRate"]);
+    }
+
+    [Fact]
+    public async Task NativeTwoSecondResumeDeliveryPromotesWarmupWithoutStoppingThePlayer()
+    {
+        const string nativeMedia = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:2,\nhls1/main/0.ts\n#EXTINF:2,\nhls1/main/1.ts\n#EXTINF:2,\nhls1/main/2.ts\n#EXT-X-ENDLIST\n";
+        var scope = Scope();
+        var owner = new KaevoOriginStart();
+        var ready = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disposed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopped = false;
+        Assert.True(owner.TryStart(scope, Deadline,
+            (path, _) => Task.FromResult(path.Contains("master.m3u8") ? Master : nativeMedia),
+            (path, _) => { ready.SetResult(path); return Task.CompletedTask; },
+            () => { stopped = true; return Task.CompletedTask; }, _ => { }, default,
+            observationResource: new TestLease(() => disposed.SetResult())));
+        var path = await ready.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Contains("/2.ts?", path);
+        owner.Delivered(Grant(scope), path);
+        await disposed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.False(stopped);
+    }
+
+
+    [Theory]
+    [InlineData("transcode", 72_000_000_000L, true)]
+    [InlineData("transcode", 72_000_000_001L, false)]
+    [InlineData("transcode", 0L, false)]
+    [InlineData("remux", 108_000_000_000L, true)]
+    [InlineData("direct_play", 36_000_000_000L, false)]
+    public void CompactLongTranscodesDoNotStartAnIncompatibleFullTimelineWarmup(string mode, long ticks, bool expected)
+        => Assert.Equal(expected, PlaybackOriginScope.CanWarmNativeRendition(mode, ticks));
+
 }

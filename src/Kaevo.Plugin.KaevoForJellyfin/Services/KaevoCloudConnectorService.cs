@@ -3205,7 +3205,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             && request.OriginStartExpiresAt is > 0
             && parameters.TryGetValue("origin_start_ticks", out var originPosition)
             && originPosition.TryGetInt64(out var positionTicks) && positionTicks >= 0
-            && runTimeTicks is > 0 && positionTicks < runTimeTicks)
+            && runTimeTicks is > 0 && positionTicks < runTimeTicks
+            && PlaybackOriginScope.CanWarmNativeRendition(mode, runTimeTicks.Value))
         {
             var originScope = new PlaybackOriginScope(configuration.ConnectorId, deviceId, itemId,
                 mediaSourceId, playSessionId, maxBitrate, audioStreamIndex ?? tracks.SelectedAudioStreamIndex, positionTicks, mode);
