@@ -3206,26 +3206,6 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             && parsedRuntime > 0
                 ? parsedRuntime
                 : (long?)null;
-        // Long movies use a different segment timeline, so they cannot reuse
-        // the native warm-up below. They can still omit a proven-unused GPU
-        // dependency when their real player starts the exact admitted session.
-        if (mode == "transcode" && audioOffsetMilliseconds is null
-            && subtitleStreamIndex is null && maxBitrate > 192_000
-            && request.OriginStartExpiresAt is > 0
-            && runTimeTicks is > 0 && requestedOriginStartTicks < runTimeTicks
-            && parameters.ContainsKey("origin_start_ticks")
-            && !PlaybackOriginScope.CanWarmNativeRendition(mode, runTimeTicks.Value))
-        {
-            var playerScope = new PlaybackOriginScope(configuration.ConnectorId, deviceId, itemId,
-                mediaSourceId, playSessionId, maxBitrate, audioStreamIndex ?? tracks.SelectedAudioStreamIndex,
-                requestedOriginStartTicks, mode);
-            (_transcodeManager as KaevoHardwareTranscodeManager)?.AdmitPlayerStart(
-                playerScope, jellyfinUserId, request.OriginStartExpiresAt.Value, cancellationToken,
-                () => _logger.LogInformation("Kaevo hardware plan omitted_unused_opencl=true route=compact_player"));
-            if (_playbackDiagnostic.Value is { } playerCapture)
-                _ = ObserveCompactPlayerAsync(configuration, playerScope, playerCapture,
-                    request.OriginStartExpiresAt.Value, cancellationToken);
-        }
         long? nativeOriginStartTicks = null;
         if ((mode is "transcode" or "remux") && audioOffsetMilliseconds is null
             && subtitleStreamIndex is null && maxBitrate > 192_000
@@ -3233,10 +3213,12 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             && parameters.TryGetValue("origin_start_ticks", out var originPosition)
             && originPosition.TryGetInt64(out var positionTicks) && positionTicks >= 0
             && runTimeTicks is > 0 && positionTicks < runTimeTicks
-            && PlaybackOriginScope.CanWarmNativeRendition(mode, runTimeTicks.Value))
+            && (PlaybackOriginScope.CanWarmNativeRendition(mode, runTimeTicks.Value)
+                || PlaybackOriginScope.CanWarmCompactRendition(mode, runTimeTicks.Value)))
         {
             var originScope = new PlaybackOriginScope(configuration.ConnectorId, deviceId, itemId,
-                mediaSourceId, playSessionId, maxBitrate, audioStreamIndex ?? tracks.SelectedAudioStreamIndex, positionTicks, mode);
+                mediaSourceId, playSessionId, maxBitrate, audioStreamIndex ?? tracks.SelectedAudioStreamIndex, positionTicks, mode,
+                PlaybackOriginScope.CanWarmCompactRendition(mode, runTimeTicks.Value) ? runTimeTicks : null);
             var began = System.Diagnostics.Stopwatch.StartNew();
             var commandCapture = _playbackDiagnostic.Value;
             PlaybackDiagnosticTrace? originCapture = null;
@@ -3278,7 +3260,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             {
                 // Existing Cloud acknowledgement is transcode-only. Remux
                 // scheduling is best-effort and never bypasses native readiness.
-                if (mode == "transcode") nativeOriginStartTicks = positionTicks;
+                if (mode == "transcode" && originScope.CompactRuntimeTicks is null) nativeOriginStartTicks = positionTicks;
             }
             else originLog?.Dispose();
         }

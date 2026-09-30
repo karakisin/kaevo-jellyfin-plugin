@@ -65,19 +65,25 @@ internal sealed class KaevoOriginStart
         {
             capture?.Mark(PlaybackDiagnosticStep.OriginStarted);
             diagnostic("started");
-            var masterPath = entry.Scope.MasterPath;
-            capture?.Mark(PlaybackDiagnosticStep.UpstreamRequest, PlaybackDiagnosticResource.OriginMaster);
-            var master = await playlist(masterPath, timeout.Token).ConfigureAwait(false);
-            capture?.Mark(PlaybackDiagnosticStep.UpstreamBody, PlaybackDiagnosticResource.OriginMaster);
-            var mediaPath = entry.Scope.FirstVariant(master, masterPath);
-            capture?.Mark(PlaybackDiagnosticStep.UpstreamRequest, PlaybackDiagnosticResource.OriginMedia);
-            var media = await playlist(mediaPath, timeout.Token).ConfigureAwait(false);
-            capture?.Mark(PlaybackDiagnosticStep.UpstreamBody, PlaybackDiagnosticResource.OriginMedia);
-            var segmentPath = entry.Scope.ResumeSegment(media, mediaPath);
-            lock (_gate) entry.Segment = segmentPath.Split('?', 2)[0];
+            string segmentPath;
+            if (entry.Scope.CompactRuntimeTicks is not null)
+                segmentPath = entry.Scope.CompactFirstSegment();
+            else
+            {
+                var masterPath = entry.Scope.MasterPath;
+                capture?.Mark(PlaybackDiagnosticStep.UpstreamRequest, PlaybackDiagnosticResource.OriginMaster);
+                var master = await playlist(masterPath, timeout.Token).ConfigureAwait(false);
+                capture?.Mark(PlaybackDiagnosticStep.UpstreamBody, PlaybackDiagnosticResource.OriginMaster);
+                var mediaPath = entry.Scope.FirstVariant(master, masterPath);
+                capture?.Mark(PlaybackDiagnosticStep.UpstreamRequest, PlaybackDiagnosticResource.OriginMedia);
+                var media = await playlist(mediaPath, timeout.Token).ConfigureAwait(false);
+                capture?.Mark(PlaybackDiagnosticStep.UpstreamBody, PlaybackDiagnosticResource.OriginMedia);
+                segmentPath = entry.Scope.ResumeSegment(media, mediaPath);
+            }
+            lock (_gate) entry.Segment = segmentPath;
             capture?.Mark(PlaybackDiagnosticStep.OriginSegmentSelected);
             if (capture is not null && snapshot is not null
-                && int.TryParse(Path.GetFileNameWithoutExtension(entry.Segment), NumberStyles.None,
+                && int.TryParse(Path.GetFileNameWithoutExtension(entry.Segment.Split('?', 2)[0]), NumberStyles.None,
                     CultureInfo.InvariantCulture, out var index) && index is >= 0 and < int.MaxValue)
                 observer = Task.Run(() => OriginEncoderObservation.ObserveAsync(
                     () => snapshot(index), capture, observation.Token));
@@ -127,7 +133,8 @@ internal sealed class KaevoOriginStart
                 || entry.Scope.ConnectorId != grant.ConnectorId || entry.Scope.DeviceId != grant.DeviceId
                 || entry.Scope.ItemId != grant.ItemId || entry.Scope.MediaSourceId != grant.MediaSourceId
                 || entry.Scope.Mode != grant.Mode
-                || entry.Segment != path.Split('?', 2)[0]) return;
+                || entry.Segment?.Split('?', 2)[0] != path.Split('?', 2)[0]
+                || !entry.Scope.MatchesCompactPosition(path)) return;
             entry.Promoted = true;
             entry.Handoff.TrySetResult(true);
         }
@@ -135,13 +142,43 @@ internal sealed class KaevoOriginStart
 }
 
 internal sealed record PlaybackOriginScope(string ConnectorId, string DeviceId, string ItemId,
-    string MediaSourceId, string PlaySessionId, int MaximumBitrate, int? AudioIndex, long PositionTicks, string Mode = "transcode")
+    string MediaSourceId, string PlaySessionId, int MaximumBitrate, int? AudioIndex, long PositionTicks, string Mode = "transcode", long? CompactRuntimeTicks = null)
 {
     // Longer native transcodes use the relay's compact relative-segment path,
     // so a full-timeline origin warm-up cannot be handed to that player.
     internal static bool CanWarmNativeRendition(string mode, long runtimeTicks) =>
         runtimeTicks > 0 && (mode == "remux"
             || (mode == "transcode" && runtimeTicks <= 2L * 60 * 60 * 10_000_000));
+
+    internal static bool CanWarmCompactRendition(string mode, long runtimeTicks) =>
+        mode == "transcode" && runtimeTicks > 2L * 60 * 60 * 10_000_000
+            && runtimeTicks <= 60_000L * 10_000_000;
+
+    internal string CompactFirstSegment()
+    {
+        if (CompactRuntimeTicks is not { } runtime || !CanWarmCompactRendition(Mode, runtime)
+            || PositionTicks < 0 || PositionTicks >= runtime || MaximumBitrate <= 256_000)
+            throw new InvalidOperationException("originCompactScopeInvalid");
+        var query = Rendition();
+        query["runtimeTicks"] = PositionTicks.ToString(CultureInfo.InvariantCulture);
+        query["actualSegmentLengthTicks"] = Math.Min(20_000_000, runtime - PositionTicks).ToString(CultureInfo.InvariantCulture);
+        return $"/Videos/{Uri.EscapeDataString(ItemId)}/hls1/main/0.ts?" + string.Join('&',
+            query.Select(pair => $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
+    }
+
+    internal bool MatchesCompactPosition(string path)
+    {
+        if (CompactRuntimeTicks is null) return true;
+        var query = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in path.Split('?', 2).ElementAtOrDefault(1)?.Split('&') ?? [])
+        {
+            var parts = pair.Split('=', 2);
+            if (parts.Length != 2 || !query.TryAdd(Uri.UnescapeDataString(parts[0]), Uri.UnescapeDataString(parts[1]))) return false;
+        }
+        return query.TryGetValue("runtimeTicks", out var position) && position == PositionTicks.ToString(CultureInfo.InvariantCulture)
+            && query.TryGetValue("actualSegmentLengthTicks", out var duration)
+            && duration == Math.Min(20_000_000, CompactRuntimeTicks.Value - PositionTicks).ToString(CultureInfo.InvariantCulture);
+    }
 
     internal string MasterPath => $"/Videos/{Uri.EscapeDataString(ItemId)}/master.m3u8?" + string.Join('&',
         Rendition().Select(pair => $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));

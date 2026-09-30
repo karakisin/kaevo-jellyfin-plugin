@@ -16,6 +16,69 @@ public sealed class OriginStartTests
     private static PlaybackGrant Grant(PlaybackOriginScope scope) => new(scope.ConnectorId, scope.DeviceId, scope.ItemId,
         scope.MediaSourceId, scope.PlaySessionId, "transcode", scope.MaximumBitrate, Deadline);
 
+    [Fact]
+    public void CompactSegmentMatchesRelayRenditionAndExactResume()
+    {
+        var scope = Scope(ticks: 123_456_789) with { CompactRuntimeTicks = 90_000_000_000 };
+        var path = scope.CompactFirstSegment();
+        Assert.StartsWith($"/Videos/{Item}/hls1/main/0.ts?", path);
+        var query = path.Split('?')[1].Split('&').Select(p => p.Split('=', 2))
+            .ToDictionary(p => p[0], p => p[1]);
+        Assert.Equal("123456789", query["runtimeTicks"]);
+        Assert.Equal("20000000", query["actualSegmentLengthTicks"]);
+        Assert.Equal("5744000", query["videoBitRate"]);
+        Assert.Equal("2", query["segmentLength"]);
+        Assert.Equal("1", query["audioStreamIndex"]);
+        Assert.Equal("play-session", query["playSessionId"]);
+        Assert.False(query.ContainsKey("StartTimeTicks"));
+        Assert.True(scope.MatchesCompactPosition(path));
+        Assert.False(scope.MatchesCompactPosition(path.Replace("123456789", "123456788")));
+        Assert.False(scope.MatchesCompactPosition(path + "&runtimeTicks=123456789"));
+        var tail = scope with { PositionTicks = scope.CompactRuntimeTicks.Value - 123 };
+        Assert.Contains("actualSegmentLengthTicks=123", tail.CompactFirstSegment());
+        Assert.Throws<InvalidOperationException>(() => (scope with { CompactRuntimeTicks = 10 }).CompactFirstSegment());
+        Assert.Throws<InvalidOperationException>(() => (scope with { PositionTicks = -1 }).CompactFirstSegment());
+    }
+
+    [Fact]
+    public async Task CompactStartsOnlyExactSegmentAndRejectsWrongResumeHandoff()
+    {
+        var owner = new KaevoOriginStart();
+        var scope = Scope() with { CompactRuntimeTicks = 90_000_000_000 };
+        using var lifetime = new CancellationTokenSource();
+        var entered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.True(owner.TryStart(scope, Deadline,
+            (_, _) => throw new Exception("Compact must not request full-timeline playlists"),
+            (path, _) => { entered.SetResult(path); return Task.CompletedTask; },
+            () => { stopped.TrySetResult(); return Task.CompletedTask; }, _ => { }, lifetime.Token));
+        var path = await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        owner.Delivered(Grant(scope), path.Replace("runtimeTicks=45000000", "runtimeTicks=0"));
+        lifetime.Cancel();
+        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task CompactExactHandoffPreservesTheRealPlayerJob()
+    {
+        var owner = new KaevoOriginStart();
+        var scope = Scope() with { CompactRuntimeTicks = 90_000_000_000 };
+        using var lifetime = new CancellationTokenSource();
+        var entered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopped = false;
+        Assert.True(owner.TryStart(scope, Deadline, (_, _) => throw new Exception("No playlist"),
+            (path, _) => { entered.SetResult(path); return Task.CompletedTask; },
+            () => { stopped = true; return Task.CompletedTask; },
+            stage => { if (stage == "segment_ready") completed.TrySetResult(); }, lifetime.Token));
+        var path = await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        owner.Delivered(Grant(scope), path);
+        await completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        lifetime.Cancel();
+        await Task.Delay(30);
+        Assert.False(stopped);
+    }
+
     private const string RemuxMedia = "#EXTM3U\n#EXT-X-MAP:URI=\"hls1/main/-1.mp4?runtimeTicks=0&actualSegmentLengthTicks=0\"\n#EXTINF:2,\nhls1/main/0.mp4\n#EXTINF:2,\nhls1/main/1.mp4\n#EXTINF:2,\nhls1/main/2.mp4\n#EXT-X-ENDLIST\n";
 
     [Fact]
