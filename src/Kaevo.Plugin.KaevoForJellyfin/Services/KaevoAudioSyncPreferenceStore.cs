@@ -40,13 +40,13 @@ public sealed class KaevoAudioSyncPreferenceStore
         if (!File.Exists(path)) return null;
         if (new FileInfo(path).Length > 1024) throw new InvalidOperationException("audioSyncStoreInvalid");
         var value = JsonSerializer.Deserialize<Preference>(File.ReadAllText(path));
-        if (value is null || value.Version != 1 || value.Key != key || value.OffsetMs is < -5000 or > 5000)
+        if (value is null || value.Version != 1 || value.Key != key || value.OffsetMs is < -10000 or > 10000)
             throw new InvalidOperationException("audioSyncStoreInvalid");
         return value.OffsetMs;
     }
     internal int Write(string key, int offset)
     {
-        if (offset is < -5000 or > 5000) throw new InvalidOperationException("audioSyncOffsetInvalid");
+        if (offset is < -10000 or > 10000) throw new InvalidOperationException("audioSyncOffsetInvalid");
         lock (_gate)
         {
             _ = ReadLocked(key); // Validate key and existing record; never hide corruption.

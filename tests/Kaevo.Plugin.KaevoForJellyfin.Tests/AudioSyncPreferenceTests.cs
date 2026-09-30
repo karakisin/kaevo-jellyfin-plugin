@@ -25,7 +25,13 @@ public sealed class AudioSyncPreferenceTests
             Assert.Equal(-120, reopened.Read(Key("profile1", "user")));
             Assert.Equal(0, reopened.Write(Key("profile1", "user"), 0));
             Assert.Equal(0, new KaevoAudioSyncPreferenceStore(path).Read(Key("profile1", "user")));
-            Assert.Throws<InvalidOperationException>(() => store.Write(Key("profile1", "user"), 5001));
+            foreach (var offset in new[] { -10000, -5010, 5010, 10000 })
+            {
+                Assert.Equal(offset, store.Write(Key("profile1", "user"), offset));
+                Assert.Equal(offset, new KaevoAudioSyncPreferenceStore(path).Read(Key("profile1", "user")));
+            }
+            Assert.Throws<InvalidOperationException>(() => store.Write(Key("profile1", "user"), -10001));
+            Assert.Throws<InvalidOperationException>(() => store.Write(Key("profile1", "user"), 10001));
         }
         finally { Directory.Delete(path, true); }
     }

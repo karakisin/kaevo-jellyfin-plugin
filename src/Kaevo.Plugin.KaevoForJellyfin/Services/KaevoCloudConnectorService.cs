@@ -4543,7 +4543,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             || binding.ConnectorId != connectorId || !ItemIdRegex().IsMatch(binding.ProviderUserId)
             || p is null || !p.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(expected)
             || p["scope"].ValueKind != JsonValueKind.String
-            || (writing && (!p["offset_ms"].TryGetInt32(out var offset) || offset is < -5000 or > 5000)))
+            || (writing && (!p["offset_ms"].TryGetInt32(out var offset) || offset is < -10000 or > 10000)))
             throw new InvalidOperationException("audioSyncAuthorityInvalid");
         return KaevoAudioSyncPreferenceStore.Key(connectorId, request.AudioSyncAuthority.AccountId,
             request.ProfileId ?? "", RequireItemId(p), p["scope"].GetString()!);
