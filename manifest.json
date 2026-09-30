@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.61.0",
+        "changelog": "Aligns the local encoder warm-up with the current Kaevo native player: 720p ceiling, 2-second HLS segments and matching bitrate. Prevents the warm-up and player from requesting different resume segments and restarting the same conversion. Keeps source-video copy and signed limits intact. Device startup latency still requires validation.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-09-30T09:43:15Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.61/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "164ad42d3ba98d691b49f6c545da3986"
+      },
+      {
         "version": "0.3.60.0",
         "changelog": "Binds playback negotiation to the authorized media source and explicitly disables unselected subtitles, preventing hidden default subtitles from forcing unnecessary video conversion. Explicit subtitle selections remain honored. Physical startup latency requires device validation.",
         "targetAbi": "10.11.0.0",
