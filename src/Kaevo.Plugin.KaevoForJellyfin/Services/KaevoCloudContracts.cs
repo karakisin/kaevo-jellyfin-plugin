@@ -60,4 +60,5 @@ internal sealed record RelayMessage(
     [property: JsonPropertyName("method")] string? Method,
     [property: JsonPropertyName("path")] string? Path,
     [property: JsonPropertyName("query")] Dictionary<string, JsonElement>? Query,
-    [property: JsonPropertyName("range")] string? Range);
+    [property: JsonPropertyName("range")] string? Range,
+    [property: JsonPropertyName("playlist_encoding")] string? PlaylistEncoding = null);

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.IO.Compression;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
 using System.Reflection;
@@ -4032,6 +4033,15 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
     }
 
+    internal static byte[] EncodeRelayPlaylist(byte[] body, string? negotiatedEncoding)
+    {
+        if (negotiatedEncoding != "gzip") return body;
+        using var output = new MemoryStream();
+        using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true))
+            gzip.Write(body);
+        return output.ToArray();
+    }
+
     private async Task HandleRelayRequestAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
@@ -4108,13 +4118,18 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 safeHeaders.Remove("content-length");
             }
 
+            var playlistEncoding = isPlaylist && response.IsSuccessStatusCode
+                && safeHeaders.TryGetValue("content-type", out var playlistContentType)
+                && playlistContentType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase)
+                && message.PlaylistEncoding == "gzip" ? "gzip" : null;
             await SendRelayTextAsync(socket, sendGate, JsonSerializer.Serialize(new
             {
                 type = "response_start",
                 request_id = message.RequestId,
                 status = (int)response.StatusCode,
                 headers = safeHeaders,
-                diagnostic_version = diagnostic is null ? 0 : 1
+                diagnostic_version = diagnostic is null ? 0 : 1,
+                playlist_encoding = playlistEncoding
             }, JsonOptions), context).ConfigureAwait(false);
             diagnostic?.Mark(PlaybackDiagnosticStep.HeadersSent);
 
@@ -4138,7 +4153,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     resolved.PathAndQuery);
                 diagnostic?.Mark(PlaybackDiagnosticStep.PlaylistRewritten);
                 var prefix = Encoding.ASCII.GetBytes(message.RequestId);
-                var body = Encoding.UTF8.GetBytes(rewritten);
+                var body = EncodeRelayPlaylist(Encoding.UTF8.GetBytes(rewritten), playlistEncoding);
                 var payload = new byte[prefix.Length + body.Length];
                 prefix.CopyTo(payload, 0);
                 body.CopyTo(payload, prefix.Length);
