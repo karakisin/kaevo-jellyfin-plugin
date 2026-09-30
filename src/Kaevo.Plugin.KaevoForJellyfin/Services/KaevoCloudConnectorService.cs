@@ -33,6 +33,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
     private const int RemoteArtworkBatchItemMaximumBytes = 150_000;
+    // Cloud's inline response record permits 330 KB compressed. Images are
+    // already compressed: budget the entire base64 envelope before sending,
+    // rather than assuming ten individually valid images will fit together.
+    internal static int ArtworkBatchItemByteLimit(int itemCount) =>
+        itemCount is >= 1 and <= 10
+            ? Math.Min(RemoteArtworkBatchItemMaximumBytes, 200_000 / itemCount)
+            : throw new ArgumentOutOfRangeException(nameof(itemCount));
     private const int RemoteArtworkMaximumDimension = 2_160;
     private const int RelayChannelCount = 3;
     private const int ControlRequestConcurrency = 4;
@@ -3437,7 +3444,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             (Width: requestedWidth, Height: requestedHeight, Quality: requestedQuality),
             (Width: Math.Max(1, requestedWidth * 3 / 4), Height: Math.Max(1, requestedHeight * 3 / 4), Quality: Math.Min(requestedQuality, 78)),
             (Width: Math.Max(1, requestedWidth / 2), Height: Math.Max(1, requestedHeight / 2), Quality: Math.Min(requestedQuality, 74)),
-            (Width: Math.Max(1, requestedWidth * 3 / 8), Height: Math.Max(1, requestedHeight * 3 / 8), Quality: Math.Min(requestedQuality, 70))
+            (Width: Math.Max(1, requestedWidth * 3 / 8), Height: Math.Max(1, requestedHeight * 3 / 8), Quality: Math.Min(requestedQuality, 70)),
+            (Width: Math.Max(1, requestedWidth / 4), Height: Math.Max(1, requestedHeight / 4), Quality: Math.Min(requestedQuality, 66)),
+            (Width: Math.Max(1, requestedWidth / 6), Height: Math.Max(1, requestedHeight / 6), Quality: Math.Min(requestedQuality, 62))
         }.Distinct();
 
         foreach (var attempt in attempts)
@@ -3490,6 +3499,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         }
 
         using var concurrency = new SemaphoreSlim(4, 4);
+        var itemByteLimit = ArtworkBatchItemByteLimit(items.GetArrayLength());
         var tasks = items.EnumerateArray().Select((item, index) => ReadArtworkBatchItemAsync(
             configuration,
             secrets,
@@ -3497,6 +3507,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             item,
             index,
             concurrency,
+            itemByteLimit,
             cancellationToken)).ToArray();
         var results = await Task.WhenAll(tasks).ConfigureAwait(false);
         return new CommandResult(200, JsonSerializer.SerializeToElement(new { items = results }, JsonOptions), false);
@@ -3567,6 +3578,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         JsonElement item,
         int index,
         SemaphoreSlim concurrency,
+        int maximumBytes,
         CancellationToken cancellationToken)
     {
         await concurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -3587,7 +3599,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 cloudProfileId,
                 request,
                 cancellationToken,
-                RemoteArtworkBatchItemMaximumBytes).ConfigureAwait(false);
+                maximumBytes).ConfigureAwait(false);
             return new { index, status = "completed", response = result.Payload };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
