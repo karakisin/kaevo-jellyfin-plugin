@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.75.0",
+        "changelog": "Provides an exact-session HLS resume preference before media selection, preserving the full timeline and client resume verification. Excludes relative compact timelines. 785 plugin tests passed; physical startup timing remains in progress.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-09-30T16:58:07Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.75/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "b029a213fc2d44d93b943a6591e436cf"
+      },
+      {
         "version": "0.3.74.0",
         "changelog": "Preserves an active encoder when the native player chooses a neighboring segment or seeks; startup cleanup remains limited to abandoned sessions. 778 plugin tests passed. Physical startup-speed validation is still in progress.",
         "targetAbi": "10.11.0.0",
