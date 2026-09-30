@@ -124,6 +124,22 @@ internal sealed class KaevoOriginStart
         }
     }
 
+    // Supply the same approved resume point to HLS before AVPlayer chooses its
+    // first segment. This is only a start preference, never authorization or a
+    // replacement for the client's exact-position verification.
+    internal string PreferResumeStart(PlaybackGrant grant, string playlist)
+    {
+        lock (_gate)
+        {
+            if (!_pending.TryGetValue(grant.PlaybackSessionId, out var entry) || entry.Closing
+                || entry.Scope.ConnectorId != grant.ConnectorId || entry.Scope.DeviceId != grant.DeviceId
+                || entry.Scope.ItemId != grant.ItemId || entry.Scope.MediaSourceId != grant.MediaSourceId
+                || entry.Scope.Mode != grant.Mode || entry.Scope.CompactRuntimeTicks is not null)
+                return playlist;
+            return KaevoHlsStartPreference.Apply(playlist, entry.Scope.PositionTicks);
+        }
+    }
+
     /// Called only after a real signed media request sends its first body to the relay.
     internal void Delivered(PlaybackGrant grant, string path)
     {

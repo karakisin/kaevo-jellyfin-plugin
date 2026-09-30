@@ -16,6 +16,42 @@ public sealed class OriginStartTests
     private static PlaybackGrant Grant(PlaybackOriginScope scope) => new(scope.ConnectorId, scope.DeviceId, scope.ItemId,
         scope.MediaSourceId, scope.PlaySessionId, "transcode", scope.MaximumBitrate, Deadline);
 
+    [Fact]
+    public async Task ResumePlaylistHintIsBoundToTheApprovedFullTimelineSession()
+    {
+        var owner = new KaevoOriginStart();
+        var scope = Scope(ticks: 9_150_000_000);
+        using var lifetime = new CancellationTokenSource();
+        Assert.True(owner.TryStart(scope, Deadline,
+            async (_, token) => { await Task.Delay(Timeout.Infinite, token); return Master; },
+            (_, _) => Task.CompletedTask, () => Task.CompletedTask, _ => { }, lifetime.Token));
+        var grant = Grant(scope);
+        Assert.Contains("TIME-OFFSET=915,PRECISE=YES", owner.PreferResumeStart(grant, Master));
+        Assert.Equal(Master, owner.PreferResumeStart(grant with { DeviceId = "other" }, Master));
+        Assert.Equal(Master, owner.PreferResumeStart(grant with { ItemId = "other" }, Master));
+        Assert.Equal(Master, owner.PreferResumeStart(grant with { PlaybackSessionId = "other" }, Master));
+        Assert.Equal(Master, owner.PreferResumeStart(grant with { ConnectorId = "other" }, Master));
+        Assert.Equal(Master, owner.PreferResumeStart(grant with { MediaSourceId = "other" }, Master));
+        Assert.Equal(Master, owner.PreferResumeStart(grant with { Mode = "remux" }, Master));
+        lifetime.Cancel();
+        await Task.Delay(50);
+        Assert.Equal(Master, owner.PreferResumeStart(grant, Master));
+    }
+
+    [Fact]
+    public async Task RelativeCompactTimelineNeverReceivesSourceResumeOffset()
+    {
+        var owner = new KaevoOriginStart();
+        var scope = Scope(ticks: 9_150_000_000) with { CompactRuntimeTicks = 90_000_000_000 };
+        using var lifetime = new CancellationTokenSource();
+        Assert.True(owner.TryStart(scope, Deadline, Playlist,
+            async (_, token) => await Task.Delay(Timeout.Infinite, token),
+            () => Task.CompletedTask, _ => { }, lifetime.Token));
+        Assert.Equal(Master, owner.PreferResumeStart(Grant(scope), Master));
+        lifetime.Cancel();
+        await Task.Delay(50);
+    }
+
     [Theory]
     [InlineData("1.ts", true)]
     [InlineData("2.ts", true)]

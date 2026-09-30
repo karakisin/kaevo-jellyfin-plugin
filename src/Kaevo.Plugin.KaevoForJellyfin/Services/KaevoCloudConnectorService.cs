@@ -4156,6 +4156,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     grant.ItemId,
                     grant.MediaSourceId,
                     resolved.PathAndQuery);
+                rewritten = _originStarts.PreferResumeStart(grant, rewritten);
                 diagnostic?.Mark(PlaybackDiagnosticStep.PlaylistRewritten);
                 var prefix = Encoding.ASCII.GetBytes(message.RequestId);
                 var body = EncodeRelayPlaylist(Encoding.UTF8.GetBytes(rewritten), playlistEncoding);
