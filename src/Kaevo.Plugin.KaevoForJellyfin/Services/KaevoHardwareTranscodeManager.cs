@@ -35,6 +35,29 @@ internal sealed class KaevoHardwareTranscodeManager(ITranscodeManager inner) : I
         });
     }
 
+    // Compact HLS starts only when the real player requests its first segment.
+    // Retain the exact, signed Play admission until that start or its deadline;
+    // this does not start an encoder or substitute a full-timeline warm-up.
+    internal bool AdmitPlayerStart(PlaybackOriginScope scope, string userId, long deadline,
+        CancellationToken lifetime, Action applied)
+    {
+        var lease = Admit(scope, userId, deadline, lifetime, applied);
+        if (lease is null) return false;
+        _ = ReleasePlayerStartAsync(lease, deadline, lifetime);
+        return true;
+    }
+
+    private static async Task ReleasePlayerStartAsync(IDisposable lease, long deadline, CancellationToken lifetime)
+    {
+        using (lease)
+        {
+            var remaining = DateTimeOffset.FromUnixTimeSeconds(deadline) - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero) return;
+            try { await Task.Delay(remaining, lifetime).ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+        }
+    }
+
     internal string Plan(StreamState state, string command, Guid user, TranscodingJobType type, bool linux)
     {
         if (!linux || type != TranscodingJobType.Hls || state.Request is null || state.MediaSource is null) return command;

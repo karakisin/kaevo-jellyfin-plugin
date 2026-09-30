@@ -123,6 +123,34 @@ public sealed class HardwareDependencyPlanTests
     }
 
     [Fact]
+    public void DeferredPlayerStartKeepsExactScopeAndConsumesOnce()
+    {
+        var manager = new KaevoHardwareTranscodeManager(null!);
+        using var lifetime = new CancellationTokenSource();
+        var applied = 0;
+        Assert.True(manager.AdmitPlayerStart(Scope(), User.ToString(),
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 20, lifetime.Token, () => applied++));
+        Assert.Equal(Command, manager.Plan(State("other"), Command, User, TranscodingJobType.Hls, true));
+        Assert.NotEqual(Command, manager.Plan(State(), Command, User, TranscodingJobType.Hls, true));
+        Assert.Equal(Command, manager.Plan(State(), Command, User, TranscodingJobType.Hls, true));
+        Assert.Equal(1, applied);
+        lifetime.Cancel();
+    }
+
+    [Fact]
+    public void CancelledDeferredPlayerCannotModifyAnEncoder()
+    {
+        var manager = new KaevoHardwareTranscodeManager(null!);
+        using var lifetime = new CancellationTokenSource();
+        Assert.True(manager.AdmitPlayerStart(Scope(), User.ToString(),
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 20, lifetime.Token, () => { }));
+        lifetime.Cancel();
+        Assert.Equal(Command, manager.Plan(State(), Command, User, TranscodingJobType.Hls, true));
+        Assert.False(manager.AdmitPlayerStart(Scope(), User.ToString(),
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 1, default, () => { }));
+    }
+
+    [Fact]
     public void ExpiredExcessiveAndInvalidAdmissionsAreRejected()
     {
         var manager = new KaevoHardwareTranscodeManager(null!); var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();

@@ -3206,6 +3206,23 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             && parsedRuntime > 0
                 ? parsedRuntime
                 : (long?)null;
+        // Long movies use a different segment timeline, so they cannot reuse
+        // the native warm-up below. They can still omit a proven-unused GPU
+        // dependency when their real player starts the exact admitted session.
+        if (mode == "transcode" && audioOffsetMilliseconds is null
+            && subtitleStreamIndex is null && maxBitrate > 192_000
+            && request.OriginStartExpiresAt is > 0
+            && runTimeTicks is > 0 && requestedOriginStartTicks < runTimeTicks
+            && parameters.ContainsKey("origin_start_ticks")
+            && !PlaybackOriginScope.CanWarmNativeRendition(mode, runTimeTicks.Value))
+        {
+            var playerScope = new PlaybackOriginScope(configuration.ConnectorId, deviceId, itemId,
+                mediaSourceId, playSessionId, maxBitrate, audioStreamIndex ?? tracks.SelectedAudioStreamIndex,
+                requestedOriginStartTicks, mode);
+            (_transcodeManager as KaevoHardwareTranscodeManager)?.AdmitPlayerStart(
+                playerScope, jellyfinUserId, request.OriginStartExpiresAt.Value, cancellationToken,
+                () => _logger.LogInformation("Kaevo hardware plan omitted_unused_opencl=true route=compact_player"));
+        }
         long? nativeOriginStartTicks = null;
         if ((mode is "transcode" or "remux") && audioOffsetMilliseconds is null
             && subtitleStreamIndex is null && maxBitrate > 192_000
