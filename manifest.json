@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.72.0",
+        "changelog": "Stops the exact native Jellyfin transcoder when playback stops; retains independently validated media probe fingerprints across restart. 772 plugin tests passed. Physical startup validation continues.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.72/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "8b0c261992cee97e8161b23ed2fd4db0",
+        "timestamp": "2026-09-30T14:17:52.971566Z"
+      },
+      {
         "version": "0.3.70.0",
         "changelog": "Extends independently validated bounded HEVC input probing to local Matroska files. Full probe remains the fallback for unverified inputs. 770 plugin tests passed; physical startup timing remains under validation.",
         "targetAbi": "10.11.0.0",
