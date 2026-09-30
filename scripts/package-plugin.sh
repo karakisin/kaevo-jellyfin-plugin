@@ -14,6 +14,12 @@ if [[ ! "$PLUGIN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "Could not read a valid plugin version from $PROJECT_FILE." >&2
     exit 1
 fi
+ASSEMBLY_VERSION="$(awk -F '[<>]' '/<AssemblyVersion>/{print $3; exit}' "$PROJECT_FILE")"
+FILE_VERSION="$(awk -F '[<>]' '/<FileVersion>/{print $3; exit}' "$PROJECT_FILE")"
+if [[ "$ASSEMBLY_VERSION" != "$PLUGIN_VERSION.0" || "$FILE_VERSION" != "$PLUGIN_VERSION.0" ]]; then
+    echo "Package, assembly, and file versions must match before packaging." >&2
+    exit 1
+fi
 if [[ -n "${KAEVO_RELEASE_TIMESTAMP:-}" ]]; then
     TIMESTAMP="$KAEVO_RELEASE_TIMESTAMP"
 else
