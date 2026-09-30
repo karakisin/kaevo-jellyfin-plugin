@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.63.0",
+        "changelog": "Keeps cover batches within the Cloud response limit to avoid rejected batches and repeated individual downloads.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.63/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "51406b10199e64fadb43c569c8eed0a6",
+        "timestamp": "2026-09-30T11:06:20Z"
+      },
+      {
         "version": "0.3.62.0",
         "changelog": "Improves button contrast and consistent styling across the Kaevo settings page, including Cloud actions, pairing, diagnostics and provider saves. Removes the obsolete Firebase preparation button. Keeps disabled and saved states readable and adds consistent keyboard focus. Includes the native playback warm-up alignment from 0.3.61; physical startup timing remains pending.",
         "targetAbi": "10.11.0.0",
