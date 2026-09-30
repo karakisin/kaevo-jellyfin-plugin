@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.67.0",
+        "changelog": "Validates a bounded probe of the selected HEVC transport-stream video/audio before shortening startup analysis. Failed or slow checks retain the full probe. File and track changes invalidate cached validation. 761 tests passed; live latency acceptance pending.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.67/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "246c2536c3fbb901182098052a4d0726",
+        "timestamp": "2026-09-30T12:33:27Z"
+      },
+      {
         "version": "0.3.66.0",
         "changelog": "Adds bounded, opt-in encoder startup observations for compact long-movie playback. No extra encoder or playback behavior change. 757 tests passed; two-second startup is not yet verified.",
         "targetAbi": "10.11.0.0",
