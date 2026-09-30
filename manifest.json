@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.59.0",
+        "changelog": "Supports per-video saved audio timing from -30 to +30 seconds for the integrated Kaevo player. Existing preferences remain valid.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-09-30T06:43:28Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.59/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "9d6942c6650a86a9a1e47b90dd9e7402"
+      },
+      {
         "version": "0.3.57.0",
         "changelog": "Supports per-video saved audio timing from -10000 to +10000 milliseconds for the integrated Kaevo player. Existing settings remain valid. Device and cellular acceptance remain separate checks.",
         "targetAbi": "10.11.0.0",
