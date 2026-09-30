@@ -33,4 +33,13 @@ public class ArtworkBatchBudgetTests
         Assert.Throws<ArgumentOutOfRangeException>(() => KaevoCloudConnectorService.ArtworkBatchItemByteLimit(0));
         Assert.Throws<ArgumentOutOfRangeException>(() => KaevoCloudConnectorService.ArtworkBatchItemByteLimit(11));
     }
+    [Fact]
+    public void BatchResizeStartsWithinPixelBudgetWithoutUpscaling()
+    {
+        var size = KaevoCloudConnectorService.ArtworkInitialSize(480, 720, 20_000);
+        Assert.InRange(size.Width * size.Height, 1, 140_000);
+        Assert.InRange((double)size.Width / size.Height, .66, .67);
+        Assert.Equal((160, 240), KaevoCloudConnectorService.ArtworkInitialSize(160, 240, 20_000));
+        Assert.Equal((960, 720), KaevoCloudConnectorService.ArtworkInitialSize(960, 720, 150_000));
+    }
 }

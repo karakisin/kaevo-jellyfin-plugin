@@ -3413,6 +3413,17 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             cancellationToken,
             RemoteArtworkMaximumBytes);
 
+    internal static (int Width, int Height) ArtworkInitialSize(int width, int height, int maximumBytes)
+    {
+        if (width < 1 || height < 1 || maximumBytes < 1)
+            throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+        // A preview budget only; the bounded byte read remains authoritative.
+        // Keep standalone hero requests at their requested resolution.
+        if (maximumBytes >= 100_000) return (width, height);
+        var scale = Math.Min(1d, Math.Sqrt(maximumBytes * 7d / ((double)width * height)));
+        return (Math.Max(1, (int)(width * scale)), Math.Max(1, (int)(height * scale)));
+    }
+
     private async Task<CommandResult> ReadArtworkWithLimitAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
@@ -3439,6 +3450,12 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         var requestedWidth = Math.Clamp(QueryInt(query, "max_width", 600), 1, RemoteArtworkMaximumDimension);
         var requestedHeight = Math.Clamp(QueryInt(query, "max_height", 900), 1, RemoteArtworkMaximumDimension);
         var requestedQuality = Math.Clamp(QueryInt(query, "quality", 90), 1, 95);
+        // Batch thumbnails have a much smaller byte allowance than a single
+        // hero image. Begin at a proportional pixel budget rather than fetch
+        // multiple oversized renditions before reaching the same small cover.
+        var initialSize = ArtworkInitialSize(requestedWidth, requestedHeight, maximumBytes);
+        requestedWidth = initialSize.Width;
+        requestedHeight = initialSize.Height;
         var attempts = new[]
         {
             (Width: requestedWidth, Height: requestedHeight, Quality: requestedQuality),
