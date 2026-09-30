@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.62.0",
+        "changelog": "Improves button contrast and consistent styling across the Kaevo settings page, including Cloud actions, pairing, diagnostics and provider saves. Removes the obsolete Firebase preparation button. Keeps disabled and saved states readable and adds consistent keyboard focus. Includes the native playback warm-up alignment from 0.3.61; physical startup timing remains pending.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-09-30T09:57:05Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.62/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "f57bb7539471ab87cfae1a6e1c6bc973"
+      },
+      {
         "version": "0.3.61.0",
         "changelog": "Aligns the local encoder warm-up with the current Kaevo native player: 720p ceiling, 2-second HLS segments and matching bitrate. Prevents the warm-up and player from requesting different resume segments and restarting the same conversion. Keeps source-video copy and signed limits intact. Device startup latency still requires validation.",
         "targetAbi": "10.11.0.0",
