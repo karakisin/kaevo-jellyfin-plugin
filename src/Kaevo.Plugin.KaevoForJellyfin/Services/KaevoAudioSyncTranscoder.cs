@@ -18,6 +18,7 @@ public sealed class KaevoAudioSyncTranscoder
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan SessionLifetime = TimeSpan.FromHours(2);
     private readonly ConcurrentDictionary<string, Session> _sessions = new(StringComparer.Ordinal);
+    private readonly object _sessionGate = new();
     private readonly ILibraryManager _libraryManager;
     private readonly IMediaEncoder _mediaEncoder;
     private readonly ILogger<KaevoAudioSyncTranscoder> _logger;
@@ -47,19 +48,30 @@ public sealed class KaevoAudioSyncTranscoder
         var request = Validate(itemId, playSessionId, audioOffsetMilliseconds, audioStreamIndex, startTimeTicks);
         CleanupExpired();
         var key = $"{request.ItemId}:{request.PlaySessionId}:{request.OffsetMilliseconds}:{request.AudioStreamIndex}:{request.StartTimeTicks}";
-        var session = _sessions.GetOrAdd(key, _ => Start(request));
+        Session session;
+        lock (_sessionGate)
+        {
+            // Concurrent playlist requests must not launch orphan encoders.
+            session = _sessions.GetOrAdd(key, _ => Start(request));
+        }
         var deadline = DateTime.UtcNow + StartupTimeout;
         while (DateTime.UtcNow < deadline)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            if (cancellationToken.IsCancellationRequested)
+            {
+                Stop(request.PlaySessionId);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
             if (Ready(session.PlaylistPath)) return session.PlaylistPath;
             if (session.Process.HasExited)
             {
-                _sessions.TryRemove(key, out _);
+                Stop(request.PlaySessionId);
                 throw new InvalidOperationException("audioSyncTranscodeFailed");
             }
-            await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+            try { await Task.Delay(100, cancellationToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) { Stop(request.PlaySessionId); throw; }
         }
+        Stop(request.PlaySessionId);
         throw new InvalidOperationException("audioSyncStartupTimedOut");
     }
 
@@ -80,7 +92,9 @@ public sealed class KaevoAudioSyncTranscoder
     internal static string AudioFilter(int offsetMilliseconds)
     {
         var seconds = (Math.Abs(offsetMilliseconds) / 1_000d).ToString("0.###", CultureInfo.InvariantCulture);
-        return $"asetpts=PTS{(offsetMilliseconds > 0 ? "+" : "-")}{seconds}/TB";
+        return offsetMilliseconds > 0
+            ? $"asetpts=PTS-STARTPTS,adelay={offsetMilliseconds}:all=1"
+            : $"atrim=start={seconds},asetpts=PTS-STARTPTS";
     }
 
     private Session Start(Request request)
@@ -114,16 +128,15 @@ public sealed class KaevoAudioSyncTranscoder
             arguments.Add("-ss");
             arguments.Add((request.StartTimeTicks / 10_000_000d).ToString("0.###", CultureInfo.InvariantCulture));
         }
-        // Preserve the source timeline after the fast input seek. AVPlayer can
-        // then retain the exact current position while changing only the
-        // audio timestamps instead of treating the adjusted rendition as a
-        // brand-new video beginning at zero.
-        arguments.Add("-copyts");
+        // Each HLS rendition has an elapsed clock. The app maps it back to
+        // StartTimeTicks; resetting PTS also keeps the keyframe interval from
+        // forcing every frame after a deep input seek.
         arguments.Add("-i"); arguments.Add(item.Path);
         arguments.Add("-map"); arguments.Add("0:v:0");
         arguments.Add("-map"); arguments.Add(request.AudioStreamIndex is int index ? $"0:{index}" : "0:a:0");
         arguments.Add("-map_metadata"); arguments.Add("-1");
         arguments.Add("-map_chapters"); arguments.Add("-1");
+        arguments.Add("-vf"); arguments.Add("setpts=PTS-STARTPTS,scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2");
         arguments.Add("-c:v"); arguments.Add("libx264");
         arguments.Add("-preset"); arguments.Add("veryfast");
         arguments.Add("-crf"); arguments.Add("20");
@@ -142,8 +155,8 @@ public sealed class KaevoAudioSyncTranscoder
         arguments.Add("-y"); arguments.Add(playlist);
         process.Start();
         _ = DrainAsync(process.StandardOutput);
-        _ = ObserveErrorsAsync(process);
-        return new Session(request.PlaySessionId, directory, playlist, process, DateTime.UtcNow);
+        var observation = ObserveErrorsAsync(process);
+        return new Session(request.PlaySessionId, directory, playlist, process, DateTime.UtcNow, observation);
     }
 
     private async Task ObserveErrorsAsync(Process process)
@@ -169,13 +182,43 @@ public sealed class KaevoAudioSyncTranscoder
         } catch (IOException) { return false; }
     }
 
+    public void Stop(string playSessionId)
+    {
+        if (!SafeIdentifier(playSessionId)) return;
+        lock (_sessionGate)
+        {
+            foreach (var pair in _sessions.Where(pair => pair.Value.PlaySessionId == playSessionId))
+            {
+                if (!_sessions.TryRemove(pair.Key, out var session)) continue;
+                _ = ReleaseAsync(session);
+            }
+        }
+    }
+
     private void CleanupExpired()
     {
         var cutoff = DateTime.UtcNow - SessionLifetime;
-        foreach (var pair in _sessions.Where(pair => pair.Value.CreatedAt < cutoff || pair.Value.Process.HasExited))
+        lock (_sessionGate)
         {
-            if (!_sessions.TryRemove(pair.Key, out var session)) continue;
-            if (!session.Process.HasExited) try { session.Process.Kill(entireProcessTree: true); } catch { }
+            // A completed encoder still owns playable files. Keep them until
+            // playback stops or the session expires, not merely process exit.
+            foreach (var pair in _sessions.Where(pair => pair.Value.CreatedAt < cutoff))
+            {
+                if (_sessions.TryRemove(pair.Key, out var session)) _ = ReleaseAsync(session);
+            }
+        }
+    }
+
+    private static async Task ReleaseAsync(Session session)
+    {
+        try
+        {
+            if (!session.Process.HasExited) session.Process.Kill(entireProcessTree: true);
+            await session.Observation.ConfigureAwait(false);
+        }
+        catch (InvalidOperationException) { }
+        finally
+        {
             try { Directory.Delete(session.Directory, recursive: true); } catch { }
             session.Process.Dispose();
         }
@@ -198,5 +241,5 @@ public sealed class KaevoAudioSyncTranscoder
             && value[7..^4].Length is > 0 and <= 6 && value[7..^4].All(char.IsAsciiDigit));
 
     private sealed record Request(string ItemId, string PlaySessionId, int OffsetMilliseconds, int? AudioStreamIndex, long StartTimeTicks);
-    private sealed record Session(string PlaySessionId, string Directory, string PlaylistPath, Process Process, DateTime CreatedAt);
+    private sealed record Session(string PlaySessionId, string Directory, string PlaylistPath, Process Process, DateTime CreatedAt, Task Observation);
 }

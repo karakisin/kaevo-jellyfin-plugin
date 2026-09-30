@@ -26,10 +26,10 @@ public sealed class AudioSyncTranscoderTests
     }
 
     [Theory]
-    [InlineData(250, "asetpts=PTS+0.25/TB")]
-    [InlineData(-750, "asetpts=PTS-0.75/TB")]
-    [InlineData(50, "asetpts=PTS+0.05/TB")]
-    public void AudioFilterMovesOnlyAudioTimestamps(int offsetMilliseconds, string expected)
+    [InlineData(250, "asetpts=PTS-STARTPTS,adelay=250:all=1")]
+    [InlineData(-750, "atrim=start=0.75,asetpts=PTS-STARTPTS")]
+    [InlineData(50, "asetpts=PTS-STARTPTS,adelay=50:all=1")]
+    public void AudioFilterPadsOrTrimsAudioWithoutMovingVideoClock(int offsetMilliseconds, string expected)
     {
         Assert.Equal(expected, KaevoAudioSyncTranscoder.AudioFilter(offsetMilliseconds));
     }

@@ -65,6 +65,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private readonly IUserManager _userManager;
     private readonly ISessionManager _sessionManager;
     private readonly ITranscodeManager _transcodeManager;
+    private readonly KaevoAudioSyncTranscoder? _audioSyncTranscoder;
     private readonly KaevoOptimizerCoordinator _optimizer;
     private readonly ILogger<KaevoCloudConnectorService> _logger;
     private readonly KaevoProviderTransport _providerTransport;
@@ -97,7 +98,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         KaevoConnectorLifecycleClient lifecycleClient,
         KaevoPairingV3Service pairingV3,
         KaevoSeerrIdentityProvisioningService seerrIdentityProvisioning,
-        ILogger<KaevoCloudConnectorService> logger)
+        ILogger<KaevoCloudConnectorService> logger,
+        KaevoAudioSyncTranscoder? audioSyncTranscoder = null)
     {
         _secretStore = secretStore;
         _jellyfinApiKeyProvisioner = jellyfinApiKeyProvisioner;
@@ -113,6 +115,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         _pairingV3 = pairingV3;
         _seerrIdentityProvisioning = seerrIdentityProvisioning;
         _logger = logger;
+        _audioSyncTranscoder = audioSyncTranscoder;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -1823,6 +1826,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 await _sessionManager.OnPlaybackProgress(progress).ConfigureAwait(false);
                 break;
             case PlaybackStopInfo stopped:
+                _audioSyncTranscoder?.Stop(playback.PlaySessionId);
                 await _sessionManager.OnPlaybackStopped(stopped).ConfigureAwait(false);
                 break;
         }
