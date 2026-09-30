@@ -20,6 +20,7 @@ public sealed class KaevoPlugin : BasePlugin<PluginConfiguration>, IHasWebPages
         : base(applicationPaths, xmlSerializer)
     {
         DiagnosticLogDirectory = applicationPaths.LogDirectoryPath;
+        TransportProbeCachePath = Path.Combine(applicationPaths.CachePath, "kaevo", "validated-probes-v1.json");
         PackageIntegrityValid = KaevoPackageIntegrity.IsValidVersion(
             typeof(KaevoPlugin).Assembly.GetName().Version, typeof(KaevoPlugin).Assembly.Location);
         Instance = this;
@@ -30,6 +31,7 @@ public sealed class KaevoPlugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public bool PackageIntegrityValid { get; }
 
     internal string DiagnosticLogDirectory { get; }
+    internal string TransportProbeCachePath { get; }
 
     public override string Name => "Kaevo";
 

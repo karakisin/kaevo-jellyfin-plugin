@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using MediaBrowser.Controller.Streaming;
@@ -17,6 +18,39 @@ internal sealed class KaevoValidatedTransportProbe
     private readonly SemaphoreSlim _slots = new(2, 2);
     private readonly object _gate = new();
     private readonly HashSet<string> _validated = new(StringComparer.Ordinal);
+    private readonly string? _cachePath;
+
+    internal KaevoValidatedTransportProbe(string? cachePath = null)
+    {
+        _cachePath = cachePath;
+        try
+        {
+            if (cachePath is null || !File.Exists(cachePath) || new FileInfo(cachePath).Length > 8192) return;
+            var entries = JsonSerializer.Deserialize<string[]>(File.ReadAllText(cachePath));
+            if (entries is null || entries.Length > 64 || entries.Any(e => e is null || e.Length != 64
+                || e.Any(c => !char.IsAsciiHexDigit(c)))) return;
+            foreach (var entry in entries) _validated.Add(entry);
+        }
+        catch { } // A lost or damaged cache only requires fresh independent validation.
+    }
+
+    private void RetainValidation(string fingerprint)
+    {
+        lock (_gate)
+        {
+            if (_validated.Count >= 64) _validated.Clear();
+            _validated.Add(fingerprint);
+            try
+            {
+                if (_cachePath is null) return;
+                Directory.CreateDirectory(Path.GetDirectoryName(_cachePath)!);
+                var temporary = _cachePath + ".tmp";
+                File.WriteAllText(temporary, JsonSerializer.Serialize(_validated));
+                File.Move(temporary, _cachePath, overwrite: true);
+            }
+            catch { } // Cache persistence cannot prevent playback.
+        }
+    }
 
     internal async Task<string> ApplyAsync(StreamState state, string command, string? probePath,
         CancellationToken cancellationToken, Action<string> diagnostic)
@@ -38,7 +72,7 @@ internal sealed class KaevoValidatedTransportProbe
             try
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeout.CancelAfter(TimeSpan.FromSeconds(1));
+                timeout.CancelAfter(TimeSpan.FromSeconds(2));
                 var info = new ProcessStartInfo(probePath)
                 {
                     UseShellExecute = false, CreateNoWindow = true,
@@ -57,11 +91,7 @@ internal sealed class KaevoValidatedTransportProbe
                     if (process.ExitCode != 0 || !string.IsNullOrWhiteSpace(await error.ConfigureAwait(false))) return command;
                     using var parsed = JsonDocument.Parse(await output.ConfigureAwait(false));
                     if (!Matches(parsed.RootElement, video, audio) || Fingerprint(path, video, audio) != fingerprint) return command;
-                    lock (_gate)
-                    {
-                        if (_validated.Count >= 64) _validated.Clear();
-                        _validated.Add(fingerprint);
-                    }
+                    RetainValidation(fingerprint);
                     diagnostic("validated");
                     return ValidatedPrefix + command[OriginalPrefix.Length..];
                 }
@@ -128,8 +158,9 @@ internal sealed class KaevoValidatedTransportProbe
     private static string Fingerprint(string path, MediaStream video, MediaStream audio)
     {
         var file = new FileInfo(path);
-        return string.Join('|', path, file.Length, file.LastWriteTimeUtc.Ticks, video.Index, video.Codec,
+        var identity = string.Join('|', "bounded-probe-v1", path, file.Length, file.LastWriteTimeUtc.Ticks, video.Index, video.Codec,
             video.Width, video.Height, video.Profile, audio.Index, audio.Codec, audio.SampleRate, audio.Channels);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
     }
     private static async Task<string> ReadBoundedAsync(StreamReader reader, int maximum, CancellationToken token)
     {

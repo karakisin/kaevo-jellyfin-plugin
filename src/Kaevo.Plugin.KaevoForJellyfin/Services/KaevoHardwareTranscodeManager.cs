@@ -12,7 +12,7 @@ internal sealed class KaevoHardwareTranscodeManager(ITranscodeManager inner, IMe
 {
     private sealed record Admission(PlaybackOriginScope Scope, Guid User, long Deadline,
         CancellationToken Lifetime, Action Applied);
-    private readonly KaevoValidatedTransportProbe _probe = new();
+    private readonly KaevoValidatedTransportProbe _probe = new(KaevoPlugin.Instance?.TransportProbeCachePath);
     private readonly object _gate = new();
     private readonly Dictionary<string, Admission> _admissions = new(StringComparer.Ordinal);
 

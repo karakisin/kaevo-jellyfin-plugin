@@ -94,6 +94,52 @@ public sealed class ValidatedTransportProbeTests
     }
 
     [Fact]
+    public async Task ValidatedFingerprintSurvivesRestartButChangedFileDoesNot()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var directory = Directory.CreateTempSubdirectory("kaevo-probe-retained-");
+        try
+        {
+            var path = Path.Combine(directory.FullName, "movie.m2ts");
+            var cache = Path.Combine(directory.FullName, "cache.json");
+            var executable = Path.Combine(directory.FullName, "probe");
+            await File.WriteAllTextAsync(path, "source");
+            await File.WriteAllTextAsync(executable, "#!/bin/sh\nprintf '%s' '" + Probe + "'\n");
+            File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            var command = Command(path);
+            var expected = KaevoValidatedTransportProbe.ValidatedPrefix + command[KaevoValidatedTransportProbe.OriginalPrefix.Length..];
+            Assert.Equal(expected, await new KaevoValidatedTransportProbe(cache).ApplyAsync(State(path), command, executable, default, _ => { }));
+            Assert.DoesNotContain(path, await File.ReadAllTextAsync(cache));
+            await File.WriteAllTextAsync(executable, "#!/bin/sh\nexit 1\n");
+            Assert.Equal(expected, await new KaevoValidatedTransportProbe(cache).ApplyAsync(State(path), command, executable, default, _ => { }));
+            await File.AppendAllTextAsync(path, "changed");
+            Assert.Equal(command, await new KaevoValidatedTransportProbe(cache).ApplyAsync(State(path), command, executable, default, _ => { }));
+            await File.WriteAllTextAsync(cache, "[null]");
+            Assert.Equal(command, await new KaevoValidatedTransportProbe(cache).ApplyAsync(State(path), command, executable, default, _ => { }));
+        }
+        finally { directory.Delete(recursive: true); }
+    }
+
+    [Fact]
+    public async Task ValidProbeJustBeyondOneSecondDoesNotTriggerExpensiveFallback()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var directory = Directory.CreateTempSubdirectory("kaevo-probe-delayed-");
+        try
+        {
+            var path = Path.Combine(directory.FullName, "movie.m2ts");
+            var executable = Path.Combine(directory.FullName, "probe");
+            await File.WriteAllTextAsync(path, "source");
+            await File.WriteAllTextAsync(executable, "#!/bin/sh\nsleep 1.15\nprintf '%s' '" + Probe + "'\n");
+            File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            var command = Command(path);
+            Assert.StartsWith(KaevoValidatedTransportProbe.ValidatedPrefix,
+                await new KaevoValidatedTransportProbe().ApplyAsync(State(path), command, executable, default, _ => { }));
+        }
+        finally { directory.Delete(recursive: true); }
+    }
+
+    [Fact]
     public async Task SlowProbeFallsBackWithinBoundedTime()
     {
         if (OperatingSystem.IsWindows()) return;
