@@ -1851,6 +1851,11 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 break;
             case PlaybackStopInfo stopped:
                 _audioSyncTranscoder?.Stop(playback.PlaySessionId);
+                // Match Jellyfin's ReportPlaybackStopped endpoint: reporting
+                // progress alone does not terminate the native encoder job.
+                // Both identifiers come from the validated bound request.
+                await _transcodeManager.KillTranscodingJobs(
+                    playback.DeviceId, playback.PlaySessionId, _ => true).ConfigureAwait(false);
                 await _sessionManager.OnPlaybackStopped(stopped).ConfigureAwait(false);
                 break;
         }
