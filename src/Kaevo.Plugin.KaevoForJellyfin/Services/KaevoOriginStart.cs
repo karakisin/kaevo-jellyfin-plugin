@@ -240,6 +240,7 @@ internal sealed record PlaybackOriginScope(string ConnectorId, string DeviceId, 
             query["videoBitRate"] = Math.Max(MaximumBitrate - 192_000, 1).ToString(CultureInfo.InvariantCulture);
             query["allowVideoStreamCopy"] = "true";
             query["allowAudioStreamCopy"] = "true";
+            query["enableAutoStreamCopy"] = "true";
             query["segmentContainer"] = "mp4";
             query["segmentLength"] = "2";
             query.Remove("maxWidth");

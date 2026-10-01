@@ -1,6 +1,9 @@
 using System.Collections.Concurrent;
 using Kaevo.Plugin.KaevoForJellyfin.Services;
 using Xunit;
+using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Session;
 
 namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 
@@ -158,12 +161,36 @@ public sealed class OriginStartTests
         Assert.Equal("39808000", query["videoBitRate"]);
         Assert.Equal("true", query["allowVideoStreamCopy"]);
         Assert.Equal("true", query["allowAudioStreamCopy"]);
+        Assert.Equal("true", query["enableAutoStreamCopy"]);
         Assert.Equal("mp4", query["segmentContainer"]);
         Assert.Equal("2", query["segmentLength"]);
         Assert.Equal("1", query["minSegments"]);
         Assert.False(query.ContainsKey("maxWidth"));
         Assert.False(query.ContainsKey("maxHeight"));
         Assert.Contains("/2.mp4?", scope.ResumeSegment(RemuxMedia, scope.MasterPath));
+    }
+
+    [Theory]
+    [InlineData("remux", "aac", 128000, true)]
+    [InlineData("remux", "dts", 128000, false)]
+    [InlineData("remux", "aac", 320000, false)]
+    [InlineData("transcode", "aac", 128000, false)]
+    public void ActualJellyfinAudioCopyDecisionHonorsRenditionAndCompatibility(
+        string mode, string codec, int bitrate, bool expectedCopy)
+    {
+        var query = (Scope() with { Mode = mode }).Rendition();
+        var request = new BaseEncodingJobOptions {
+            AllowAudioStreamCopy = bool.Parse(query["allowAudioStreamCopy"]),
+            EnableAutoStreamCopy = bool.Parse(query["enableAutoStreamCopy"]),
+            AudioBitRate = int.Parse(query["audioBitRate"])
+        };
+        var job = new EncodingJobInfo(TranscodingJobType.Hls) { BaseRequest = request };
+        var audio = new MediaStream { Codec = codec, Channels = 2, SampleRate = 44100, BitRate = bitrate };
+        // This provider method is pure; no encoder process or server services are used.
+        var helper = new EncodingHelper(null!, null!, null!, null!, null!);
+        Assert.Equal(expectedCopy, helper.CanStreamCopyAudio(job, audio, query["audioCodec"].Split(',')));
+        request.EnableAutoStreamCopy = false;
+        Assert.False(helper.CanStreamCopyAudio(job, audio, query["audioCodec"].Split(',')));
     }
 
     [Theory]

@@ -17,7 +17,7 @@ public sealed class PlaybackSubtitleNegotiationTests
     [Theory]
     [InlineData("aac")]
     [InlineData("dts")]
-    public void SegmentedProfilePreservesSelectedLanguageAndRejectsUnsupportedAudio(string codec)
+    public void SegmentedProfilePreservesSelectedLanguageAndConvertsIncompatibleAudio(string codec)
     {
         var json = new JsonSerializerOptions();
         json.Converters.Add(new JsonStringEnumConverter());

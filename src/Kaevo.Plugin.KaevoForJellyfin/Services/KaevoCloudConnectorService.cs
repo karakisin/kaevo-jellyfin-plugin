@@ -3132,7 +3132,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             // Jellyfin still checks the AAC-only streaming profile; choosing
             // segmented playback must not force an AAC-to-AAC conversion.
             AllowAudioStreamCopy = !forceTranscode && audioOffsetMilliseconds is null,
-            EnableAutoStreamCopy = false,
+            EnableAutoStreamCopy = !forceTranscode && audioOffsetMilliseconds is null,
             DeviceProfile = KaevoPlaybackProfilePolicy.BuildAppleHlsDeviceProfile(maxBitrate, preferDirectPlay: true)
         };
         var playbackInfoQuery = new List<string>
