@@ -15,6 +15,40 @@ namespace Kaevo.Plugin.KaevoForJellyfin.Tests;
 public sealed class PlaybackSubtitleNegotiationTests
 {
     [Theory]
+    [InlineData("aac")]
+    [InlineData("dts")]
+    public void SegmentedProfilePreservesSelectedLanguageAndRejectsUnsupportedAudio(string codec)
+    {
+        var json = new JsonSerializerOptions();
+        json.Converters.Add(new JsonStringEnumConverter());
+        var profile = JsonSerializer.Deserialize<DeviceProfile>(JsonSerializer.Serialize(
+            KaevoPlaybackProfilePolicy.BuildAppleHlsDeviceProfile(40_000_000, true)), json)!;
+        var source = new MediaSourceInfo {
+            Id = "prepared-source", Container = "mp4", Protocol = MediaProtocol.File,
+            SupportsDirectPlay = true, SupportsDirectStream = true, SupportsTranscoding = true,
+            Bitrate = 4_256_000, DefaultAudioStreamIndex = 1,
+            MediaStreams = new [] {
+                new MediaStream { Index = 0, Type = MediaStreamType.Video, Codec = "h264", Profile = "High", Level = 40, BitDepth = 8, Width = 1280, Height = 720, BitRate = 4_000_000 },
+                new MediaStream { Index = 1, Type = MediaStreamType.Audio, Codec = codec, Profile = "LC", Channels = 2, SampleRate = 48000, BitRate = 128000, IsDefault = true, Language = "por" },
+                new MediaStream { Index = 2, Type = MediaStreamType.Audio, Codec = codec, Profile = "LC", Channels = 2, SampleRate = 48000, BitRate = 128000, Language = "eng" }
+            }
+        };
+        var result = new StreamBuilder(new Encoder(), NullLogger.Instance).GetOptimalVideoStream(new MediaOptions {
+            ItemId = Guid.NewGuid(), DeviceId = "test-device", Profile = profile,
+            MediaSources = new [] { source }, MediaSourceId = source.Id,
+            MaxBitrate = 40_000_000, EnableDirectPlay = false, EnableDirectStream = true,
+            AllowAudioStreamCopy = true, AllowVideoStreamCopy = true,
+            AudioStreamIndex = 2, SubtitleStreamIndex = -1
+        });
+        Assert.NotNull(result);
+        Assert.Equal(PlayMethod.DirectStream, result.PlayMethod);
+        Assert.Contains("h264", result.VideoCodecs);
+        Assert.Contains("aac", result.AudioCodecs);
+        Assert.DoesNotContain("dts", result.AudioCodecs);
+        Assert.Equal(2, result.AudioStreamIndex);
+    }
+
+    [Theory]
     [InlineData(null, PlayMethod.Transcode)]
     [InlineData(-1, PlayMethod.DirectPlay)]
     [InlineData(0, PlayMethod.Transcode)]

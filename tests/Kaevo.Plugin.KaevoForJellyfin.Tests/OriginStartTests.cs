@@ -157,6 +157,7 @@ public sealed class OriginStartTests
         Assert.Equal("h264,hevc", query["videoCodec"]);
         Assert.Equal("39808000", query["videoBitRate"]);
         Assert.Equal("true", query["allowVideoStreamCopy"]);
+        Assert.Equal("true", query["allowAudioStreamCopy"]);
         Assert.Equal("mp4", query["segmentContainer"]);
         Assert.Equal("2", query["segmentLength"]);
         Assert.Equal("1", query["minSegments"]);

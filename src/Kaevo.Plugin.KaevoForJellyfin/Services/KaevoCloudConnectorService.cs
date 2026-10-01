@@ -3128,8 +3128,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             EnableDirectStream = !forceTranscode && audioOffsetMilliseconds is null,
             EnableTranscoding = true,
             AllowVideoStreamCopy = !forceTranscode && audioOffsetMilliseconds is null,
-            AllowAudioStreamCopy = preferDirectPlay && !forceTranscode
-                && audioOffsetMilliseconds is null,
+            // HLS can also carry compatible audio without re-encoding it.
+            // Jellyfin still checks the AAC-only streaming profile; choosing
+            // segmented playback must not force an AAC-to-AAC conversion.
+            AllowAudioStreamCopy = !forceTranscode && audioOffsetMilliseconds is null,
             EnableAutoStreamCopy = false,
             DeviceProfile = KaevoPlaybackProfilePolicy.BuildAppleHlsDeviceProfile(maxBitrate, preferDirectPlay: true)
         };
