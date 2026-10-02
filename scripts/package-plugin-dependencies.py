@@ -115,7 +115,7 @@ def package(publish, directory, output, *, version, timestamp):
     files={k:v for k,v in collect(publish,version).items() if k not in HOST_OWNED}
     date=datetime.datetime.strptime(timestamp,"%Y-%m-%dT%H:%M:%SZ")
     if not 1980<=date.year<=2107:raise ValueError("package_timestamp_invalid")
-    metadata={"category":"General","changelog":"Improves button contrast and consistent styling across the Kaevo settings page, including Cloud actions, pairing, diagnostics and provider saves. Removes the obsolete Firebase preparation button. Keeps disabled and saved states readable and adds consistent keyboard focus. Includes the native playback warm-up alignment from 0.3.61; physical startup timing remains pending.",
+    metadata={"category":"General","changelog":"Bundles verified public age-rating metadata with Seerr search results to reduce repeated Cloud requests. Ratings are checked beside Seerr with bounded concurrency, cached per provider, and retried by the app if unavailable. Viewer restrictions remain enforced by Kaevo.",
         "description":"Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
         "guid":"80c77b84-7f2d-4b52-84c7-7dfe68cd95ae","name":"Kaevo","overview":"Secure Kaevo Cloud access for Jellyfin",
         "owner":"Kaevo","targetAbi":"10.11.0.0","timestamp":timestamp,"version":version+".0",

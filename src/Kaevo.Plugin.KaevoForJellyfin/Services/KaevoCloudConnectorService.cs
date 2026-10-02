@@ -774,6 +774,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return (updatedBindingsJson, true);
     }
 
+    private readonly KaevoSeerrSearchRatings _searchRatings = new();
+
     private async Task<CommandResult> ExecuteReadAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
@@ -807,6 +809,22 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 request.Path,
                 hasIdentityBatch ? null : request.Query,
                 cancellationToken).ConfigureAwait(false);
+            if (request.Provider == "seerr" && request.Path == "/api/v1/search" && !providerResult.Truncated)
+            {
+                var provider = secrets.GetProvider("seerr")!;
+                var scope = provider.BaseUrl + "|" + Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(provider.ApiKey)));
+                var enriched = await _searchRatings.EnrichAsync(providerResult.Payload, scope,
+                    async (path, token) =>
+                    {
+                        var detail = await SendProviderReadAsync(configuration, secrets, "seerr", path, null, token).ConfigureAwait(false);
+                        if (detail.Truncated) throw new InvalidOperationException("Incomplete rating response");
+                        return detail.Payload;
+                    },
+                    cancellationToken).ConfigureAwait(false);
+                if (Encoding.UTF8.GetByteCount(enriched.GetRawText()) <= configuration.MaximumRemoteResponseBytes)
+                    providerResult = providerResult with { Payload = enriched };
+            }
             if (hasIdentityBatch)
             {
                 providerResult = providerResult with
