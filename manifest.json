@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.78.0",
+        "changelog": "Bundles verified public age-rating metadata with Seerr search results to reduce repeated Cloud requests. Ratings are checked beside Seerr with bounded concurrency, cached per provider, and retried by the app if unavailable. Viewer restrictions remain enforced by Kaevo.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-10-02T21:35:00Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.78/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "deae1ba9d553d9f5072cd209098abcd2"
+      },
+      {
         "version": "0.3.77.0",
         "changelog": "Corrects the remaining automatic-copy setting so Jellyfin can reuse compatible AAC audio during segmented playback. Incompatible audio is still converted. Forced video conversion and audio-offset playback remain unchanged. 791 plugin tests pass, including Jellyfin encoder-decision checks. Physical speed validation is pending.",
         "targetAbi": "10.11.0.0",
