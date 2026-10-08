@@ -308,8 +308,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             {
                 var authentication = HttpContext.RequestServices.GetService<IAuthService>();
                 var localIdentity = authentication is null ? null : await authentication.Authenticate(Request).ConfigureAwait(false);
-                if (localIdentity?.IsAuthenticated != true || localIdentity.IsApiKey || localIdentity.User is null
-                    || localIdentity.User.Id.ToString("N") != request.JellyfinUserId)
+                if (!IsPairingUserAuthenticated(localIdentity, request.JellyfinUserId))
                     return V3Error(new KaevoPairingV3Exception("jellyfin_sign_in_required"), 401);
             }
             var completion = new KaevoPairingV3Completion(request.Protocol, request.TicketId, request.PairingAttemptId, request.ChallengeId,
@@ -324,6 +323,15 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         }
         catch (KaevoPairingV3Exception exception) { return V3Error(exception, StatusForV3(exception.Code)); }
         catch (Exception) { return V3Error(new KaevoPairingV3Exception("unexpected_internal_error"), 500); }
+    }
+
+    internal static bool IsPairingUserAuthenticated(AuthorizationInfo? identity, string expectedUserId)
+    {
+        // User's concrete entity type moved between Jellyfin versions. UserId is
+        // the stable authenticated identity contract; never bind to User directly.
+        return identity?.IsAuthenticated == true && !identity.IsApiKey
+            && identity.UserId != Guid.Empty
+            && string.Equals(identity.UserId.ToString("N"), expectedUserId, StringComparison.Ordinal);
     }
 
     internal static bool TryParsePairingV3Completion(JsonElement? payload, out KaevoPairingV3CompleteRequest request)
