@@ -111,11 +111,13 @@ internal sealed class KaevoPairingV3CloudClient : IKaevoPairingV3CloudClient
             var retryable = root.TryGetProperty("retryable", out var retryableValue) && retryableValue.ValueKind == JsonValueKind.True;
             var profileId = root.TryGetProperty("profileId", out var profileValue) ? profileValue.GetString() ?? "" : "";
             var userId = root.TryGetProperty("jellyfinUserId", out var userValue) ? userValue.GetString() ?? "" : "";
+            // Cloud profile IDs are opaque canonical identifiers, not a single prefix.
+            // Match native_pairing_policy.identifier; authority is verified by Cloud.
             if (code == "pairing_redeemed" && ((response.StatusCode != HttpStatusCode.OK && response.StatusCode != HttpStatusCode.Created)
                 || string.IsNullOrWhiteSpace(connectorId)
                 || (KaevoNativePairingConfiguration.IsNative(cloudBase) &&
-                    (!System.Text.RegularExpressions.Regex.IsMatch(profileId, @"^profile_[A-Za-z0-9_-]{16,128}$")
-                     || !System.Text.RegularExpressions.Regex.IsMatch(userId, @"^[a-f0-9]{32}$")))))
+                    (!System.Text.RegularExpressions.Regex.IsMatch(profileId, @"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z")
+                     || !System.Text.RegularExpressions.Regex.IsMatch(userId, @"\A[a-f0-9]{32}\z")))))
                 return new("ambiguous_enrollment", Retryable: true);
             return new KaevoPairingV3CloudResult(code, connectorId, idempotent, retryable, profileId, userId);
         }
