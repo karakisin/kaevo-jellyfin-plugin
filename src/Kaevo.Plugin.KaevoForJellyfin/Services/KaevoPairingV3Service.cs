@@ -22,7 +22,7 @@ internal sealed record KaevoPairingV3Completion(
     string Protocol, string TicketId, string PairingAttemptId, string ChallengeId, string ChallengeNonce, string ChallengeResponseSignature,
     string Authorization, string JellyfinUserId, string CorrelationId);
 
-internal sealed record KaevoPairingV3CloudResult(string Code, string ConnectorId = "", bool Idempotent = false, bool Retryable = false);
+internal sealed record KaevoPairingV3CloudResult(string Code, string ConnectorId = "", bool Idempotent = false, bool Retryable = false, string ProfileId = "", string JellyfinUserId = "");
 
 /// <summary>
 /// A prepared future connector request. No connector operation is migrated in
@@ -88,16 +88,40 @@ internal sealed class KaevoPairingV3CloudClient : IKaevoPairingV3CloudClient
         try
         {
             using var response = await _http.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-            using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+            if (response.Content.Headers.ContentLength > 16384
+                || response.Content.Headers.ContentType?.MediaType != "application/json")
+                return new("ambiguous_enrollment", Retryable: true);
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            var bytes = new byte[16385]; var count = 0;
+            while (count < bytes.Length)
+            {
+                var read = await stream.ReadAsync(bytes.AsMemory(count), cancellationToken).ConfigureAwait(false);
+                if (read == 0) break;
+                count += read;
+            }
+            if (count > 16384) return new("ambiguous_enrollment", Retryable: true);
+            using var document = JsonDocument.Parse(bytes.AsMemory(0, count));
             var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || root.EnumerateObject().Select(p => p.Name).Distinct(StringComparer.Ordinal).Count() != root.EnumerateObject().Count())
+                return new("ambiguous_enrollment", Retryable: true);
             var code = root.TryGetProperty("code", out var codeValue) ? codeValue.GetString() ?? "unexpected_internal_error" : "cloud_unavailable";
             var connectorId = root.TryGetProperty("connectorId", out var connectorValue) ? connectorValue.GetString() ?? "" : "";
             var idempotent = root.TryGetProperty("idempotent", out var idempotentValue) && idempotentValue.ValueKind == JsonValueKind.True;
             var retryable = root.TryGetProperty("retryable", out var retryableValue) && retryableValue.ValueKind == JsonValueKind.True;
-            return new KaevoPairingV3CloudResult(code, connectorId, idempotent, retryable);
+            var profileId = root.TryGetProperty("profileId", out var profileValue) ? profileValue.GetString() ?? "" : "";
+            var userId = root.TryGetProperty("jellyfinUserId", out var userValue) ? userValue.GetString() ?? "" : "";
+            if (code == "pairing_redeemed" && ((response.StatusCode != HttpStatusCode.OK && response.StatusCode != HttpStatusCode.Created)
+                || string.IsNullOrWhiteSpace(connectorId)
+                || (KaevoNativePairingConfiguration.IsNative(cloudBase) &&
+                    (!System.Text.RegularExpressions.Regex.IsMatch(profileId, @"^profile_[A-Za-z0-9_-]{16,128}$")
+                     || !System.Text.RegularExpressions.Regex.IsMatch(userId, @"^[a-f0-9]{32}$")))))
+                return new("ambiguous_enrollment", Retryable: true);
+            return new KaevoPairingV3CloudResult(code, connectorId, idempotent, retryable, profileId, userId);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return new KaevoPairingV3CloudResult("ambiguous_enrollment", Retryable: true); }
         catch (HttpRequestException) { return new KaevoPairingV3CloudResult("cloud_unavailable", Retryable: true); }
+        catch (InvalidOperationException) { return new KaevoPairingV3CloudResult("ambiguous_enrollment", Retryable: true); }
         catch (JsonException) { return new KaevoPairingV3CloudResult("ambiguous_enrollment", Retryable: true); }
     }
 }
@@ -248,7 +272,7 @@ public sealed partial class KaevoPairingV3Service
                 throw new KaevoPairingV3Exception("invalid_challenge_proof");
             return 0;
         }, cancellationToken).ConfigureAwait(false);
-        var claims = VerifyAuthorization(completion.Authorization);
+        var claims = VerifyAuthorization(completion.Authorization, cloudBase);
         var prepared = await _store.MutateAsync(state =>
         {
             var ticket = GetTicket(state, completion.TicketId);
@@ -268,7 +292,8 @@ public sealed partial class KaevoPairingV3Service
             var now = DateTimeOffset.UtcNow;
             var reserved = ticket with { State = "reserved", PairingAttemptId = claims.PairingAttemptId, ReservedAtUtc = now,
                 ReservationExpiresAtUtc = now.AddSeconds(ReservationLifetimeSeconds), RedemptionState = "redemption_pending", AuthorizationJti = claims.Jti,
-                AccountBinding = claims.AccountBinding, FamilyBinding = claims.FamilyBinding };
+                AccountBinding = claims.AccountBinding, FamilyBinding = claims.FamilyBinding,
+                JellyfinSetupUserId = completion.JellyfinUserId };
             state.Tickets[ticket.TicketId] = reserved;
             state.Challenges[challenge.ChallengeId] = challenge with { Used = true };
             return (ticket: reserved, identity: state.Identity ?? throw new InvalidOperationException("pairingV3IdentityMissing"), claims);
@@ -369,6 +394,10 @@ public sealed partial class KaevoPairingV3Service
         finally { CryptographicOperations.ZeroMemory(privateSeed); }
     }
 
+    internal Task<KaevoPairingV3Connector?> GetActiveConnectorAsync(CancellationToken cancellationToken = default) =>
+        _store.ReadAsync(state => state.Connector is { Status: "active" } connector
+            && connector.ProtocolVersion == KaevoPairingV3Crypto.Protocol ? connector : null, cancellationToken);
+
     internal Task<string> GetActiveConnectorIdAsync(CancellationToken cancellationToken = default) => _store.ReadAsync(state =>
     {
         var connector = state.Connector;
@@ -440,9 +469,12 @@ public sealed partial class KaevoPairingV3Service
             {
                 var ticket = GetTicket(state, ticketId);
                 if (ticket.State != "reserved") throw new KaevoPairingV3Exception("ambiguous_enrollment", true);
+                if (!string.IsNullOrEmpty(result.ProfileId) && result.JellyfinUserId != ticket.JellyfinSetupUserId)
+                    throw new KaevoPairingV3Exception("binding_mismatch");
                 var connector = new KaevoPairingV3Connector(result.ConnectorId, ticket.PluginInstanceId, ticket.PluginPublicKey, ticket.PluginFingerprint,
                     state.Identity?.KeyVersion ?? 1, ticket.AccountBinding, ticket.FamilyBinding, ticket.JellyfinServerId, ticket.JellyfinSetupUserId,
-                    DateTimeOffset.UtcNow, "active", ticket.PairingAttemptId, KaevoPairingV3Crypto.Protocol);
+                    DateTimeOffset.UtcNow, "active", ticket.PairingAttemptId, KaevoPairingV3Crypto.Protocol,
+                    CloudProfileId: result.ProfileId);
                 state.Connector = connector;
                 state.Tickets[ticketId] = ticket with { State = "consumed", RedemptionState = "redeemed", ConnectorId = result.ConnectorId, AuthorizationJti = "" };
                 return 0;
@@ -503,7 +535,7 @@ public sealed partial class KaevoPairingV3Service
             identity.KeyVersion.ToString(System.Globalization.CultureInfo.InvariantCulture), correlationId);
     }
 
-    private PairingAuthorization VerifyAuthorization(string token)
+    private PairingAuthorization VerifyAuthorization(string token, Uri cloudBase)
     {
         try
         {
@@ -528,7 +560,11 @@ public sealed partial class KaevoPairingV3Service
             if (claims.ExpiresAtUnix <= now || claims.NotBeforeUnix > now || claims.IssuedAtUnix > now + 5) throw new KaevoPairingV3Exception("pairing_authorization_expired");
             if (claims.Audience != KaevoPairingV3Crypto.AuthorizationAudience || claims.Protocol != KaevoPairingV3Crypto.Protocol
                 || claims.Issuer != _authorizationIssuer() || !Guid.TryParseExact(claims.Jti, "D", out _) || string.IsNullOrWhiteSpace(claims.Subject)
-                || string.IsNullOrWhiteSpace(claims.OwnerSessionProvenance) || string.IsNullOrWhiteSpace(claims.IosDeviceBinding) || claims.Entitlement != "cloud_enabled") throw new KaevoPairingV3Exception("invalid_pairing_authorization");
+                || string.IsNullOrWhiteSpace(claims.OwnerSessionProvenance) || string.IsNullOrWhiteSpace(claims.IosDeviceBinding) || (claims.Entitlement != "cloud_enabled" && !(claims.Entitlement == "pairing_only"
+                    && KaevoNativePairingConfiguration.IsNative(cloudBase)
+                    && claims.Issuer == KaevoNativePairingConfiguration.Issuer
+                    && kid == KaevoNativePairingConfiguration.KeyId
+                    && encodedKey == KaevoNativePairingConfiguration.PublicKey))) throw new KaevoPairingV3Exception("invalid_pairing_authorization");
             return claims;
         }
         catch (KaevoPairingV3Exception) { throw; }

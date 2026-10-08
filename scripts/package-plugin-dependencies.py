@@ -115,7 +115,7 @@ def package(publish, directory, output, *, version, timestamp):
     files={k:v for k,v in collect(publish,version).items() if k not in HOST_OWNED}
     date=datetime.datetime.strptime(timestamp,"%Y-%m-%dT%H:%M:%SZ")
     if not 1980<=date.year<=2107:raise ValueError("package_timestamp_invalid")
-    metadata={"category":"General","changelog":"Bundles verified public age-rating metadata with Seerr search results to reduce repeated Cloud requests. Ratings are checked beside Seerr with bounded concurrency, cached per provider, and retried by the app if unavailable. Viewer restrictions remain enforced by Kaevo.",
+    metadata={"category":"General","changelog":"Adds verified Firebase QR pairing for fresh installations with exact Kaevo and Jellyfin account binding, replay protection, interrupted-pairing recovery, and explicit protocol readiness. Requires Kaevo iOS build 519 or later for the new Firebase setup. Existing configured connectors are preserved.",
         "description":"Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
         "guid":"80c77b84-7f2d-4b52-84c7-7dfe68cd95ae","name":"Kaevo","overview":"Secure Kaevo Cloud access for Jellyfin",
         "owner":"Kaevo","targetAbi":"10.11.0.0","timestamp":timestamp,"version":version+".0",

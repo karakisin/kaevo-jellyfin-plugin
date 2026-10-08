@@ -58,7 +58,8 @@ internal sealed record KaevoPairingV3Connector(
     string Status,
     string LastPairingAttemptId,
     string ProtocolVersion,
-    string LastContactState = "");
+    string LastContactState = "",
+    string CloudProfileId = "");
 
 internal sealed class KaevoPairingV3State
 {

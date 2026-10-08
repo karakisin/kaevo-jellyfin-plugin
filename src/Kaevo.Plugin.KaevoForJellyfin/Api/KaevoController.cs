@@ -1,4 +1,6 @@
 using System.Collections;
+using MediaBrowser.Controller.Net;
+using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
 using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Drawing;
@@ -104,6 +106,16 @@ public sealed class KaevoController : ControllerBase, IActionFilter
 
         var stream = typeof(KaevoController).Assembly.GetManifestResourceStream(resourceName);
         return stream is null ? NotFound() : File(stream, "image/png");
+    }
+
+    // Available to an authenticated Jellyfin user before pairing. A readiness
+    // hint cannot grant access; all existing signed V3 checks remain required.
+    [HttpGet("pairing/compatibility")]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
+    public ActionResult<KaevoPairingCompatibility> GetPairingCompatibility()
+    {
+        var configuration = KaevoPlugin.Instance?.Configuration ?? new Configuration.PluginConfiguration();
+        return Ok(KaevoPairingCompatibility.ForConfiguration(configuration, KaevoPlugin.BuildVersion));
     }
 
     [HttpGet("status")]
@@ -220,6 +232,14 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         try
         {
             var localEndpoint = $"{Request.Scheme}://{Request.Host}{Request.PathBase}".TrimEnd('/');
+            if (Uri.TryCreate(localEndpoint, UriKind.Absolute, out var localUri) && localUri.IsLoopback)
+            {
+                var host = HttpContext.RequestServices.GetService<MediaBrowser.Controller.IServerApplicationHost>();
+                var lan = host?.GetApiUrlForLocalAccess(null, false);
+                if (!Uri.TryCreate(lan, UriKind.Absolute, out var lanUri) || lanUri.IsLoopback)
+                    return V3Error(new KaevoPairingV3Exception("pairing_lan_address_required"), 409);
+                localEndpoint = lanUri.AbsoluteUri.TrimEnd('/');
+            }
             var start = await _pairingV3.StartAsync(request.JellyfinServerId, request.JellyfinServerName, localEndpoint, request.JellyfinSetupUserId, cancellationToken).ConfigureAwait(false);
             using var data = QRCodeGenerator.GenerateQrCode(start.PairingUri, QRCodeGenerator.ECCLevel.Q);
             var png = new PngByteQRCode(data).GetGraphic(8);
@@ -284,12 +304,21 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             {
                 return V3Error(new KaevoPairingV3Exception("pairing_dependency_failure", true), 503);
             }
+            if (KaevoNativePairingConfiguration.IsNative(cloud))
+            {
+                var authentication = HttpContext.RequestServices.GetService<IAuthService>();
+                var localIdentity = authentication is null ? null : await authentication.Authenticate(Request).ConfigureAwait(false);
+                if (localIdentity?.IsAuthenticated != true || localIdentity.IsApiKey || localIdentity.User is null
+                    || localIdentity.User.Id.ToString("N") != request.JellyfinUserId)
+                    return V3Error(new KaevoPairingV3Exception("jellyfin_sign_in_required"), 401);
+            }
             var completion = new KaevoPairingV3Completion(request.Protocol, request.TicketId, request.PairingAttemptId, request.ChallengeId,
                 request.ChallengeNonce, request.ChallengeResponseSignature, request.Authorization, request.JellyfinUserId, request.CorrelationId);
             var result = await _pairingV3.CompleteAsync(cloud, completion, cancellationToken).ConfigureAwait(false);
             if (result.Code == "pairing_redeemed" && !string.IsNullOrWhiteSpace(result.ConnectorId))
             {
-                ActivateExistingPairingV3Connector(result.ConnectorId);
+                if (!await ActivateExistingPairingV3ConnectorAsync(result.ConnectorId, cancellationToken).ConfigureAwait(false))
+                    return V3Error(new KaevoPairingV3Exception("pairing_dependency_failure", true), 503);
             }
             return StatusCode(StatusForV3(result.Code), new { protocol = KaevoPairingV3Crypto.Protocol, code = result.Code, retryable = result.Retryable, connectorId = result.ConnectorId, idempotent = result.Idempotent, correlationId });
         }
@@ -342,6 +371,9 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             if (!TryCloudUri(KaevoPlugin.Instance?.Configuration.CloudBaseUrl ?? string.Empty, out var cloud))
                 return V3Error(new KaevoPairingV3Exception("pairing_dependency_failure", true), 503);
             var result = await _pairingV3.RecoverAsync(cloud, request.TicketId, correlationId, cancellationToken).ConfigureAwait(false);
+            if (result.Code == "pairing_redeemed"
+                && !await ActivateExistingPairingV3ConnectorAsync(result.ConnectorId, cancellationToken).ConfigureAwait(false))
+                return V3Error(new KaevoPairingV3Exception("pairing_dependency_failure", true), 503);
             return StatusCode(StatusForV3(result.Code), new { protocol = KaevoPairingV3Crypto.Protocol, code = result.Code, retryable = result.Retryable, connectorId = result.ConnectorId, idempotent = result.Idempotent, correlationId });
         }
         catch (KaevoPairingV3Exception exception) { return V3Error(exception, StatusForV3(exception.Code)); }
@@ -363,7 +395,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             {
                 return Conflict(new KaevoPairingV3ReconnectResponse("not_paired"));
             }
-            if (!ActivateExistingPairingV3Connector(connectorId))
+            if (!await ActivateExistingPairingV3ConnectorAsync(connectorId, cancellationToken).ConfigureAwait(false))
             {
                 return StatusCode(503, new KaevoPairingV3ReconnectResponse("unavailable"));
             }
@@ -375,7 +407,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
         }
     }
 
-    private bool ActivateExistingPairingV3Connector(string connectorId)
+    private async Task<bool> ActivateExistingPairingV3ConnectorAsync(string connectorId, CancellationToken cancellationToken)
     {
         var configuration = KaevoPlugin.Instance?.Configuration;
         if (configuration is null
@@ -386,6 +418,18 @@ public sealed class KaevoController : ControllerBase, IActionFilter
             return false;
         }
 
+        var paired = await _pairingV3.GetActiveConnectorAsync(cancellationToken).ConfigureAwait(false);
+        if (paired is null || paired.ConnectorId != connectorId) return false;
+        if (!string.IsNullOrEmpty(paired.CloudProfileId))
+        {
+            if (!Guid.TryParseExact(paired.JellyfinSetupUserProvenance, "N", out var userId)
+                || !KaevoJellyfinUserLookup.Exists(_userManager, userId)
+                || (!string.IsNullOrEmpty(configuration.ProfileId) && configuration.ProfileId != paired.CloudProfileId)
+                || (!string.IsNullOrEmpty(configuration.JellyfinUserId) && configuration.JellyfinUserId != paired.JellyfinSetupUserProvenance)
+                || !KaevoProfileJellyfinBindingStore.TryBind(configuration, paired.CloudProfileId, paired.JellyfinSetupUserProvenance)) return false;
+            configuration.ProfileId = paired.CloudProfileId;
+            configuration.JellyfinUserId = paired.JellyfinSetupUserProvenance;
+        }
         configuration.ConnectorId = connectorId;
         configuration.CloudConnectorEnabled = true;
         KaevoPlugin.Instance?.SaveConfiguration();
@@ -398,6 +442,7 @@ public sealed class KaevoController : ControllerBase, IActionFilter
 
     private static int StatusForV3(string code) => code switch
     {
+        "pairing_redeemed" => 200,
         "malformed_request" => 400,
         "pairing_ticket_not_found" => 404,
         "pairing_ticket_expired" or "challenge_expired" or "pairing_authorization_expired" => 410,

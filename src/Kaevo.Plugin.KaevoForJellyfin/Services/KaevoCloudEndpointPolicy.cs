@@ -8,8 +8,10 @@ public static class KaevoCloudEndpointPolicy
     private const string SecurityStageApi = "https://vsuh8a8v8i.execute-api.us-west-2.amazonaws.com/security-stage";
 
     public static bool TryNormalize(string? value, out Uri uri)
+        => TryNormalize(value, KaevoPlugin.Instance?.Configuration, out uri);
+
+    internal static bool TryNormalize(string? value, Configuration.PluginConfiguration? configuration, out Uri uri)
     {
-        var configuration = KaevoPlugin.Instance?.Configuration;
         var environment = ResolveSavedEnvironment(
             configuration?.CloudEnvironment,
             Environment.GetEnvironmentVariable("KAEVO_CLOUD_ENVIRONMENT"),

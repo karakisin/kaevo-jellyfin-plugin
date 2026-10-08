@@ -24,6 +24,7 @@ public sealed class KaevoPlugin : BasePlugin<PluginConfiguration>, IHasWebPages
         PackageIntegrityValid = KaevoPackageIntegrity.IsValidVersion(
             typeof(KaevoPlugin).Assembly.GetName().Version, typeof(KaevoPlugin).Assembly.Location);
         Instance = this;
+        if (KaevoNativePairingConfiguration.ApplyToUnconfigured(Configuration)) SaveConfiguration();
     }
 
     public static KaevoPlugin? Instance { get; private set; }
