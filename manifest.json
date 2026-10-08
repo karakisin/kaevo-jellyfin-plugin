@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.79.0",
+        "changelog": "Adds verified Firebase QR pairing for fresh installations with exact Kaevo and Jellyfin account binding, replay protection, interrupted-pairing recovery, and explicit protocol readiness. Requires Kaevo iOS build 519 or later for the new Firebase setup. Existing configured connectors are preserved.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-10-08T06:10:00Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.79/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "8637834b2526904d050ea33191039ded"
+      },
+      {
         "version": "0.3.78.0",
         "changelog": "Bundles verified public age-rating metadata with Seerr search results to reduce repeated Cloud requests. Ratings are checked beside Seerr with bounded concurrency, cached per provider, and retried by the app if unavailable. Viewer restrictions remain enforced by Kaevo.",
         "targetAbi": "10.11.0.0",
