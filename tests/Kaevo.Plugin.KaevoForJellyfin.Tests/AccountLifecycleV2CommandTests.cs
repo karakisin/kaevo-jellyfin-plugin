@@ -22,16 +22,21 @@ public sealed class AccountLifecycleV2CommandTests
             "jellyfin.delete_exact_bound_user"));
     }
 
-    [Fact]
-    public void V2ValidationRequiresTheLiveTwoWayDeletionPermission()
+    [Theory]
+    [InlineData(KaevoCloudConnectorService.LifecycleV2JellyfinEligibility)]
+    [InlineData(KaevoCloudConnectorService.LifecycleV2JellyfinDelete)]
+    [InlineData(KaevoCloudConnectorService.LifecycleV2JellyfinVerify)]
+    [InlineData(KaevoCloudConnectorService.LifecycleV2SeerrDelete)]
+    [InlineData(KaevoCloudConnectorService.LifecycleV2SeerrVerify)]
+    public void V2ValidationRequiresTheLiveTwoWayDeletionPermission(string operation)
     {
         var configuration = Configuration(enabled: false);
 
         var error = Assert.Throws<InvalidOperationException>(() =>
             KaevoCloudConnectorService.ValidateAccountLifecycleV2Command(
                 configuration,
-                Request(KaevoCloudConnectorService.LifecycleV2JellyfinDelete),
-                KaevoCloudConnectorService.LifecycleV2JellyfinDelete,
+                Request(operation),
+                operation,
                 Parameters()));
 
         Assert.Equal(KaevoTwoWayProfileDeletionPolicy.DisabledState, error.Message);

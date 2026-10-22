@@ -9,6 +9,7 @@ public sealed partial class KaevoCloudConnectorService
     internal const string LifecycleV2SeerrVerify = "account_lifecycle_v2.seerr.verify_exact_identity_absence";
     internal const string LifecycleV2JellyfinDelete = "account_lifecycle_v2.jellyfin.delete_exact_identity";
     internal const string LifecycleV2JellyfinVerify = "account_lifecycle_v2.jellyfin.verify_exact_identity_absence";
+    internal const string LifecycleV2JellyfinEligibility = "account_lifecycle_v2.jellyfin.check_deletion_eligibility";
 
     internal sealed record AccountLifecycleV2CommandContext(
         string OperationId,
@@ -22,6 +23,7 @@ public sealed partial class KaevoCloudConnectorService
         operation is LifecycleV2SeerrDelete
             or LifecycleV2SeerrVerify
             or LifecycleV2JellyfinDelete
+            or LifecycleV2JellyfinEligibility
             or LifecycleV2JellyfinVerify;
 
     internal static AccountLifecycleV2CommandContext ValidateAccountLifecycleV2Command(
@@ -120,6 +122,29 @@ public sealed partial class KaevoCloudConnectorService
         var verificationStore = new KaevoAccountDeletionVerificationStore(
             Path.Combine(_lifecycleStore.DirectoryPath, "account-deletion-verifications"));
         var context = ValidateAccountLifecycleV2Command(configuration, request, operation, parameters, verificationStore);
+
+        if (operation is LifecycleV2JellyfinEligibility or LifecycleV2SeerrDelete or LifecycleV2JellyfinDelete)
+        {
+            var targets = KaevoAccountDeletionEligibility.Targets(parameters, context);
+            var inventory = await SendLocalAsync(configuration, secrets, HttpMethod.Get,
+                "/Users", null, null, cancellationToken).ConfigureAwait(false);
+            if (inventory.Truncated || inventory.Status is < 200 or > 299)
+                throw new InvalidOperationException("accountLifecycleV2JellyfinInventoryInvalid");
+            string? Resolve(string profileId) => KaevoProfileJellyfinBindingStore.TryResolve(
+                configuration, profileId, out var userId) ? userId : null;
+            var planDigest = KaevoAccountDeletionEligibility.Check(inventory.Payload, targets, Resolve);
+            if (operation == LifecycleV2JellyfinEligibility)
+            {
+                return CompleteCommand(request, operation, new
+                {
+                    lifecycle_version = 2, operation_id = context.OperationId,
+                    lifecycle_binding_id = context.LifecycleBindingId, connector_id = context.ConnectorId,
+                    profile_id = context.ProfileId, jellyfin_user_id = context.JellyfinUserId,
+                    provider = "jellyfin", state = "deletion_eligible", absence_confirmed = false,
+                    planned_jellyfin_deletions_digest = planDigest
+                });
+            }
+        }
 
         if (operation == LifecycleV2SeerrDelete)
         {

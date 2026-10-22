@@ -29,7 +29,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
                     "local_provider_configuration_v1", "connector_control_push_v2", "profile_artwork_v1",
                     "profile_media_access_v1", "profile_media_access_owner_v1", FirebasePlaybackMailbox.Capability,
-                    "account_lifecycle_verification_recovery_v1", "audio_sync_v1", "remote_artwork_batch_v1", "audio_sync_preferences_v1"
+                    "account_lifecycle_verification_recovery_v1",
+                    "account_lifecycle_deletion_eligibility_v1", FirebaseAccountCleanupRecovery.Capability, "audio_sync_v1", "remote_artwork_batch_v1", "audio_sync_preferences_v1"
                 };
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
@@ -166,9 +167,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     // The target heartbeat verifies the source fence, drained
                     // handoff and exact playback readiness before any listener.
                     // A denied/uncertain target never falls back to AWS.
-                    await HeartbeatAsync(configuration, secrets, firebaseOwner.Token).ConfigureAwait(false);
-                    await RunFirebaseControlSupervisorAsync(configuration, secrets,
-                        KaevoFirebaseRuntime.AuthenticationApiKey, firebaseOwner.Token).ConfigureAwait(false);
+                    await FirebaseAccountCleanupRecovery.RunSessionAsync(async () =>
+                    {
+                        await HeartbeatAsync(configuration, secrets, firebaseOwner.Token).ConfigureAwait(false);
+                        await RunFirebaseControlSupervisorAsync(configuration, secrets,
+                            KaevoFirebaseRuntime.AuthenticationApiKey, firebaseOwner.Token).ConfigureAwait(false);
+                    }, () => RecoverFirebaseAccountCleanupAsync(configuration, secrets, firebaseOwner.Token),
+                        firebaseOwner.Token).ConfigureAwait(false);
                     delay = TimeSpan.FromSeconds(1);
                     continue;
                 }
