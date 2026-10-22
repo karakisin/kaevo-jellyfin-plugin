@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.82.0",
+        "changelog": "Adds exact-account deletion eligibility checks and signed cleanup delivery for Kaevo Cloud. Protects the last Jellyfin user and administrator, preserves exact profile/server binding, and respects the existing two-way deletion setting. Installing this update does not enable deletion.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-10-22T00:21:32Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.82/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "a741c5c3e8d8345cd54073cc6b6b4305"
+      },
+      {
         "version": "0.3.81.0",
         "changelog": "Fixes Cloud pairing confirmation for both existing and newly created Kaevo profile ID formats, including recovery of a pairing Cloud already completed. Retains the Jellyfin user API compatibility fix and all authenticated account, user, and replay checks. Use Kaevo iOS build 519 or later.",
         "targetAbi": "10.11.0.0",
