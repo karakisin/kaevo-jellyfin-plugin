@@ -35,6 +35,9 @@ public class ProfileArtworkAccessTests
         public List<string> Paths {get;}=[];
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken)
         {
+            Assert.Equal("MediaBrowser", request.Headers.Authorization?.Scheme);
+            Assert.Contains("Token=\"", request.Headers.Authorization?.Parameter);
+            Assert.False(request.Headers.Contains("X-Emby-Token"));
             Paths.Add(request.RequestUri!.AbsolutePath);
             var reply=new HttpResponseMessage(Paths.Count==1?(HttpStatusCode)status:HttpStatusCode.OK);
             if(Paths.Count==1) reply.Content=new StringContent(JsonSerializer.Serialize(new {Id=item}),Encoding.UTF8,"application/json");

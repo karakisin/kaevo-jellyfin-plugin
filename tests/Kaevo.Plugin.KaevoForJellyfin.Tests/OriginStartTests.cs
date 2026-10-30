@@ -251,6 +251,67 @@ public sealed class OriginStartTests
         Assert.Contains("mediaSourceId=source", segment);
     }
 
+    private const string TwoSecondMedia = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:2,\nhls1/main/0.ts\n#EXTINF:2,\nhls1/main/1.ts\n#EXTINF:2,\nhls1/main/2.ts\n#EXT-X-ENDLIST\n";
+
+    [Theory]
+    [InlineData(0, "0.ts")]
+    [InlineData(19_999_999, "0.ts")]
+    [InlineData(20_000_000, "0.ts")]
+    [InlineData(39_999_999, "0.ts")]
+    [InlineData(40_000_000, "1.ts")]
+    [InlineData(59_999_999, "1.ts")]
+    public void PrerollWarmsOneEarlierSegmentWithoutChangingResume(long ticks, string expected)
+    {
+        var scope = Scope(ticks: ticks);
+        var result = scope.ResumeSegment(TwoSecondMedia, scope.MasterPath, includePreroll: true);
+        Assert.Contains("/" + expected + "?", result);
+        Assert.Contains("playSessionId=play-session", result);
+        Assert.Contains("deviceId=device", result);
+        Assert.Contains("mediaSourceId=source", result);
+        Assert.Equal(ticks, scope.PositionTicks);
+    }
+
+    [Fact]
+    public void PrerollDoesNotBroadenLongSegmentOrRemuxWarmup()
+    {
+        var scope = Scope(ticks: 45_000_000);
+        Assert.Equal(scope.ResumeSegment(Media, scope.MasterPath),
+            scope.ResumeSegment(Media, scope.MasterPath, includePreroll: true));
+        var remux = scope with { Mode = "remux" };
+        Assert.Equal(remux.ResumeSegment(RemuxMedia, remux.MasterPath),
+            remux.ResumeSegment(RemuxMedia, remux.MasterPath, includePreroll: true));
+    }
+
+    [Fact]
+    public void PrerollRejectsForeignPreviousSegmentAndOutOfRangeResume()
+    {
+        var scope = Scope(ticks: 40_000_000);
+        Assert.Throws<InvalidOperationException>(() => scope.ResumeSegment(
+            TwoSecondMedia.Replace("hls1/main/1.ts", "https://evil.invalid/1.ts"), scope.MasterPath, includePreroll: true));
+        Assert.Throws<InvalidOperationException>(() => (scope with { PositionTicks = 60_000_000 })
+            .ResumeSegment(TwoSecondMedia, scope.MasterPath, includePreroll: true));
+    }
+
+    [Fact]
+    public async Task OriginWarmsPrerollButKeepsExactManifestHintAndTransfersOwnership()
+    {
+        var owner = new KaevoOriginStart(); var scope = Scope(ticks: 45_000_000);
+        using var lifetime = new CancellationTokenSource();
+        var entered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopped = false;
+        Assert.True(owner.TryStart(scope, Deadline,
+            (path, _) => Task.FromResult(path.Contains("master.m3u8") ? Master : TwoSecondMedia),
+            (path, _) => { entered.SetResult(path); return Task.CompletedTask; },
+            () => { stopped = true; return Task.CompletedTask; }, _ => { }, lifetime.Token));
+        var path = await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Contains("/1.ts?", path);
+        Assert.Contains("TIME-OFFSET=4.5,PRECISE=YES", owner.PreferResumeStart(Grant(scope), Master));
+        owner.Delivered(Grant(scope), path.Replace("/1.ts?", "/2.ts?"));
+        lifetime.Cancel();
+        await Task.Delay(50);
+        Assert.False(stopped);
+    }
+
     [Theory]
     [InlineData("https://evil.invalid/a.m3u8")]
     [InlineData("//evil.invalid/a.m3u8")]
@@ -441,8 +502,8 @@ public sealed class OriginStartTests
             () => { stopped = true; return Task.CompletedTask; }, _ => { }, default,
             observationResource: new TestLease(() => disposed.SetResult())));
         var path = await ready.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.Contains("/2.ts?", path);
-        owner.Delivered(Grant(scope), path);
+        Assert.Contains("/1.ts?", path);
+        owner.Delivered(Grant(scope), path.Replace("/1.ts?", "/2.ts?"));
         await disposed.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.False(stopped);
     }

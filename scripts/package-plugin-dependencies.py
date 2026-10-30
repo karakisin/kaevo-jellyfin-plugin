@@ -115,7 +115,7 @@ def package(publish, directory, output, *, version, timestamp):
     files={k:v for k,v in collect(publish,version).items() if k not in HOST_OWNED}
     date=datetime.datetime.strptime(timestamp,"%Y-%m-%dT%H:%M:%SZ")
     if not 1980<=date.year<=2107:raise ValueError("package_timestamp_invalid")
-    metadata={"category":"General","changelog":"Adds exact-account deletion eligibility checks and signed cleanup delivery for Kaevo Cloud. Protects the last Jellyfin user and administrator, preserves exact profile/server binding, and respects the existing two-way deletion setting. Installing this update does not enable deletion.",
+    metadata={"category":"General","changelog":"Adds ISO playback through Jellyfin-negotiated HLS without a permanent converted copy. Preserves original media, existing quality settings and exact profile/item authorization. Includes retained Jellyfin 12 authentication and resume-start fixes. Unsupported images and ISO with manual audio-sync offsets remain blocked. Kaevo device playback verification is pending.",
         "description":"Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
         "guid":"80c77b84-7f2d-4b52-84c7-7dfe68cd95ae","name":"Kaevo","overview":"Secure Kaevo Cloud access for Jellyfin",
         "owner":"Kaevo","targetAbi":"10.11.0.0","timestamp":timestamp,"version":version+".0",

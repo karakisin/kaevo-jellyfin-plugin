@@ -66,6 +66,18 @@ internal static class KaevoPlaybackProfilePolicy
 
     public static string SelectMode(JsonElement source, bool preferDirectPlay, bool forceTranscode, bool compatibilityPlayer)
     {
+        if (KaevoPlaybackSourcePolicy.IsDiscImage(source))
+        {
+            if (!KaevoPlaybackSourcePolicy.SupportsDiscImageHls(source))
+            {
+                throw new InvalidOperationException("playbackDiscImageUnsupported");
+            }
+
+            // Both players receive Jellyfin's temporary HLS stream, never the
+            // raw ISO. Preserve the negotiated copy capability and an explicit
+            // transcode preference without changing quality or bitrate limits.
+            return !forceTranscode && Supported(source, "SupportsDirectStream") ? "remux" : "transcode";
+        }
         if (forceTranscode) return "transcode";
         if (compatibilityPlayer) return "direct_play";
         if (Supported(source, "SupportsDirectPlay"))

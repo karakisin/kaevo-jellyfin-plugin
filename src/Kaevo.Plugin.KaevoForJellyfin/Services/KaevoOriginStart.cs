@@ -78,7 +78,7 @@ internal sealed class KaevoOriginStart
                 capture?.Mark(PlaybackDiagnosticStep.UpstreamRequest, PlaybackDiagnosticResource.OriginMedia);
                 var media = await playlist(mediaPath, timeout.Token).ConfigureAwait(false);
                 capture?.Mark(PlaybackDiagnosticStep.UpstreamBody, PlaybackDiagnosticResource.OriginMedia);
-                segmentPath = entry.Scope.ResumeSegment(media, mediaPath);
+                segmentPath = entry.Scope.ResumeSegment(media, mediaPath, includePreroll: true);
             }
             lock (_gate) entry.Segment = segmentPath;
             capture?.Mark(PlaybackDiagnosticStep.OriginSegmentSelected);
@@ -261,10 +261,12 @@ internal sealed record PlaybackOriginScope(string ConnectorId, string DeviceId, 
         throw new InvalidOperationException("originPlaylistInvalid");
     }
 
-    internal string ResumeSegment(string text, string source)
+    internal string ResumeSegment(string text, string source, bool includePreroll = false)
     {
         double start = 0;
         double? duration = null;
+        string? previousSegment = null;
+        double previousDuration = 0;
         var position = PositionTicks / 10_000_000.0;
         var lines = Lines(text);
         // Only full-timeline VOD is eligible. fMP4 has one scoped initialization
@@ -297,7 +299,20 @@ internal sealed record PlaybackOriginScope(string ConnectorId, string DeviceId, 
             {
                 if (duration is null) throw new InvalidOperationException("originPlaylistInvalid");
                 var child = Child(line, source, Mode == "remux" ? ".mp4" : ".ts");
-                if (start <= position && position < start + duration.Value) return child;
+                if (start <= position && position < start + duration.Value)
+                {
+                    // AVPlayer can request the preceding segment to decode an
+                    // exact resume point. Starting at the target segment first
+                    // forces Jellyfin to restart its encoder when that earlier
+                    // request arrives. Warm at most one two-second segment
+                    // earlier in the same validated rendition and session.
+                    // The manifest hint and acknowledged resume remain exact.
+                    return includePreroll && Mode == "transcode"
+                        && previousSegment is not null && previousDuration <= 2 && duration.Value <= 2
+                        ? previousSegment : child;
+                }
+                previousSegment = child;
+                previousDuration = duration.Value;
                 start += duration.Value;
                 duration = null;
             }

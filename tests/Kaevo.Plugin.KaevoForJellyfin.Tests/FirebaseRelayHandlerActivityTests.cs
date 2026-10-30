@@ -22,6 +22,9 @@ public sealed class FirebaseRelayHandlerActivityTests
         internal int Calls;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
+            Assert.Equal("MediaBrowser", request.Headers.Authorization?.Scheme);
+            Assert.Contains("Token=\"", request.Headers.Authorization?.Parameter);
+            Assert.False(request.Headers.Contains("X-Emby-Token"));
             Calls++;
             Assert.Equal("synthetic-jellyfin.invalid", request.RequestUri!.Host);
             Assert.Contains("mediaSourceId=source-1", request.RequestUri.Query);

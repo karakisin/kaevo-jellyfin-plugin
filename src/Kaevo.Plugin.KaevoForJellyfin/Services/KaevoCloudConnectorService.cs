@@ -3184,7 +3184,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         {
             throw new InvalidOperationException("playbackSourceUnavailable");
         }
-        if (KaevoPlaybackSourcePolicy.IsDiscImage(source))
+        // Audio-offset playback uses a separate file-input encoder, not Jellyfin HLS.
+        // Keep rejecting that combination rather than silently clearing an offset.
+        if (KaevoPlaybackSourcePolicy.IsDiscImage(source)
+            && (audioOffsetMilliseconds is not null || !KaevoPlaybackSourcePolicy.SupportsDiscImageHls(source)))
         {
             throw new InvalidOperationException("playbackDiscImageUnsupported");
         }
@@ -3258,7 +3261,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 async (path, token) =>
                 {
                     using var localRequest = new HttpRequestMessage(HttpMethod.Get, BuildLocalUri(configuration, path, null));
-                    localRequest.Headers.Add("X-Emby-Token", secrets.JellyfinApiKey);
+                    ApplyJellyfinAuthentication(localRequest, secrets.JellyfinApiKey);
                     using var response = await _originHttp.SendAsync(localRequest, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
                     originCapture?.Mark(PlaybackDiagnosticStep.UpstreamHeaders,
                         path == originScope.MasterPath ? PlaybackDiagnosticResource.OriginMaster : PlaybackDiagnosticResource.OriginMedia,
@@ -3270,7 +3273,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 }, async (path, token) =>
                 {
                     using var localRequest = new HttpRequestMessage(HttpMethod.Get, BuildLocalUri(configuration, path, null));
-                    localRequest.Headers.Add("X-Emby-Token", secrets.JellyfinApiKey);
+                    ApplyJellyfinAuthentication(localRequest, secrets.JellyfinApiKey);
                     localRequest.Headers.Range = new RangeHeaderValue(0, 1);
                     using var response = await _originHttp.SendAsync(localRequest, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
                     originCapture?.Mark(PlaybackDiagnosticStep.UpstreamHeaders, PlaybackDiagnosticResource.OriginSegment, (int)response.StatusCode);
@@ -3532,7 +3535,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             };
             var uri = BuildLocalUri(configuration, $"/Items/{itemId}/Images/{imageType}", parameters);
             using var message = new HttpRequestMessage(HttpMethod.Get, uri);
-            message.Headers.Add("X-Emby-Token", secrets.JellyfinApiKey);
+            ApplyJellyfinAuthentication(message, secrets.JellyfinApiKey);
             message.Headers.Accept.ParseAdd("image/jpeg,image/png,image/webp");
             using var response = await _jellyfin.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
@@ -3870,6 +3873,18 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         return ($"/Users/{userId}/Items", query);
     }
 
+    /// Jellyfin 12 requires the MediaBrowser authorization scheme. Keep the
+    /// existing server-issued API key and attach it only to local provider HTTP
+    /// requests, after the same profile/item/grant checks used before.
+    internal static void ApplyJellyfinAuthentication(HttpRequestMessage request, string apiKey)
+    {
+        if (string.IsNullOrWhiteSpace(apiKey)
+            || apiKey.Any(c => char.IsControl(c) || char.IsWhiteSpace(c) || c is '"' or '\\'))
+            throw new InvalidOperationException("jellyfinApiKeyInvalid");
+        request.Headers.Authorization = new AuthenticationHeaderValue("MediaBrowser",
+            $"Client=\"Kaevo\", Device=\"Kaevo Jellyfin Plugin\", DeviceId=\"kaevo-plugin\", Version=\"{PluginVersion}\", Token=\"{apiKey}\"");
+    }
+
     private async Task<CommandResult> SendLocalAsync(
         PluginConfiguration configuration,
         KaevoConnectorSecrets secrets,
@@ -3881,7 +3896,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         var uri = BuildLocalUri(configuration, path, query);
         using var message = new HttpRequestMessage(method, uri);
-        message.Headers.Add("X-Emby-Token", secrets.JellyfinApiKey);
+        ApplyJellyfinAuthentication(message, secrets.JellyfinApiKey);
         message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         if (body is not null)
         {
@@ -4124,7 +4139,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             }
 
             using var local = new HttpRequestMessage(resolved.Method, BuildLocalUri(configuration, resolved.PathAndQuery, null));
-            local.Headers.Add("X-Emby-Token", secrets.JellyfinApiKey);
+            ApplyJellyfinAuthentication(local, secrets.JellyfinApiKey);
             if (!string.IsNullOrWhiteSpace(resolved.RangeHeader))
             {
                 local.Headers.TryAddWithoutValidation("Range", resolved.RangeHeader);
