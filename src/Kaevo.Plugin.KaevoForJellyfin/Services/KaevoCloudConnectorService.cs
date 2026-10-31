@@ -85,6 +85,10 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private readonly KaevoSeerrIdentityProvisioningService _seerrIdentityProvisioning;
     private volatile bool _pairingV3Active;
     private readonly KaevoJellyfinCredentialRecovery _credentialRecovery = new();
+    private readonly KaevoJellyfinSessionCredential _sessionCredential = new();
+    private string JellyfinKey(PluginConfiguration configuration, KaevoConnectorSecrets secrets)
+        => _sessionCredential.Read(configuration, secrets,
+            !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KAEVO_JELLYFIN_API_KEY")));
     private readonly HttpClient _jellyfin = new() { Timeout = TimeSpan.FromSeconds(45) };
     private readonly PlaybackDiagnosticCapture _playbackDiagnostics = new();
     private readonly KaevoOriginStart _originStarts = new();
@@ -3262,7 +3266,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 async (path, token) =>
                 {
                     using var localRequest = new HttpRequestMessage(HttpMethod.Get, BuildLocalUri(configuration, path, null));
-                    ApplyJellyfinAuthentication(localRequest, secrets.JellyfinApiKey);
+                    ApplyJellyfinAuthentication(localRequest, JellyfinKey(configuration, secrets));
                     using var response = await _originHttp.SendAsync(localRequest, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
                     originCapture?.Mark(PlaybackDiagnosticStep.UpstreamHeaders,
                         path == originScope.MasterPath ? PlaybackDiagnosticResource.OriginMaster : PlaybackDiagnosticResource.OriginMedia,
@@ -3274,7 +3278,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 }, async (path, token) =>
                 {
                     using var localRequest = new HttpRequestMessage(HttpMethod.Get, BuildLocalUri(configuration, path, null));
-                    ApplyJellyfinAuthentication(localRequest, secrets.JellyfinApiKey);
+                    ApplyJellyfinAuthentication(localRequest, JellyfinKey(configuration, secrets));
                     localRequest.Headers.Range = new RangeHeaderValue(0, 1);
                     using var response = await _originHttp.SendAsync(localRequest, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
                     originCapture?.Mark(PlaybackDiagnosticStep.UpstreamHeaders, PlaybackDiagnosticResource.OriginSegment, (int)response.StatusCode);
@@ -3536,7 +3540,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             };
             var uri = BuildLocalUri(configuration, $"/Items/{itemId}/Images/{imageType}", parameters);
             using var message = new HttpRequestMessage(HttpMethod.Get, uri);
-            ApplyJellyfinAuthentication(message, secrets.JellyfinApiKey);
+            ApplyJellyfinAuthentication(message, JellyfinKey(configuration, secrets));
             message.Headers.Accept.ParseAdd("image/jpeg,image/png,image/webp");
             using var response = await _jellyfin.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
@@ -3898,7 +3902,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     {
         var uri = BuildLocalUri(configuration, path, query);
         using var message = new HttpRequestMessage(method, uri);
-        ApplyJellyfinAuthentication(message, secrets.JellyfinApiKey);
+        var attemptedKey = JellyfinKey(configuration, secrets);
+        ApplyJellyfinAuthentication(message, attemptedKey);
         message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         if (body is not null)
         {
@@ -3922,8 +3927,9 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 {
                     var root = new Uri(configuration.LocalJellyfinBaseUrl.TrimEnd('/') + "/");
                     var configuredUser = configuration.JellyfinUserId;
+                    var credentialScope = KaevoJellyfinSessionCredential.Scope.From(configuration);
                     var replacement = await _credentialRecovery.RecoverAsync(root, connector.JellyfinServerId,
-                        secrets.JellyfinApiKey, !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KAEVO_JELLYFIN_API_KEY")),
+                        attemptedKey, !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KAEVO_JELLYFIN_API_KEY")),
                         _jellyfinApiKeyProvisioner.FindExistingAsync,
                         async (key, token) =>
                         {
@@ -3933,12 +3939,15 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                                 || new Uri(currentConfiguration.LocalJellyfinBaseUrl.TrimEnd('/') + "/") != root
                                 || currentConfiguration.ConnectorId != connector.ConnectorId
                                 || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KAEVO_JELLYFIN_API_KEY"))) return false;
-                            return await _secretStore.ReplaceRejectedJellyfinKeyAsync(secrets, key, token).ConfigureAwait(false);
+                            var saved = await _secretStore.ReplaceRejectedJellyfinKeyAsync(
+                                secrets with { JellyfinApiKey = attemptedKey }, key, token).ConfigureAwait(false);
+                            if (saved) _sessionCredential.PublishSaved(credentialScope, secrets, key);
+                            return saved;
                         }, cancellationToken).ConfigureAwait(false);
                     if (replacement is not null)
                     {
                         _logger.LogInformation("Kaevo recovered rejected Jellyfin credential using the existing plugin-owned key on the verified paired server");
-                        return await SendLocalAsync(configuration, secrets with { JellyfinApiKey = replacement },
+                        return await SendLocalAsync(configuration, secrets,
                             method, path, query, body, cancellationToken, allowCredentialRecovery: false).ConfigureAwait(false);
                     }
                 }
@@ -4170,7 +4179,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             }
 
             using var local = new HttpRequestMessage(resolved.Method, BuildLocalUri(configuration, resolved.PathAndQuery, null));
-            ApplyJellyfinAuthentication(local, secrets.JellyfinApiKey);
+            ApplyJellyfinAuthentication(local, JellyfinKey(configuration, secrets));
             if (!string.IsNullOrWhiteSpace(resolved.RangeHeader))
             {
                 local.Headers.TryAddWithoutValidation("Range", resolved.RangeHeader);
