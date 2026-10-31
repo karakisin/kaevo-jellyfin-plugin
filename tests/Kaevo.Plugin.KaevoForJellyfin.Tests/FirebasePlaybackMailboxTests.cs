@@ -26,7 +26,7 @@ public sealed class FirebasePlaybackMailboxTests
         ["request_ids"]=new Value{ArrayValue=new ArrayValue{Values={new Value{StringValue="r1"}}}},
         ["playback_commands"]=new Value{MapValue=new MapValue{Fields={ ["r1"]=new Value{StringValue=JsonSerializer.Serialize(envelope??Envelope())} }}} } };
     private static FirebaseControlAdmission Admission(string? epoch=null) => new()
-    { Channel=Channel,Epoch=epoch??Epoch,PushUid="connector-push-"+new string('c',43),CustomToken="synthetic",ExpiresAt=DateTimeOffset.UtcNow.AddSeconds(60) };
+    { Channel=Channel,Epoch=epoch??Epoch,PushUid="connector-push-"+new string('c',43),CustomToken="synthetic",IssuedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(60) };
 
     [Fact] public void ServerProjectionPreservesExactProfileAndResume()
     {

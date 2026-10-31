@@ -34,10 +34,11 @@ public sealed partial class KaevoCloudConnectorService
         var mailbox = new FirebasePlaybackMailbox(client, _pairingV3);
         await RunFirebaseControlSupervisorCoreAsync(configuration, secrets,
             FirebaseControlAdmission.Parse,
-            (admission, token) => FirebaseControlTokenExchange.ExchangeAsync(exchange, firebaseApiKey, admission, token),
+            (admission, token) => FirebaseControlTokenExchange.ExchangeAsync(exchange, firebaseApiKey, admission, token,
+                stage => _logger.LogWarning("Kaevo Firebase control token exchange failed stage={Stage}", stage)),
             (admission, idToken, token) => FirebaseFirestoreControlListener.ReadAsync(client,
                 FirebaseFirestoreControlListener.DevelopmentProject, admission.Channel, admission.Epoch,
-                idToken, admission.ExpiresAt, token, document => mailbox.Accept(document, admission, idToken),
+                idToken, admission.ListenerExpiry(), token, document => mailbox.Accept(document, admission, idToken),
                 () => _logger.LogInformation("Kaevo Firebase control exact-channel fallback started")),
             cancellationToken, mailbox).ConfigureAwait(false);
     }
@@ -62,17 +63,30 @@ public sealed partial class KaevoCloudConnectorService
         {
             currentToken = string.Empty;
             currentAdmission = null;
-            var body = await SendFirebaseControlAsync(configuration, "control-ticket", new
+            var stage = "ticket_request";
+            try
             {
-                connector_id = configuration.ConnectorId,
-                connector_control_protocol = ConnectorControlProtocolVersion,
-                connector_control_transport = "firestore-signals-v1",
-            }, token).ConfigureAwait(false);
-            var admission = parseAdmission(body);
-            KaevoFirebaseRuntime.RequireAdmission(admission);
-            currentToken = await exchangeToken(admission, token).ConfigureAwait(false);
-            currentAdmission = admission;
-            return admission;
+                var body = await SendFirebaseControlAsync(configuration, "control-ticket", new
+                {
+                    connector_id = configuration.ConnectorId,
+                    connector_control_protocol = ConnectorControlProtocolVersion,
+                    connector_control_transport = "firestore-signals-v1",
+                }, token).ConfigureAwait(false);
+                stage = "ticket_validation";
+                var admission = parseAdmission(body);
+                stage = "activation_validation";
+                KaevoFirebaseRuntime.RequireAdmission(admission);
+                stage = "token_exchange";
+                currentToken = await exchangeToken(admission, token).ConfigureAwait(false);
+                currentAdmission = admission;
+                return admission;
+            }
+            catch (Exception)
+            {
+                token.ThrowIfCancellationRequested();
+                _logger.LogWarning("Kaevo Firebase control admission failed stage={Stage}", stage);
+                throw;
+            }
         }, (admission, token) => listen(admission, currentToken, token), async (admission, token) =>
         {
             var body = await SendFirebaseControlAsync(configuration, "control-recovery", new

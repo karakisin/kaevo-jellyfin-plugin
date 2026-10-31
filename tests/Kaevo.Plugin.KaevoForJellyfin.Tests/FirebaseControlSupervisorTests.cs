@@ -18,7 +18,7 @@ public sealed class FirebaseControlSupervisorTests
     {
         Channel = new string(value, 43), Epoch = new string(value, 32),
         CustomToken = "synthetic.custom.token", PushUid = "connector-push-" + new string('z', 43),
-        ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(290),
+        IssuedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(290),
     };
     private static async IAsyncEnumerable<string> Empty(FirebaseControlAdmission admission,
         [EnumeratorCancellation] CancellationToken token)
@@ -105,7 +105,7 @@ public sealed class FirebaseControlSupervisorTests
             {
                 Channel = new string('a', 43), Epoch = new string('a', 32),
                 CustomToken = "synthetic.custom.token", PushUid = "connector-push-" + new string('z', 43),
-                ExpiresAt = DateTimeOffset.UtcNow.AddMilliseconds(200),
+                IssuedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddMilliseconds(200),
             });
         }, Listen, (_, _) => { recoveries++; return Task.FromResult(new FirebaseControlRecovery([], false)); },
             events.Add, stop.Token, clock, (duration, _) =>

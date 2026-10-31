@@ -11,7 +11,7 @@ public class FirebaseRelayDemandAdmissionTests
     private static FirebaseControlAdmission Admission => new()
     {
         Channel = new string('a', 43), Epoch = new string('b', 32),
-        CustomToken = "not-used", PushUid = "not-used", ExpiresAt = Now.AddMinutes(5),
+        CustomToken = "not-used", PushUid = "not-used", IssuedAt = Now, ExpiresAt = Now.AddMinutes(5),
     };
     private static Dictionary<string, object> Body => new()
     {
@@ -97,7 +97,7 @@ public class FirebaseRelayDemandAdmissionTests
     private static FirebaseControlAdmission CurrentAdmission => new()
     {
         Channel = Admission.Channel, Epoch = Admission.Epoch, CustomToken = "not-used", PushUid = "not-used",
-        ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(290),
+        IssuedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(290),
     };
     [Fact]
     public void RecoveryReturnsOnlyHintsAndRedactsItsDescription()

@@ -43,10 +43,10 @@ public sealed class FirebaseRuntimeSelectionTests
     {
         Assert.Throws<InvalidOperationException>(() => KaevoFirebaseRuntime.RequireAdmission(new FirebaseControlAdmission
         { Channel = new string('a', 43), Epoch = new string('b', 32), CustomToken = "synthetic", PushUid = "synthetic",
-          ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(-1), ActivationAllowed = true }));
+          IssuedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(-1), ActivationAllowed = true }));
     }
 
     private static FirebaseControlAdmission Admission(bool active) => new()
     { Channel = new string('a', 43), Epoch = new string('b', 32), CustomToken = "synthetic", PushUid = "synthetic",
-      ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(120), ActivationAllowed = active };
+      IssuedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(120), ActivationAllowed = active };
 }
