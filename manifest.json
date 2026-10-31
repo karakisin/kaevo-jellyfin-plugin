@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.85.0",
+        "changelog": "Fixes intermittent Cloud connection admission failures caused by small server clock differences. Preserves ticket expiry, the existing 30-second clock tolerance, exact identity/channel checks and listener limits. Adds safe failure-stage diagnostics. Original media, design and playback settings remain unchanged.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-10-31T06:33:40Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.85/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "5ae06ace40d7cf24e536b90906097cbb"
+      },
+      {
         "version": "0.3.84.0",
         "changelog": "Recovers stalled Cloud notification delivery using only the authorized connector channel. Repairs a rejected Jellyfin credential with an existing plugin-owned key only after verifying the same paired server. Preserves explicit keys, revoked-key decisions, account/profile checks, original media, design and playback settings.",
         "targetAbi": "10.11.0.0",
