@@ -45,6 +45,24 @@ public sealed class JellyfinApiKeyProvisionerTests
         Assert.Equal("jellyfinApiKeyProvisioningFailed", error.Message);
     }
 
+    [Fact]
+    public async Task RecoveryDoesNotCreateRevokedKeyOrUseUnrelatedKey()
+    {
+        var authentication = new FakeAuthenticationManager(new AuthenticationInfo { AppName = "other-plugin", AccessToken = "unrelated" });
+        var provisioner = new KaevoJellyfinApiKeyProvisioner(authentication);
+        Assert.Equal("", await provisioner.FindExistingAsync(default));
+        Assert.Equal(0, authentication.CreateCount);
+    }
+
+    [Fact]
+    public async Task RecoveryFindsOnlyExistingDedicatedKey()
+    {
+        var authentication = new FakeAuthenticationManager(new AuthenticationInfo {
+            AppName = KaevoJellyfinApiKeyProvisioner.ApiKeyName, AccessToken = "owned" });
+        Assert.Equal("owned", await new KaevoJellyfinApiKeyProvisioner(authentication).FindExistingAsync(default));
+        Assert.Equal(0, authentication.CreateCount);
+    }
+
     private sealed class FakeAuthenticationManager : IAuthenticationManager
     {
         internal FakeAuthenticationManager(params AuthenticationInfo[] keys)

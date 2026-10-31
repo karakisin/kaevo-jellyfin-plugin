@@ -37,7 +37,8 @@ public sealed partial class KaevoCloudConnectorService
             (admission, token) => FirebaseControlTokenExchange.ExchangeAsync(exchange, firebaseApiKey, admission, token),
             (admission, idToken, token) => FirebaseFirestoreControlListener.ReadAsync(client,
                 FirebaseFirestoreControlListener.DevelopmentProject, admission.Channel, admission.Epoch,
-                idToken, admission.ExpiresAt, token, document => mailbox.Accept(document, admission, idToken)),
+                idToken, admission.ExpiresAt, token, document => mailbox.Accept(document, admission, idToken),
+                () => _logger.LogInformation("Kaevo Firebase control exact-channel fallback started")),
             cancellationToken, mailbox).ConfigureAwait(false);
     }
 

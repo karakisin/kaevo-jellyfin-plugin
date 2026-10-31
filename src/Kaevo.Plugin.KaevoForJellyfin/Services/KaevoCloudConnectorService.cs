@@ -84,6 +84,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private readonly KaevoPairingV3Service _pairingV3;
     private readonly KaevoSeerrIdentityProvisioningService _seerrIdentityProvisioning;
     private volatile bool _pairingV3Active;
+    private readonly KaevoJellyfinCredentialRecovery _credentialRecovery = new();
     private readonly HttpClient _jellyfin = new() { Timeout = TimeSpan.FromSeconds(45) };
     private readonly PlaybackDiagnosticCapture _playbackDiagnostics = new();
     private readonly KaevoOriginStart _originStarts = new();
@@ -3892,7 +3893,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         string path,
         IReadOnlyDictionary<string, JsonElement>? query,
         object? body,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowCredentialRecovery = true)
     {
         var uri = BuildLocalUri(configuration, path, query);
         using var message = new HttpRequestMessage(method, uri);
@@ -3912,6 +3914,35 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         diagnostic?.Mark(PlaybackDiagnosticStep.UpstreamBody, resource);
         if (!response.IsSuccessStatusCode)
         {
+            if (allowCredentialRecovery && method == HttpMethod.Get && body is null
+                && response.StatusCode == System.Net.HttpStatusCode.Unauthorized && _pairingV3Active)
+            {
+                var connector = await _pairingV3.GetActiveConnectorAsync(cancellationToken).ConfigureAwait(false);
+                if (connector is not null && connector.ConnectorId == configuration.ConnectorId)
+                {
+                    var root = new Uri(configuration.LocalJellyfinBaseUrl.TrimEnd('/') + "/");
+                    var configuredUser = configuration.JellyfinUserId;
+                    var replacement = await _credentialRecovery.RecoverAsync(root, connector.JellyfinServerId,
+                        secrets.JellyfinApiKey, !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KAEVO_JELLYFIN_API_KEY")),
+                        _jellyfinApiKeyProvisioner.FindExistingAsync,
+                        async (key, token) =>
+                        {
+                            var active = await _pairingV3.GetActiveConnectorAsync(token).ConfigureAwait(false);
+                            var currentConfiguration = KaevoPlugin.Instance?.Configuration ?? configuration;
+                            if (active != connector || currentConfiguration.JellyfinUserId != configuredUser
+                                || new Uri(currentConfiguration.LocalJellyfinBaseUrl.TrimEnd('/') + "/") != root
+                                || currentConfiguration.ConnectorId != connector.ConnectorId
+                                || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KAEVO_JELLYFIN_API_KEY"))) return false;
+                            return await _secretStore.ReplaceRejectedJellyfinKeyAsync(secrets, key, token).ConfigureAwait(false);
+                        }, cancellationToken).ConfigureAwait(false);
+                    if (replacement is not null)
+                    {
+                        _logger.LogInformation("Kaevo recovered rejected Jellyfin credential using the existing plugin-owned key on the verified paired server");
+                        return await SendLocalAsync(configuration, secrets with { JellyfinApiKey = replacement },
+                            method, path, query, body, cancellationToken, allowCredentialRecovery: false).ConfigureAwait(false);
+                    }
+                }
+            }
             throw new InvalidOperationException($"jellyfinHttp{(int)response.StatusCode}");
         }
 

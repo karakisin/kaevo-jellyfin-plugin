@@ -37,6 +37,14 @@ public sealed class KaevoJellyfinApiKeyProvisioner
         }
     }
 
+    // Recovery must never recreate a key an administrator revoked.
+    internal async Task<string> FindExistingAsync(CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { return SelectExisting(await _authenticationManager.GetApiKeys().ConfigureAwait(false)); }
+        finally { _gate.Release(); }
+    }
+
     internal static string SelectExisting(IReadOnlyList<AuthenticationInfo> apiKeys)
         => apiKeys
             .Where(key => string.Equals(key.AppName, ApiKeyName, StringComparison.Ordinal)

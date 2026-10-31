@@ -87,6 +87,42 @@ public sealed class KaevoSecretStore
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            await WriteLockedAsync(secrets, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    internal KaevoSecretStore(string path, ILogger<KaevoSecretStore> logger)
+    {
+        _path = path;
+        _logger = logger;
+    }
+
+    internal async Task<bool> ReplaceRejectedJellyfinKeyAsync(KaevoConnectorSecrets expected,
+        string replacement, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (string.IsNullOrWhiteSpace(replacement) || !File.Exists(_path)) return false;
+            KaevoConnectorSecrets? current;
+            await using (var stream = File.OpenRead(_path))
+                current = await JsonSerializer.DeserializeAsync<KaevoConnectorSecrets>(stream,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (current is null || current.JellyfinApiKey != expected.JellyfinApiKey
+                || current.ConnectorToken != expected.ConnectorToken || current.PlaybackGrantKey != expected.PlaybackGrantKey)
+                return false;
+            await WriteLockedAsync(current with { JellyfinApiKey = replacement }, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        finally { _gate.Release(); }
+    }
+
+    private async Task WriteLockedAsync(KaevoConnectorSecrets secrets, CancellationToken cancellationToken)
+    {
             var temporaryPath = _path + ".tmp";
             var options = new FileStreamOptions
             {
@@ -112,11 +148,6 @@ public sealed class KaevoSecretStore
             {
                 File.SetUnixFileMode(_path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
             }
-        }
-        finally
-        {
-            _gate.Release();
-        }
     }
 
     public void Delete()

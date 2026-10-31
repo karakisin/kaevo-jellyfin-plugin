@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Diagnostics;
 using Google.Api.Gax.Grpc;
 using Google.Cloud.Firestore.V1;
 using Grpc.Core;
@@ -19,9 +20,26 @@ internal static class FirebaseFirestoreControlListener
         GrpcChannelOptions = GrpcChannelOptions.Empty.WithMaxReceiveMessageSize(131072),
     }.Build();
 
-    internal static async IAsyncEnumerable<string> ReadAsync(
+    internal static IAsyncEnumerable<string> ReadAsync(
         FirestoreClient client, string project, string channel, string epoch,
         string idToken, DateTimeOffset leaseExpiry,
+        CancellationToken cancellationToken = default, Action<Document>? acceptSnapshot = null, Action? beganFallback = null)
+    {
+        var path = $"projects/{project}/databases/(default)/documents/connector_signals/{channel}";
+        var state = new FirebaseFirestoreSignalState(path, epoch);
+        var activity = Stopwatch.GetTimestamp();
+        return FirebaseControlReadFallback.ReadAsync(
+            token => ReadLiveAsync(client, project, channel, epoch, idToken, leaseExpiry, state,
+                () => Interlocked.Exchange(ref activity, Stopwatch.GetTimestamp()), token, acceptSnapshot),
+            token => FirebaseControlReadFallback.ReadDocumentAsync(project, channel, epoch, idToken,
+                leaseExpiry, state, acceptSnapshot, token),
+            () => Stopwatch.GetElapsedTime(Interlocked.Read(ref activity)),
+            leaseExpiry, cancellationToken, beganFallback: beganFallback);
+    }
+
+    private static async IAsyncEnumerable<string> ReadLiveAsync(
+        FirestoreClient client, string project, string channel, string epoch,
+        string idToken, DateTimeOffset leaseExpiry, FirebaseFirestoreSignalState state, Action activity,
         [EnumeratorCancellation] CancellationToken cancellationToken = default, Action<Document>? acceptSnapshot = null)
     {
         var remaining = leaseExpiry - DateTimeOffset.UtcNow;
@@ -57,7 +75,6 @@ internal static class FirebaseFirestoreControlListener
             throw Failure("firebaseControlTransportFailed");
         }
 
-        var state = new FirebaseFirestoreSignalState(path, epoch);
         var responses = stream.GetResponseStream();
         Task<bool>? pendingRead = null;
         try
@@ -82,6 +99,7 @@ internal static class FirebaseFirestoreControlListener
                 if (deadline.IsCancellationRequested || DateTimeOffset.UtcNow >= leaseExpiry)
                     throw Failure("firebaseControlLeaseExpired");
                 if (!next) throw Failure("firebaseControlDisconnected");
+                activity();
                 var response = responses.Current;
                 if (response.TargetChange is { } target)
                 {
