@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.84.0",
+        "changelog": "Recovers stalled Cloud notification delivery using only the authorized connector channel. Repairs a rejected Jellyfin credential with an existing plugin-owned key only after verifying the same paired server. Preserves explicit keys, revoked-key decisions, account/profile checks, original media, design and playback settings.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-10-31T05:17:00Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.84/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "40abde4518ec96f8bebf9b701dfcd048"
+      },
+      {
         "version": "0.3.83.0",
         "changelog": "Adds ISO playback through Jellyfin-negotiated HLS without a permanent converted copy. Preserves original media, existing quality settings and exact profile/item authorization. Includes retained Jellyfin 12 authentication and resume-start fixes. Unsupported images and ISO with manual audio-sync offsets remain blocked. Kaevo device playback verification is pending.",
         "targetAbi": "10.11.0.0",
