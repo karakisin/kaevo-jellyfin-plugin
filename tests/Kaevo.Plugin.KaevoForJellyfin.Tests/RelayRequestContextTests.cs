@@ -287,7 +287,7 @@ public sealed class RelayRequestContextTests
         Assert.Equal(20, request.Query["limit"].GetInt32());
         Assert.Equal("Video", request.Query["mediaTypes"].GetString());
         Assert.True(request.Query["enableUserData"].GetBoolean());
-        Assert.True(request.Query["excludeActiveSessions"].GetBoolean());
+        Assert.False(request.Query["excludeActiveSessions"].GetBoolean());
         Assert.Equal(KaevoCloudConnectorService.MainSnapshotItemFields, request.Query["fields"].GetString());
         Assert.DoesNotContain("People", request.Query["fields"].GetString());
         Assert.DoesNotContain("MediaSources", request.Query["fields"].GetString());

@@ -3853,7 +3853,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 ["enableImages"] = JsonSerializer.SerializeToElement(true),
                 ["imageTypeLimit"] = JsonSerializer.SerializeToElement(1),
                 ["enableImageTypes"] = JsonSerializer.SerializeToElement("Primary,Backdrop,Logo"),
-                ["excludeActiveSessions"] = JsonSerializer.SerializeToElement(true)
+                // Another Jellyfin client may still be playing when the user opens Kaevo.
+                ["excludeActiveSessions"] = JsonSerializer.SerializeToElement(false)
             });
         }
 
