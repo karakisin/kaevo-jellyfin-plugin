@@ -34,7 +34,17 @@ internal static class FirebaseFirestoreControlListener
             token => FirebaseControlReadFallback.ReadDocumentAsync(project, channel, epoch, idToken,
                 leaseExpiry, state, acceptSnapshot, token),
             () => Stopwatch.GetElapsedTime(Interlocked.Read(ref activity)),
-            leaseExpiry, cancellationToken, beganFallback: beganFallback);
+            leaseExpiry, cancellationToken, beganFallback: beganFallback,
+            confirmStall: async token =>
+            {
+                Document? snapshot = null;
+                // A separate validator keeps a probe from consuming a live hint.
+                await FirebaseControlReadFallback.ReadDocumentAsync(project, channel, epoch, idToken,
+                    leaseExpiry, new FirebaseFirestoreSignalState(path, epoch),
+                    document => snapshot = document, token).ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                return snapshot is null || state.HasMissedSnapshot(snapshot);
+            });
     }
 
     private static async IAsyncEnumerable<string> ReadLiveAsync(
@@ -158,11 +168,33 @@ internal static class FirebaseFirestoreControlListener
 
 internal sealed class FirebaseFirestoreSignalState(string path, string epoch)
 {
+    private readonly object gate = new();
     private long revision = -1;
     private string[] previous = [];
     private Dictionary<string, string> previousCommands = new(StringComparer.Ordinal);
 
     internal IReadOnlyList<string> Accept(Document document)
+    {
+        lock (gate) return AcceptCore(document);
+    }
+
+    internal bool HasMissedSnapshot(Document document)
+    {
+        var probe = new FirebaseFirestoreSignalState(path, epoch);
+        probe.Accept(document); // Whole-snapshot validation, exact path and epoch.
+        lock (gate)
+        {
+            if (probe.revision == revision
+                && (!previous.SequenceEqual(probe.previous, StringComparer.Ordinal)
+                    || previousCommands.Count != probe.previousCommands.Count
+                    || previousCommands.Any(p => !probe.previousCommands.TryGetValue(p.Key, out var value) || value != p.Value)))
+                throw FirebaseFirestoreControlListener.Failure("firebaseControlSignalInvalid");
+            // The live stream may have advanced while the REST probe was in flight.
+            return probe.revision > revision;
+        }
+    }
+
+    private IReadOnlyList<string> AcceptCore(Document document)
     {
         if (document.Name != path || document.Fields.Count is < 3 or > 4
             || document.Fields.Keys.Any(k => k is not ("epoch" or "revision" or "request_ids" or "playback_commands"))

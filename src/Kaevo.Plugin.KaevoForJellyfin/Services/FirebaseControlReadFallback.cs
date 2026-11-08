@@ -18,7 +18,8 @@ internal static class FirebaseControlReadFallback
         Func<CancellationToken, Task<IReadOnlyList<string>>> read,
         Func<TimeSpan> silence, DateTimeOffset expiry,
         [EnumeratorCancellation] CancellationToken cancellationToken,
-        TimeSpan? stallWindow = null, TimeSpan? pollInterval = null, Action? beganFallback = null)
+        TimeSpan? stallWindow = null, TimeSpan? pollInterval = null, Action? beganFallback = null,
+        Func<CancellationToken, Task<bool>>? confirmStall = null)
     {
         var remaining = expiry - DateTimeOffset.UtcNow;
         if (remaining <= TimeSpan.Zero || remaining > TimeSpan.FromSeconds(300))
@@ -37,11 +38,18 @@ internal static class FirebaseControlReadFallback
                 bool next;
                 pending ??= reader.MoveNextAsync().AsTask();
                 var wait = window - silence();
-                if (wait <= TimeSpan.Zero && !pending.IsCompleted) break;
+                if (wait <= TimeSpan.Zero && !pending.IsCompleted)
+                {
+                    // Silence alone is normal for an unchanged Firestore document.
+                    // Probe only this lease's exact channel, without consuming hints
+                    // or advancing the live reader's revision.
+                    if (confirmStall is null || await confirmStall(lease.Token).ConfigureAwait(false)) break;
+                    wait = window;
+                }
                 try { next = await pending.WaitAsync(wait > TimeSpan.Zero ? wait : TimeSpan.FromMilliseconds(1), lease.Token).ConfigureAwait(false); }
                 catch (TimeoutException)
                 {
-                    if (silence() < window) continue;
+                    if (silence() < window || confirmStall is not null) continue;
                     break;
                 }
                 catch (InvalidOperationException error) when (error.Message is
