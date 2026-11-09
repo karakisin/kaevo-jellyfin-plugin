@@ -574,6 +574,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         // instance. This keeps the signed heartbeat and destructive-command
         // policy aligned without requiring a Jellyfin restart.
         var runtimeConfiguration = RuntimeConfiguration(configuration);
+        var providerSecrets = await ReadHeartbeatProviderSecretsAsync(_secretStore, secrets, cancellationToken)
+            .ConfigureAwait(false);
         var response = await SendCloudAsync<ConnectorRegistrationResponse>(
             runtimeConfiguration,
             secrets,
@@ -581,10 +583,30 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             $"/v1/home-connectors/{Uri.EscapeDataString(runtimeConfiguration.ConnectorId)}/heartbeat",
             HeartbeatBody(runtimeConfiguration.ConnectorId,
                 ProfileIdForCloud(runtimeConfiguration.ProfileId, _pairingV3Active),
-                BuildProviderStatus(secrets, runtimeConfiguration, includeOptimizer: true)),
+                BuildProviderStatus(providerSecrets, runtimeConfiguration, includeOptimizer: true)),
             cancellationToken).ConfigureAwait(false);
         ApplyPlaybackConfiguration(runtimeConfiguration, response.Playback);
         _state.Set("online", heartbeat: true);
+    }
+
+    internal static async Task<KaevoConnectorSecrets> ReadHeartbeatProviderSecretsAsync(
+        KaevoSecretStore store, KaevoConnectorSecrets session, CancellationToken cancellationToken)
+    {
+        var saved = await store.ReadAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        // Never advertise a different pairing's provider configuration on this
+        // session. A missing/unreadable store must not revive stale capabilities.
+        if (saved is null || saved.ConnectorToken != session.ConnectorToken
+            || saved.PlaybackGrantKey != session.PlaybackGrantKey)
+            throw new InvalidOperationException("connectorProviderConfigurationUnavailable");
+        // Refresh only the provider projection. The active transport continues
+        // using its existing credentials and original identity/channel lifetime.
+        return session with
+        {
+            Providers = saved.Providers,
+            SonarrBaseUrl = saved.SonarrBaseUrl,
+            SonarrApiKey = saved.SonarrApiKey
+        };
     }
 
     // Firebase starts with a heartbeat rather than AWS registration. Publish
