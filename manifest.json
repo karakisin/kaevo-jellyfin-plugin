@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.89.0",
+        "changelog": "Refreshes saved provider availability on the next Cloud heartbeat without restarting Jellyfin. Preserves exact pairing, authorization, expiry and playback settings.",
+        "targetAbi": "10.11.0.0",
+        "timestamp": "2026-11-09T00:53:22Z",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.89/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "f146ab0265e303aba0a5f60a546b125e"
+      },
+      {
         "version": "0.3.88.0",
         "changelog": "Keeps healthy quiet Cloud notification connections live instead of falling back to polling after an idle timeout. Preserves fallback recovery, ticket expiry and exact connector/profile authorization.",
         "targetAbi": "10.11.0.0",
