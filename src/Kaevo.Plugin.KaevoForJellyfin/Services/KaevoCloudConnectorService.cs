@@ -24,7 +24,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private static string PluginVersion => KaevoPlugin.BuildVersion;
     internal static string[] ConnectorCapabilities => new[]
                 {
-                    "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1", "download_controls_v1",
+                    "remote_metadata_v1", "remote_artwork_v1", "remote_commands_v1", "download_controls_v1", "seerr_request_removal_v1",
                     "playback_tunnel_v1", "direct_play", "hls_remux", "hls_transcode",
                     "bounded_media_scan_v1", "optimizer_plan_v1", "sonarr_episode_management_v1",
                     "local_provider_configuration_v1", "connector_control_push_v2", "profile_artwork_v1",
@@ -1699,6 +1699,14 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 requestBody,
                 cancellationToken).ConfigureAwait(false);
             return CompleteCommand(request, operation, created);
+        }
+
+        if (operation == "seerr.remove_request")
+        {
+            var result = await SeerrRequestRemoval.ExecuteAsync(parameters, configuration.ConnectorId,
+                (method, path, token) => SendSeerrJsonAsync(secrets, method, path, null, token),
+                cancellationToken).ConfigureAwait(false);
+            return CompleteCommand(request, operation, result);
         }
 
         if (operation == "seerr.cancel_request")
