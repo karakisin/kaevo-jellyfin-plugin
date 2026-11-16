@@ -121,6 +121,34 @@ public sealed class KaevoSecretStore
         finally { _gate.Release(); }
     }
 
+    internal async Task<KaevoConnectorSecrets> NormalizeVerifiedV3TransportAsync(
+        KaevoConnectorSecrets expected, Func<CancellationToken, Task<bool>> verifySameActivePairing,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!File.Exists(_path)) throw new InvalidOperationException("connectorProviderConfigurationUnavailable");
+            KaevoConnectorSecrets? current;
+            await using (var stream = File.OpenRead(_path))
+                current = await JsonSerializer.DeserializeAsync<KaevoConnectorSecrets>(stream,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (current is null || current.ConnectorToken != expected.ConnectorToken
+                || current.PlaybackGrantKey != expected.PlaybackGrantKey
+                || current.JellyfinApiKey != expected.JellyfinApiKey
+                || !await verifySameActivePairing(cancellationToken).ConfigureAwait(false))
+                throw new InvalidOperationException("connectorProviderConfigurationUnavailable");
+            cancellationToken.ThrowIfCancellationRequested();
+            // V3 authority stays in the verified pairing store. Retire only the
+            // unused legacy transport fields; preserve fresh provider settings.
+            var normalized = current with { ConnectorToken = string.Empty, PlaybackGrantKey = string.Empty };
+            if (current.ConnectorToken != string.Empty || current.PlaybackGrantKey != string.Empty)
+                await WriteLockedAsync(normalized, cancellationToken).ConfigureAwait(false);
+            return normalized;
+        }
+        finally { _gate.Release(); }
+    }
+
     private async Task WriteLockedAsync(KaevoConnectorSecrets secrets, CancellationToken cancellationToken)
     {
             var temporaryPath = _path + ".tmp";

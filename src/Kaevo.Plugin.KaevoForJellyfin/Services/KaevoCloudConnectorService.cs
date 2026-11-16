@@ -292,6 +292,13 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         if (!string.IsNullOrWhiteSpace(pairingV3ConnectorId))
         {
             _pairingV3Active = true;
+            if (existing is not null)
+            {
+                existing = await _secretStore.NormalizeVerifiedV3TransportAsync(existing,
+                    async token => string.Equals(pairingV3ConnectorId,
+                        await _pairingV3.GetActiveConnectorIdAsync(token).ConfigureAwait(false),
+                        StringComparison.Ordinal), cancellationToken).ConfigureAwait(false);
+            }
             if (string.IsNullOrWhiteSpace(jellyfinCredential))
             {
                 jellyfinCredential = await _jellyfinApiKeyProvisioner.EnsureAsync(cancellationToken).ConfigureAwait(false);
