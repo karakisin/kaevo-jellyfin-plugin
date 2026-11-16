@@ -9,6 +9,14 @@
     "overview": "Secure Kaevo Cloud access for Jellyfin",
     "versions": [
       {
+        "version": "0.3.91.0",
+        "changelog": "Repairs connector restart after upgrading an existing V3 pairing with retired legacy transport fields. Preserves exact active pairing checks, provider credentials, media and playback settings. Includes verified owner-only Seerr request removal with the companion Kaevo app update.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/karakisin/kaevo-jellyfin-plugin/releases/download/v0.3.91/Kaevo.Plugin.KaevoForJellyfin.zip",
+        "checksum": "0fcb77dc4a84739851ddef3cad7a172f",
+        "timestamp": "2026-11-16T06:12:00Z"
+      },
+      {
         "version": "0.3.90.0",
         "changelog": "Adds verified owner-only removal of an exact Seerr request through Kaevo Cloud. Confirms removal before reporting success and preserves media files, Arr records and downloader jobs. Requires the companion Kaevo app update.",
         "targetAbi": "10.11.0.0",
