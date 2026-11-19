@@ -30,7 +30,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                     "local_provider_configuration_v1", "connector_control_push_v2", "profile_artwork_v1",
                     "profile_media_access_v1", "profile_media_access_owner_v1", FirebasePlaybackMailbox.Capability,
                     "account_lifecycle_verification_recovery_v1",
-                    "account_lifecycle_deletion_eligibility_v1", FirebaseAccountCleanupRecovery.Capability, "audio_sync_v1", "remote_artwork_batch_v1", "audio_sync_preferences_v1"
+                    "account_lifecycle_deletion_eligibility_v1", FirebaseAccountCleanupRecovery.Capability, "audio_sync_v1", "remote_artwork_batch_v1", "audio_sync_preferences_v1", "per_video_trickplay_v1"
                 };
     internal const string ExactArrQueueReadPath = "/api/v3/queue?page=1&pageSize=1000";
     private const int RemoteArtworkMaximumBytes = 3_500_000;
@@ -76,6 +76,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
     private readonly ITranscodeManager _transcodeManager;
     private readonly KaevoAudioSyncTranscoder? _audioSyncTranscoder;
     private readonly KaevoAudioSyncPreferenceStore? _audioSyncPreferences;
+    private readonly KaevoTrickplayGeneration? _trickplayGeneration;
     private readonly KaevoOptimizerCoordinator _optimizer;
     private readonly ILogger<KaevoCloudConnectorService> _logger;
     private readonly KaevoProviderTransport _providerTransport;
@@ -115,7 +116,8 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         KaevoSeerrIdentityProvisioningService seerrIdentityProvisioning,
         ILogger<KaevoCloudConnectorService> logger,
         KaevoAudioSyncTranscoder? audioSyncTranscoder = null,
-        KaevoAudioSyncPreferenceStore? audioSyncPreferences = null)
+        KaevoAudioSyncPreferenceStore? audioSyncPreferences = null,
+        KaevoTrickplayGeneration? trickplayGeneration = null)
     {
         _secretStore = secretStore;
         _jellyfinApiKeyProvisioner = jellyfinApiKeyProvisioner;
@@ -133,6 +135,7 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
         _logger = logger;
         _audioSyncTranscoder = audioSyncTranscoder;
         _audioSyncPreferences = audioSyncPreferences;
+        _trickplayGeneration = trickplayGeneration;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -926,8 +929,30 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
             throw new InvalidOperationException("remoteMetadataRouteNotAllowed");
         }
 
-        return await SendLocalAsync(configuration, secrets, HttpMethod.Get, request.Path, request.Query, null, cancellationToken)
+        var result = await SendLocalAsync(configuration, secrets, HttpMethod.Get, request.Path, request.Query, null, cancellationToken)
             .ConfigureAwait(false);
+        // Attach only bounded status for the exact item Jellyfin already authorized
+        // and returned. No new route, provider read, identity, or filesystem data.
+        var match = Regex.Match(request.Path, @"^/(?:Users/[a-fA-F0-9]{32}/)?Items/(?<item>[a-fA-F0-9]{32})$", RegexOptions.CultureInvariant);
+        if (!result.Truncated && result.Status == 200 && match.Success && _trickplayGeneration is not null
+            && result.Payload.ValueKind == JsonValueKind.Object && result.Payload.TryGetProperty("Id", out var returnedId)
+            && string.Equals(returnedId.GetString(), match.Groups["item"].Value, StringComparison.OrdinalIgnoreCase)
+            && _libraryManager.GetItemById(Guid.ParseExact(match.Groups["item"].Value, "N")) is MediaBrowser.Controller.Entities.Video)
+        {
+            var job = _trickplayGeneration.Status(match.Groups["item"].Value);
+            result = result with { Payload = WithTrickplayJob(result.Payload, job, configuration.MaximumRemoteResponseBytes) };
+        }
+        return result;
+    }
+
+    internal static JsonElement WithTrickplayJob(JsonElement source, KaevoTrickplayJob job, int maximumBytes)
+    {
+        if (source.ValueKind != JsonValueKind.Object || !source.TryGetProperty("Id", out var item)
+            || item.ValueKind != JsonValueKind.String || !string.Equals(item.GetString(), job.ItemId, StringComparison.OrdinalIgnoreCase)) return source;
+        var payload = JsonNode.Parse(source.GetRawText())!.AsObject();
+        payload["KaevoTrickplayJob"] = JsonSerializer.SerializeToNode(job);
+        var result = JsonSerializer.SerializeToElement(payload);
+        return Encoding.UTF8.GetByteCount(result.GetRawText()) <= maximumBytes ? result : source;
     }
 
     private async Task<CommandResult> ExecuteCommandAsync(
@@ -1559,21 +1584,32 @@ public sealed partial class KaevoCloudConnectorService : BackgroundService
                 mode,
                 replaceImages,
                 regenerateTrickplay);
-            await SendLocalAsync(
-                configuration,
-                secrets,
-                HttpMethod.Post,
-                refreshRequest.Path,
-                refreshRequest.Query,
-                null,
-                cancellationToken).ConfigureAwait(false);
+            JsonElement? trickplayJob = null;
+            if (regenerateTrickplay)
+            {
+                if (replaceImages || mode != "missing") throw new InvalidOperationException("trickplayRefreshModeInvalid");
+                var connector = await _pairingV3.GetActiveConnectorAsync(cancellationToken).ConfigureAwait(false);
+                if (connector is null || connector.ConnectorId != configuration.ConnectorId)
+                    throw new InvalidOperationException("trickplayServerChanged");
+                var generation = await SendLocalAsync(configuration, secrets, HttpMethod.Post,
+                    $"/kaevo/items/{itemId}/trickplay",
+                    new Dictionary<string, JsonElement> { ["serverId"] = JsonSerializer.SerializeToElement(connector.JellyfinServerId) },
+                    null, cancellationToken).ConfigureAwait(false);
+                trickplayJob = generation.Payload;
+            }
+            else
+            {
+                await SendLocalAsync(configuration, secrets, HttpMethod.Post,
+                    refreshRequest.Path, refreshRequest.Query, null, cancellationToken).ConfigureAwait(false);
+            }
             return CompleteCommand(request, operation, new
             {
                 item_id = itemId,
                 queued = true,
                 mode,
                 replace_images = replaceImages,
-                regenerate_trickplay = regenerateTrickplay
+                regenerate_trickplay = regenerateTrickplay,
+                trickplay_job = trickplayJob
             });
         }
 
