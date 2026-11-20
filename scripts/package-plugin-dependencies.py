@@ -115,7 +115,7 @@ def package(publish, directory, output, *, version, timestamp):
     files={k:v for k,v in collect(publish,version).items() if k not in HOST_OWNED}
     date=datetime.datetime.strptime(timestamp,"%Y-%m-%dT%H:%M:%SZ")
     if not 1980<=date.year<=2107:raise ValueError("package_timestamp_invalid")
-    metadata={"category":"General","changelog":"Repairs connector restart after upgrading an existing V3 pairing with retired legacy transport fields. Preserves exact active pairing checks, provider credentials, media and playback settings. Includes verified owner-only Seerr request removal with the companion Kaevo app update.",
+    metadata={"category":"General","changelog":"Adds bounded per-video thumbnail generation for readable videos, DVD and Blu-ray folders, and disc images. Reports generation status and preserves existing previews on failure. Requires the companion Kaevo app update. Original media and playback settings remain unchanged.",
         "description":"Connects Jellyfin securely to the Kaevo app with simple app-guided setup.",
         "guid":"80c77b84-7f2d-4b52-84c7-7dfe68cd95ae","name":"Kaevo","overview":"Secure Kaevo Cloud access for Jellyfin",
         "owner":"Kaevo","targetAbi":"10.11.0.0","timestamp":timestamp,"version":version+".0",
