@@ -1,6 +1,6 @@
 # Per-video trickplay candidate 0.3.92
 
-Status: implemented and isolated-server verified; not published or installed on the personal server.
+Status: implemented, isolated-server verified and published with explicit approval; personal-server installation and live acceptance remain pending.
 
 ## Behavior
 
@@ -24,6 +24,14 @@ Raw local evidence: `/tmp/kaevo-trickplay-20261119` (test logs, integration JSON
 
 ## Remaining gates
 
-Live Cloud command delivery and the iPhone UI have not yet been verified with this new generator. Personal Alvin ISO generation, scrub-preview display, and unchanged playback must be confirmed after approved publication and the owner's manual plugin installation/restart. Do not close the combined Sentry report or claim TestFlight/public release from isolated evidence. Encrypted/unreadable discs and unsupported native encoder inputs remain explicit generation failures.
+Live Cloud command delivery and the iPhone UI have not yet been verified with this new generator. Personal Alvin ISO generation, scrub-preview display, and unchanged playback must be confirmed after the owner's manual plugin installation/restart. Do not close the combined Sentry report or claim TestFlight/public release from isolated evidence. Encrypted/unreadable discs and unsupported native encoder inputs remain explicit generation failures.
 
 Job status is process-local; restart loses the status record. Existing generated native thumbnails persist. This candidate does not add a persistent generation queue.
+
+## Approved publication readback
+
+Published on November 19, 2026 (America/Los_Angeles) as [v0.3.92](https://github.com/karakisin/kaevo-jellyfin-plugin/releases/tag/v0.3.92). Public download and canonical raw catalog were read back successfully. All 171 earlier catalog entries were preserved.
+
+Before publication, stale 0.3.91 release notes and timestamp were corrected in `meta.json`. Every one of the other 23 ZIP members is byte-for-byte identical to the isolated-tested package above. Final public ZIP SHA-256: `c0515517e93dc485a4c46300159fef273bac490c9ada3e4806e28982bf0ed768`; Jellyfin catalog MD5: `b646faef0fd1b6482562de561a83b7a8`.
+
+Release source commit: `aa5adf2`; catalog commit: `869fa27678f514e0f59dba9cd0c7268df5b3fee8`. Public ZIP contains 24 verified files and version 0.3.92.0. Publication does not establish personal installation, app-control availability, or Alvin/Cloud/Mirroring acceptance. No personal server restart or TestFlight submission was performed.
